@@ -12,7 +12,6 @@ from __future__ import annotations
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # --- softmax ops: forward(scores, dim=-1) -> attention weights ---
 
 class ExactSoftmax(nn.Module):

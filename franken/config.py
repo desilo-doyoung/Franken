@@ -80,13 +80,13 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
 
     @classmethod
-    def from_yaml(cls, path: str) -> "Config":
+    def from_yaml(cls, path: str) -> Config:
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
         return cls.from_dict(raw)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "Config":
+    def from_dict(cls, raw: dict[str, Any]) -> Config:
         return cls(
             model=_build(ModelConfig, raw.get("model", {})),
             distill=_build(DistillConfig, raw.get("distill", {})),

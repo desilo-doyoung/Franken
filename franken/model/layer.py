@@ -1,7 +1,9 @@
 from torch import nn
+
 from franken.config import ModelConfig
 from franken.model.attention import BertAttention
 from franken.model.ffn import BertIntermediate, BertOutput
+
 
 class BertLayer(nn.Module):
     def __init__(self, config: ModelConfig):

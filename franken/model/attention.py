@@ -1,8 +1,9 @@
 import torch
-
 from torch import nn
+
 from franken.config import ModelConfig
 from franken.ops import build_softmax
+
 
 class BertSelfAttention(nn.Module):
     def __init__(self, config: ModelConfig):

@@ -1,7 +1,8 @@
 import torch
-
 from torch import nn
+
 from franken.config import ModelConfig
+
 
 class BertEmbeddings(nn.Module):
     def __init__(self, config: ModelConfig):
