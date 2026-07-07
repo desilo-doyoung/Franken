@@ -1,4 +1,5 @@
 __pypackages__/
+__pycache__/
 
 .env
 .venv
