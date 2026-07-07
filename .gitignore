@@ -1,0 +1,13 @@
+__pypackages__/
+
+.env
+.venv
+.vscode/
+.zed/
+
+*.lock
+*.egg-info/
+
+.claude
+AGENT.md
+CLAUDE.md
