@@ -1,4 +1,3 @@
-
 def init_student_from_teacher(student, teacher_state_dict, layer_map):
     new_state = {}
 

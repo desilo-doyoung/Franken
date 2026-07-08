@@ -27,12 +27,14 @@ class BertModel(nn.Module):
         self.pooler = BertPooler(config)
 
     def _extend_mask(self, attention_mask, dtype):
-        mask = attention_mask[:, None, None, :].to(dtype) # (B, 1, 1, S)
+        mask = attention_mask[:, None, None, :].to(dtype)  # (B, 1, 1, S)
         return (1.0 - mask) * torch.finfo(dtype).min
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None):
         emb = self.embeddings(input_ids, token_type_ids)
-        extended_mask = self._extend_mask(attention_mask, emb.dtype) if attention_mask is not None else None
+        extended_mask = (
+            self._extend_mask(attention_mask, emb.dtype) if attention_mask is not None else None
+        )
         last, all_hidden, all_attn = self.encoder(emb, extended_mask)
         pooled = self.pooler(last)
 
@@ -40,7 +42,7 @@ class BertModel(nn.Module):
             last_hidden_state=last,
             pooled_output=pooled,
             all_hidden_states=all_hidden,
-            all_attentions=all_attn
+            all_attentions=all_attn,
         )
 
 
@@ -58,5 +60,5 @@ class BertForClassification(nn.Module):
         return dict(
             logits=logits,
             hidden_states=outputs["all_hidden_states"],
-            attentions=outputs["all_attentions"]
+            attentions=outputs["all_attentions"],
         )

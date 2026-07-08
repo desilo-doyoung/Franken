@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 # --- softmax ops: forward(scores, dim=-1) -> attention weights ---
 
+
 class ExactSoftmax(nn.Module):
     """Standard numerically-stable softmax."""
 
@@ -33,6 +34,7 @@ class ApproxSoftmax(nn.Module):
 
 
 # --- gelu ops: forward(x) -> x ---
+
 
 class ExactGELU(nn.Module):
     """Reference GELU (matches HF BERT)."""

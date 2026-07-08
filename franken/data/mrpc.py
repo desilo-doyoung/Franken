@@ -3,6 +3,7 @@
 MRPC is paraphrase detection over sentence pairs (~3.7k train). Metrics are
 accuracy + F1, per the GLUE convention.
 """
+
 from typing import Any
 
 import datasets
@@ -19,9 +20,11 @@ def load_mrpc(tokenizer: Any, max_seq_len: int = 128) -> dict[str, Any]:
     Returns a dict with ``train`` / ``validation`` tokenized datasets and a
     dynamic-padding collator, ready for a DataLoader.
     """
+
     def tok(batch):
-        return tokenizer(batch["sentence1"], batch["sentence2"],
-                         truncation=True, max_length=max_seq_len)
+        return tokenizer(
+            batch["sentence1"], batch["sentence2"], truncation=True, max_length=max_seq_len
+        )
 
     ds = datasets.load_dataset("nyu-mll/glue", "mrpc")
     ds = ds.map(tok, batched=True, remove_columns=["sentence1", "sentence2", "idx"])
@@ -32,6 +35,7 @@ def load_mrpc(tokenizer: Any, max_seq_len: int = 128) -> dict[str, Any]:
         "validation": ds["validation"],
         "collator": collator,
     }
+
 
 def compute_metrics(predictions: Any, labels: Any) -> dict[str, float]:
     return {

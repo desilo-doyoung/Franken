@@ -6,16 +6,19 @@ from franken.distill.layer_map import resolve_layer_map
 
 
 def masked_mse_loss(student_hidden, teacher_hidden, attention_mask):
-    diff = (student_hidden - teacher_hidden) ** 2 # (B, S, H)
-    mask = attention_mask.unsqueeze(-1).to(diff.dtype) # (B, S, 1)
-    return (diff * mask).sum() / (mask.sum() * student_hidden.size(-1)).clamp_min(1.0) #
+    diff = (student_hidden - teacher_hidden) ** 2  # (B, S, H)
+    mask = attention_mask.unsqueeze(-1).to(diff.dtype)  # (B, S, 1)
+    return (diff * mask).sum() / (mask.sum() * student_hidden.size(-1)).clamp_min(1.0)  #
+
 
 class DistillationLoss(nn.Module):
     def __init__(self, cfg: DistillConfig):
         super().__init__()
         self.cfg = cfg
 
-    def forward(self, student_logits, teacher_logits, labels, student_hidden, teacher_hidden, attention_mask):
+    def forward(
+        self, student_logits, teacher_logits, labels, student_hidden, teacher_hidden, attention_mask
+    ):
         # 1. hard-label loss
         ce = F.cross_entropy(student_logits, labels)
 
@@ -34,7 +37,9 @@ class DistillationLoss(nn.Module):
 
         hidden = 0.0
         for s_block, t_block in enumerate(layer_map):
-            hidden += masked_mse_loss(student_hidden[s_block + 1], teacher_hidden[t_block + 1], attention_mask)
+            hidden += masked_mse_loss(
+                student_hidden[s_block + 1], teacher_hidden[t_block + 1], attention_mask
+            )
         hidden = hidden / len(layer_map)
 
         total = (1 - self.cfg.alpha) * ce + self.cfg.alpha * kl + self.cfg.beta * hidden

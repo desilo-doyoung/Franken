@@ -1,4 +1,3 @@
-
 def uniform_stride(num_teacher, num_student) -> list[int]:
     """
     Returns a list of indices that represent a uniform stride from the teacher to the student.
@@ -18,7 +17,7 @@ def uniform_stride(num_teacher, num_student) -> list[int]:
 
     stride = num_teacher / num_student
     # subtract 1 to convert from 1-based to 0-based indexing
-    indices = [round((i+1) * stride) - 1 for i in range(num_student)]
+    indices = [round((i + 1) * stride) - 1 for i in range(num_student)]
 
     return indices
 

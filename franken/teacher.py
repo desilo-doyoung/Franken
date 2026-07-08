@@ -24,11 +24,13 @@ def hf_metrics(eval_pred):
     preds = np.argmax(logits, axis=-1)
     return compute_metrics(preds, labels)
 
+
 def train_teacher(cfg: Config) -> str:
     tok = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
     data = load_mrpc(tok, max_seq_len=cfg.train.max_seq_len)
-    model = AutoModelForSequenceClassification.from_pretrained(cfg.train.teacher_model,
-        num_labels=2)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        cfg.train.teacher_model, num_labels=2
+    )
 
     args = TrainingArguments(
         output_dir=f"{cfg.train.output_dir}/teacher",
@@ -45,9 +47,14 @@ def train_teacher(cfg: Config) -> str:
         seed=cfg.train.seed,
     )
 
-    trainer = Trainer(model, args,
-                      train_dataset=data["train"], eval_dataset=data["validation"],
-                      data_collator=data["collator"], compute_metrics=hf_metrics)
+    trainer = Trainer(
+        model,
+        args,
+        train_dataset=data["train"],
+        eval_dataset=data["validation"],
+        data_collator=data["collator"],
+        compute_metrics=hf_metrics,
+    )
     trainer.train()
 
     path = f"{cfg.train.output_dir}/teacher"
@@ -55,6 +62,7 @@ def train_teacher(cfg: Config) -> str:
     tok.save_pretrained(path)
 
     return path
+
 
 def load_teacher(cfg: Config) -> Any:
     """Load a frozen teacher for distillation.
