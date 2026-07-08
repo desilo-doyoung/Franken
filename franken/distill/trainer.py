@@ -1,10 +1,10 @@
 import torch
-from torch.utils.data import DataLoader
 from torch.optim import AdamW
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from franken.config import Config
-from franken.data.mrpc import load_mrpc, compute_metrics
+from franken.data.mrpc import compute_metrics, load_mrpc
 from franken.distill.layer_map import resolve_layer_map
 from franken.distill.loss import DistillationLoss
 from franken.model.bert import BertForClassification
@@ -42,10 +42,17 @@ class Distiller:
             "torch", columns=["input_ids", "token_type_ids", "attention_mask", "label"]
         )
         loader = DataLoader(
-            train_data, batch_size=self.cfg.train.batch_size, shuffle=True, collate_fn=data["collator"]
+            train_data,
+            batch_size=self.cfg.train.batch_size,
+            shuffle=True,
+            collate_fn=data["collator"],
         )
 
-        optimizer = AdamW(self.student.parameters(), lr=self.cfg.train.lr, weight_decay=self.cfg.train.weight_decay)
+        optimizer = AdamW(
+            self.student.parameters(),
+            lr=self.cfg.train.lr,
+            weight_decay=self.cfg.train.weight_decay,
+        )
         total_steps = len(loader) * self.cfg.train.epochs
         scheduler = get_linear_schedule_with_warmup(
             optimizer, int(total_steps * self.cfg.train.warmup_ratio), total_steps
@@ -69,7 +76,7 @@ class Distiller:
                 student_outputs = self.student(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
-                    token_type_ids=batch["token_type_ids"]
+                    token_type_ids=batch["token_type_ids"],
                 )
 
                 total, ce, kl, hidden = self.loss_fn(
@@ -78,7 +85,7 @@ class Distiller:
                     labels,
                     student_outputs["hidden_states"],
                     teacher_outputs["hidden_states"],
-                    batch["attention_mask"]
+                    batch["attention_mask"],
                 )
 
                 optimizer.zero_grad()
@@ -98,7 +105,7 @@ class Distiller:
             "torch", columns=["input_ids", "token_type_ids", "attention_mask", "label"]
         )
         loader = DataLoader(
-            validation_data, batch_size=self.cfg.train.batch_size,collate_fn=data["collator"]
+            validation_data, batch_size=self.cfg.train.batch_size, collate_fn=data["collator"]
         )
 
         self.student.eval()
@@ -110,7 +117,7 @@ class Distiller:
             outputs = self.student(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
-                token_type_ids=batch["token_type_ids"]
+                token_type_ids=batch["token_type_ids"],
             )
             preds.append(outputs["logits"].argmax(dim=-1).cpu())
             labels.append(batch["labels"].cpu())

@@ -24,19 +24,38 @@ def cmd_train_teacher(args: argparse.Namespace) -> None:
 
 
 def cmd_distill(args: argparse.Namespace) -> None:
-    _load_config(args)  # validate config early
-    raise SystemExit(
-        "`distill` is not implemented yet — the distillation loop lives in "
-        "franken/distill/ and is built interactively in the tutorial session."
-    )
+    import os
+
+    import torch
+
+    from franken.distill.trainer import Distiller
+
+    cfg = _load_config(args)  # validate config early
+    d = Distiller(cfg)
+    d.setup()
+    d.train()
+
+    # Save the student checkpoint
+    path = os.path.join(cfg.train.output_dir, "student")
+    os.makedirs(path, exist_ok=True)
+    torch.save(d.student.state_dict(), os.path.join(path, "pytorch_model.bin"))
+    print(f"Student saved to {path}")
 
 
-def cmd_eval(args: argparse.Namespace) -> None:
-    _load_config(args)
-    raise SystemExit(
-        "`eval` is not implemented yet — student evaluation is added alongside "
-        "the distillation loop in the tutorial session."
-    )
+def cmd_eval(args):
+    import os
+
+    import torch
+
+    from franken.distill.trainer import Distiller
+
+    cfg = _load_config(args)
+    d = Distiller(cfg)
+    d.setup()  # builds student (strided init) + teacher
+    if args.ckpt:  # load trained student weights over the init
+        sd = torch.load(os.path.join(args.ckpt, "pytorch_model.bin"), map_location=d.device)
+        d.student.load_state_dict(sd)
+    print(d.evaluate())
 
 
 def build_parser() -> argparse.ArgumentParser:
