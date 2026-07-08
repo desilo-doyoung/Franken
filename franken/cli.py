@@ -6,8 +6,6 @@ Usage:
     python main.py eval          --config configs/default.yaml --ckpt outputs/student
 """
 
-from __future__ import annotations
-
 import argparse
 
 from franken.config import Config

@@ -1,8 +1,9 @@
-from torch import nn
 import torch.nn.functional as F
+from torch import nn
 
-from franken.distill.layer_map import resolve_layer_map
 from franken.config import DistillConfig
+from franken.distill.layer_map import resolve_layer_map
+
 
 def masked_mse_loss(student_hidden, teacher_hidden, attention_mask):
     diff = (student_hidden - teacher_hidden) ** 2 # (B, S, H)

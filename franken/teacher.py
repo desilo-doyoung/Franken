@@ -5,8 +5,6 @@ distillation it is frozen and run with ``output_hidden_states=True`` so the loss
 can access its per-layer hidden states.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from franken.config import Config
