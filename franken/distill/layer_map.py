@@ -17,7 +17,8 @@ def uniform_stride(num_teacher, num_student) -> list[int]:
         raise ValueError("num_teacher must be greater than or equal to num_student.")
 
     stride = num_teacher / num_student
-    indices = [round((i+1) * stride) for i in range(num_student)]
+    # subtract 1 to convert from 1-based to 0-based indexing
+    indices = [round((i+1) * stride) - 1 for i in range(num_student)]
 
     return indices
 

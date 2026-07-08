@@ -58,6 +58,7 @@ class DistillConfig:
 
 @dataclass
 class TrainConfig:
+    # Current setup was specified on the original BERT/GLUE papers.
     teacher_model: str = "google-bert/bert-base-uncased"
     teacher_ckpt: str | None = None
     output_dir: str = "outputs"

@@ -27,13 +27,14 @@ class DistillationLoss(nn.Module):
             reduction="batchmean",
         ) * (T**2)
 
+        # hidden contains embedding at index 0, so we subtract 1 to get the number of hidden layers
         num_studets = len(student_hidden) - 1
         num_teachers = len(teacher_hidden) - 1
         layer_map = resolve_layer_map(num_teachers, num_studets, self.cfg.hidden_layer_map)
 
         hidden = 0.0
-        for s_block, t_block in enumerate(layer_map, start=1):   # student blocks 1..num_student
-            hidden += masked_mse_loss(student_hidden[s_block], teacher_hidden[t_block], attention_mask)
+        for s_block, t_block in enumerate(layer_map):
+            hidden += masked_mse_loss(student_hidden[s_block + 1], teacher_hidden[t_block + 1], attention_mask)
         hidden = hidden / len(layer_map)
 
         total = (1 - self.cfg.alpha) * ce + self.cfg.alpha * kl + self.cfg.beta * hidden

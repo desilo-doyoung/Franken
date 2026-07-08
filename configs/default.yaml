@@ -2,28 +2,28 @@
 # Ops (softmax/gelu) are resolved against the registries in franken/ops.
 
 model:
-  num_hidden_layers: 6        # layer reduction: 12 (teacher) -> 6 (student)
-  hidden_size: 768            # same width as teacher (no hidden-MSE projection)
+  num_hidden_layers: 6 # layer reduction: 12 (teacher) -> 6 (student)
+  hidden_size: 768 # same width as teacher (no hidden-MSE projection)
   num_attention_heads: 12
   intermediate_size: 3072
   num_labels: 2
 
   # Swappable ops: registry name + optional kwargs. "exact" runs today;
   # "approx"/"poly" are stubs to implement in the tutorial.
-  softmax: exact              # -> approx  for the HE-friendly softmax
+  softmax: exact # -> approx  for the HE-friendly softmax
   softmax_kwargs: {}
-  gelu: exact                 # -> poly    for a low-degree polynomial GELU
-  gelu_kwargs: {}             # e.g. {degree: 2} when gelu: poly
+  gelu: exact # -> poly    for a low-degree polynomial GELU
+  gelu_kwargs: {} # e.g. {degree: 2} when gelu: poly
 
 distill:
-  alpha: 0.5                  # weight on logit KL vs hard-label CE
-  beta: 1.0                   # weight on hidden-state MSE
-  temperature: 2.0            # KD temperature T
-  hidden_layer_map: null      # null -> auto uniform stride (e.g. [2,4,6,8,10,12])
+  alpha: 0.5 # weight on logit KL vs hard-label CE
+  beta: 1.0 # weight on hidden-state MSE
+  temperature: 2.0 # KD temperature T
+  hidden_layer_map: null # null -> auto uniform stride (e.g. [1, 3, 5, 7, 9, 11] for 6-layer student)
 
 train:
   teacher_model: google-bert/bert-base-uncased
-  teacher_ckpt: null          # set after `train-teacher`
+  teacher_ckpt: null # set after `train-teacher`
   output_dir: outputs
   lr: 5.0e-5
   batch_size: 32
