@@ -44,7 +44,11 @@ def train_teacher(cfg: Config) -> str:
         save_strategy="epoch",
         save_total_limit=1,
         load_best_model_at_end=True,
-        metric_for_best_model="f1",
+        # Select the teacher by eval_loss, not F1: the lowest-loss (well-calibrated)
+        # checkpoint is a better distillation teacher than the highest-F1 (often
+        # overfit / overconfident) one — verified empirically.
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
         seed=cfg.train.seed,
     )
 

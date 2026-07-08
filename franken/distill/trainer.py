@@ -1,7 +1,7 @@
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, get_linear_schedule_with_warmup
+from transformers import AutoTokenizer, get_linear_schedule_with_warmup, set_seed
 
 from franken.config import Config
 from franken.data.mrpc import compute_metrics, load_mrpc
@@ -37,6 +37,7 @@ class Distiller:
         self.student.to(self.device)
 
     def train(self):
+        set_seed(self.cfg.train.seed)
         data = load_mrpc(self.tokenizer, self.cfg.train.max_seq_len)
         train_data = data["train"].with_format(
             "torch", columns=["input_ids", "token_type_ids", "attention_mask", "label"]
