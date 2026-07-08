@@ -12,3 +12,5 @@ __pycache__/
 .claude
 AGENT.md
 CLAUDE.md
+
+outputs/

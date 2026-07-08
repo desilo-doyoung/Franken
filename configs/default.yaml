@@ -23,7 +23,7 @@ distill:
 
 train:
   teacher_model: google-bert/bert-base-uncased
-  teacher_ckpt: null # set after `train-teacher`
+  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (F1 0.898)
   output_dir: outputs
   lr: 5.0e-5
   batch_size: 32
