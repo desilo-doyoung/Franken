@@ -1,4 +1,4 @@
-"""GLUE MRPC loading, tokenization, and metrics (skeleton).
+"""GLUE MRPC loading, tokenization, and metrics.
 
 MRPC is paraphrase detection over sentence pairs (~3.7k train). Metrics are
 accuracy + F1, per the GLUE convention.
@@ -9,9 +9,6 @@ from typing import Any
 import datasets
 import transformers
 from sklearn.metrics import accuracy_score, f1_score
-
-TASK = "mrpc"
-NUM_LABELS = 2
 
 
 def load_mrpc(tokenizer: Any, max_seq_len: int = 128) -> dict[str, Any]:

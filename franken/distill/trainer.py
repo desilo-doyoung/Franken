@@ -1,5 +1,4 @@
 import torch
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup, set_seed
@@ -126,7 +125,9 @@ class Distiller:
             "torch", columns=["input_ids", "token_type_ids", "attention_mask", "label"]
         )
         loader = DataLoader(
-            validation_data, batch_size=self.cfg.train.distill.batch_size, collate_fn=data["collator"]
+            validation_data,
+            batch_size=self.cfg.train.distill.batch_size,
+            collate_fn=data["collator"],
         )
 
         self.student.eval()
@@ -143,12 +144,8 @@ class Distiller:
             logits.append(outputs["logits"].cpu())
             labels.append(batch["labels"].cpu())
 
-        # Single reduction over all N examples: averaging per-batch means would
-        # over-weight the smaller trailing batch.
         logits = torch.cat(logits)
         labels = torch.cat(labels)
-        ce = F.cross_entropy(logits, labels).item()
         metrics = compute_metrics(logits.argmax(dim=-1).numpy(), labels.numpy())
-        metrics["ce"] = ce
 
         return metrics

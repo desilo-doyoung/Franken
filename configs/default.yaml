@@ -23,7 +23,7 @@ distill:
 
 train:
   teacher_model: google-bert/bert-base-uncased
-  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (F1 0.898)
+  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (test F1 0.881)
   output_dir: outputs
   max_seq_len: 128
   seed: 42

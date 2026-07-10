@@ -1,9 +1,7 @@
 """Custom BERT student package.
 
-Intentionally left empty — the student model is built interactively in the
-tutorial session so the architecture is understood piece by piece. Ops
-(softmax/GELU) are resolved from franken.ops so they stay swappable via config.
-Planned modules:
+A from-scratch BERT re-implementation whose ops (softmax/GELU) resolve from
+franken.ops so they stay swappable via config. Modules:
 
   embeddings.py  word + position + token-type embeddings, LayerNorm
   attention.py   multi-head self-attention; softmax op injected from the registry
