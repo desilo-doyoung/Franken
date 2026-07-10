@@ -2,7 +2,7 @@
 # Ops (softmax/gelu) are resolved against the registries in franken/ops.
 
 model:
-  num_hidden_layers: 6 # layer reduction: 12 (teacher) -> 6 (student)
+  num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
   hidden_size: 768 # same width as teacher (no hidden-MSE projection)
   num_attention_heads: 12
   intermediate_size: 3072
@@ -19,15 +19,31 @@ distill:
   alpha: 0.5 # weight on logit KL vs hard-label CE
   beta: 1.0 # weight on hidden-state MSE
   temperature: 2.0 # KD temperature T
-  hidden_layer_map: null # null -> auto uniform stride (e.g. [1, 3, 5, 7, 9, 11] for 6-layer student)
+  hidden_layer_map: null # null -> auto uniform stride computed from teacher/student depths
 
 train:
   teacher_model: google-bert/bert-base-uncased
   teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (F1 0.898)
   output_dir: outputs
-  lr: 5.0e-5
-  batch_size: 32
-  epochs: 3
   max_seq_len: 128
   seed: 42
   device: cuda
+
+  # Teacher and student tune independently. Teacher: bs32/lr5e-5/3ep (confirmed best
+  # via LR sweep; HF Trainer restores the eval_loss-min checkpoint).
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  # Distillation: tuned bs32/lr5e-5/6ep. The loop restores the best-val-F1 checkpoint
+  # (peaks ~ep4 at depth 8); 6ep matches a 10ep budget at 40% less compute — the
+  # LR-schedule anneals to 0 near the peak instead of mid-decay.
+  distill:
+    lr: 5.0e-5
+    epochs: 6
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

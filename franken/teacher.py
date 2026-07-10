@@ -34,19 +34,16 @@ def train_teacher(cfg: Config) -> str:
 
     args = TrainingArguments(
         output_dir=f"{cfg.train.output_dir}/teacher",
-        learning_rate=cfg.train.lr,
-        per_device_train_batch_size=cfg.train.batch_size,
-        per_device_eval_batch_size=cfg.train.batch_size,
-        num_train_epochs=cfg.train.epochs,
-        weight_decay=cfg.train.weight_decay,
-        warmup_ratio=cfg.train.warmup_ratio,
+        learning_rate=cfg.train.teacher.lr,
+        per_device_train_batch_size=cfg.train.teacher.batch_size,
+        per_device_eval_batch_size=cfg.train.teacher.batch_size,
+        num_train_epochs=cfg.train.teacher.epochs,
+        weight_decay=cfg.train.teacher.weight_decay,
+        warmup_ratio=cfg.train.teacher.warmup_ratio,
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
         load_best_model_at_end=True,
-        # Select the teacher by eval_loss, not F1: the lowest-loss (well-calibrated)
-        # checkpoint is a better distillation teacher than the highest-F1 (often
-        # overfit / overconfident) one — verified empirically.
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         seed=cfg.train.seed,

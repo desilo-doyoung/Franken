@@ -57,19 +57,34 @@ class DistillConfig:
 
 
 @dataclass
+class OptimConfig:
+    """Optimization hyperparameters for a single training run.
+
+    Teacher fine-tuning and student distillation each get their own block so
+    they can be tuned independently (e.g. a low-lr / high-epoch teacher while
+    distillation stays at its separately-tuned bs32/lr5e-5/3ep).
+    """
+
+    # Defaults from the original BERT/GLUE papers.
+    lr: float = 5e-5
+    epochs: int = 3
+    batch_size: int = 32
+    warmup_ratio: float = 0.1
+    weight_decay: float = 0.01
+
+
+@dataclass
 class TrainConfig:
-    # Current setup was specified on the original BERT/GLUE papers.
     teacher_model: str = "google-bert/bert-base-uncased"
     teacher_ckpt: str | None = None
     output_dir: str = "outputs"
-    lr: float = 5e-5
-    batch_size: int = 32
-    epochs: int = 3
     max_seq_len: int = 128
-    warmup_ratio: float = 0.1
-    weight_decay: float = 0.01
     seed: int = 42
     device: str = "cuda"
+
+    # Per-run optimization blocks (see OptimConfig).
+    teacher: OptimConfig = field(default_factory=OptimConfig)
+    distill: OptimConfig = field(default_factory=OptimConfig)
 
 
 @dataclass
@@ -91,7 +106,7 @@ class Config:
         return cls(
             model=_build(ModelConfig, raw.get("model", {})),
             distill=_build(DistillConfig, raw.get("distill", {})),
-            train=_build(TrainConfig, raw.get("train", {})),
+            train=_build_train(raw.get("train", {})),
         )
 
 
@@ -102,3 +117,16 @@ def _build(dc_type: type, values: dict[str, Any]):
     if unknown:
         raise ValueError(f"Unknown keys for {dc_type.__name__}: {sorted(unknown)}")
     return dc_type(**{k: v for k, v in values.items() if k in known})
+
+
+def _build_train(values: dict[str, Any]) -> TrainConfig:
+    """Build TrainConfig, resolving the nested teacher/distill OptimConfig blocks.
+
+    The plain ``_build`` can't descend into nested dataclasses (it would store the
+    sub-dicts verbatim), so pop those two blocks, build each as an OptimConfig, then
+    assemble TrainConfig from the remaining flat keys.
+    """
+    values = dict(values)
+    teacher = _build(OptimConfig, values.pop("teacher", {}))
+    distill = _build(OptimConfig, values.pop("distill", {}))
+    return _build(TrainConfig, {**values, "teacher": teacher, "distill": distill})
