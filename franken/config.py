@@ -1,9 +1,10 @@
 """Configuration schema for Franken.
 
 Experiments are declarative: a single YAML file selects the student depth, the
-swappable ops (softmax / GELU) and their kwargs, the distillation loss weights,
-and the training hyperparameters. Nothing about the three customizations
-(layer reduction, softmax approximation, polynomial GELU) requires code edits.
+swappable ops (softmax / activation) and their kwargs, the distillation loss
+weights, and the training hyperparameters. Nothing about the three
+customizations (layer reduction, softmax approximation, polynomial activation)
+requires code edits.
 """
 
 from __future__ import annotations
@@ -33,11 +34,11 @@ class ModelConfig:
     layer_norm_eps: float = 1e-12
 
     # Swappable ops: a registry name + optional construction kwargs.
-    # Resolved via franken.ops.build_softmax / build_gelu.
+    # Resolved via franken.ops.build_softmax / build_activation.
     softmax: str = "exact"
     softmax_kwargs: dict[str, Any] = field(default_factory=dict)
-    gelu: str = "exact"
-    gelu_kwargs: dict[str, Any] = field(default_factory=dict)
+    activation: str = "exact"
+    activation_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

@@ -1,5 +1,5 @@
 # Example Franken config exercising all three student customizations.
-# Ops (softmax/gelu) are resolved against the registries in franken/ops.
+# Ops (softmax/activation) are resolved against the registries in franken/ops.
 
 model:
   num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
@@ -12,8 +12,8 @@ model:
   # "approx"/"poly" are stubs to implement in the tutorial.
   softmax: exact # -> approx  for the HE-friendly softmax
   softmax_kwargs: {}
-  gelu: exact # -> poly    for a low-degree polynomial GELU
-  gelu_kwargs: {} # e.g. {degree: 2} when gelu: poly
+  activation: exact # -> poly   for the degree-3 polynomial SiLU (FHE-friendly)
+  activation_kwargs: {} # e.g. {degree: 3} when activation: poly
 
 distill:
   alpha: 0.5 # weight on logit KL vs hard-label CE

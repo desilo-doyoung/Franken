@@ -1,14 +1,14 @@
 from torch import nn
 
 from franken.config import ModelConfig
-from franken.ops import build_gelu
+from franken.ops import build_activation
 
 
 class BertIntermediate(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.intermediate_act_fn = build_gelu(config.gelu, **config.gelu_kwargs)
+        self.intermediate_act_fn = build_activation(config.activation, **config.activation_kwargs)
 
     def forward(self, hidden_states):
         hidden_states = self.dense(hidden_states)
