@@ -30,15 +30,11 @@ class ExactSoftmax(nn.Module):
 
 
 class ApproxSoftmax(nn.Module):
-    """CGF (cumulant-generating-function) softmax — HE-friendly.
-
-    Replaces the log-sum-exp normalizer with its 2nd-order cumulant (Gaussian)
-    approximation: ``log(sum_j exp x_j) ~= mu + var/2 + log(n_vis)``, where mu
-    and var are the mean/variance of the *visible* scores. So
-    ``softmax_i ~= exp(x_i - mu - var/2 - log n_vis)``. Statistics use a binary
-    plaintext mask (visible positions only); the ops are plaintext-mask
-    multiply, add, square, and exp — no ciphertext division or max-subtraction.
-    Output is unnormalized-by-design (no reciprocal); distillation adapts to it.
+    """CGF softmax (HE-friendly): approximate log-sum-exp by its 2nd-order
+    cumulant, so ``softmax_i ~= exp(x_i - mu - var/2 - log n_vis)`` with mu/var
+    over visible positions (binary mask). Only masked multiply/add/square/exp —
+    no ciphertext division or max-subtraction. Unnormalized by design;
+    distillation adapts to it.
     """
 
     def __init__(self, **kwargs):
@@ -66,23 +62,17 @@ class ExactGELU(nn.Module):
 
 
 class ChebyshevGELU(nn.Module):
-    """GELU as a single Chebyshev polynomial on ``u = x / domain``, evaluated by
-    the Clenshaw recurrence so all intermediate values stay O(1) — FHE-stable,
-    unlike the monomial basis whose ``x**k`` terms explode. Fit once to GELU over
-    ``[-domain, domain]``; the coefficients approximate a fixed function and are
-    task-independent (no refit per dataset).
+    """GELU as a single Chebyshev polynomial on ``u = x / domain``, fit once over
+    ``[-domain, domain]`` (a fixed function -> task-independent, no refit). The
+    Chebyshev basis keeps intermediates in ``[-1, 1]`` -> FHE-stable (the monomial
+    basis' ``x**k`` would explode); FHE eval is Paterson-Stockmeyer at mult-depth
+    ~``ceil(log2 degree)``.
 
-    ⚠️ Domain / blow-up (read this). A polynomial diverges outside its fit
-    interval, so for ``|x| > domain`` the polynomial explodes. During *training*
-    the input is clamped to ``[-1, 1]`` — a numerical scaffold so distillation
-    does not NaN on the teacher's ~±150 outlier activations at init. At
-    *inference* the clamp is gone (a clamp is min/max, expensive under FHE), so
-    the deployed op is the bare polynomial. It is therefore safe **only while
-    activations stay in ``[-domain, domain]``** — an *empirical, per-dataset*
-    property you must verify with an activation-range check. This is NOT a hard
-    guarantee: an out-of-domain activation on unseen data will blow up and
-    cascade through later layers. Widen ``domain`` (costs FHE depth) to buy more
-    escape margin.
+    ⚠️ Outside ``[-domain, domain]`` the polynomial explodes. Training clamps the
+    input to ``[-1, 1]`` (scaffold, so init doesn't NaN on the teacher's ~±150
+    outliers); inference does NOT clamp (min/max is costly in FHE), so the bare
+    poly is safe only while activations stay in-domain — an empirical, per-dataset
+    property to verify, NOT a guarantee. Widen ``domain`` (costs depth) for margin.
     """
 
     def __init__(self, degree: int = 52, domain: float = 32.0, **kwargs):
@@ -99,25 +89,30 @@ class ChebyshevGELU(nn.Module):
         ).coef
         self.register_buffer("coef", torch.tensor(coef, dtype=torch.float32))
 
-    def _clenshaw(self, u):
-        # Sum_k c_k T_k(u) via Clenshaw; T_k(u) in [-1,1] for u in [-1,1].
-        b1 = torch.zeros_like(u)
-        b2 = torch.zeros_like(u)
+    def _eval_poly(self, u):
+        """``sum_k c_k T_k(u)``, basis built by ``T_k = 2 T_{k//2} T_{k-k//2} - T_|.|``
+        at mult-depth ``ceil(log2 degree)``. (FHE would use Paterson-Stockmeyer:
+        same depth, ~2*sqrt(degree) mults vs the ~degree here.)"""
         c = self.coef
-        for k in range(c.numel() - 1, 0, -1):
-            b0 = 2.0 * u * b1 - b2 + c[k]
-            b2, b1 = b1, b0
-        return u * b1 - b2 + c[0]
+        n = c.numel() - 1
+        T = [torch.ones_like(u)]  # T_0
+        if n >= 1:
+            T.append(u)  # T_1
+        for k in range(2, n + 1):
+            a, b = k // 2, k - k // 2  # a + b = k, |a - b| in {0, 1}
+            T.append(2.0 * T[a] * T[b] - T[abs(a - b)])
+        out = c[0] * T[0]
+        for k in range(1, n + 1):
+            out = out + c[k] * T[k]
+        return out
 
     def forward(self, x):
         u = x / self.domain
         if self.training:
-            u = u.clamp(-1.0, 1.0)  # numerical scaffold; bare (no clamp) at inference
+            u = u.clamp(-1.0, 1.0)  # scaffold; no clamp at inference
         if self.training and u.requires_grad:
-            # Checkpoint the degree-length recurrence: otherwise autograd stores
-            # `degree` intermediates per layer and OOMs at high degree.
-            return checkpoint(self._clenshaw, u, use_reentrant=False)
-        return self._clenshaw(u)
+            return checkpoint(self._eval_poly, u, use_reentrant=False)  # else OOM at high degree
+        return self._eval_poly(u)
 
 
 SOFTMAX_OPS = {"exact": ExactSoftmax, "approx": ApproxSoftmax}

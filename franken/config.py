@@ -55,6 +55,11 @@ class DistillConfig:
     temperature: float = 2.0
     # None -> auto uniform-stride map computed from teacher/student depths.
     hidden_layer_map: list[int] | None = None
+    # GELU->activation homotopy warmup (epochs). 0 = off. For polynomial
+    # activations (e.g. cheb_gelu) this supplies the out-of-domain gradient the
+    # op's training clamp cannot, so the network learns to keep activations in
+    # the op's valid domain. Ignored when activation == "exact".
+    homotopy_epochs: float = 0.0
 
 
 @dataclass

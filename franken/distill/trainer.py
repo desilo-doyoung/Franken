@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup, set_seed
@@ -10,6 +11,36 @@ from franken.distill.loss import DistillationLoss
 from franken.model.bert import BertForClassification
 from franken.model.loader import init_student_from_teacher
 from franken.teacher import load_teacher
+
+
+class _HomotopyWarmup(torch.nn.Module):
+    """Training-only GELU->op homotopy: ``(1-t)*gelu(x) + t*op(x)`` with ``t``
+    ramping 0->1 over ``warmup_steps`` steps, then ``t=1`` (pure op).
+
+    A polynomial activation's training clamp has zero gradient outside its domain,
+    so it cannot pull teacher-inherited outlier activations (~±150 at init) back
+    into range. GELU is smooth with nonzero gradient everywhere, so early in
+    training it supplies that signal and the network learns to keep activations
+    in-domain before the op fully takes over. At eval ``t=1`` -> the deployed
+    function is exactly ``op``. Self-schedules off a step counter so it drops into
+    the training loop with no per-step bookkeeping.
+    """
+
+    def __init__(self, op, warmup_steps):
+        super().__init__()
+        self.op = op
+        self.warmup_steps = max(1, int(warmup_steps))
+        self.register_buffer("step", torch.zeros(1))
+
+    def forward(self, x):
+        if self.training:
+            t = min(1.0, self.step.item() / self.warmup_steps)
+            self.step += 1
+        else:
+            t = 1.0
+        if t >= 1.0:
+            return self.op(x)
+        return (1.0 - t) * F.gelu(x) + t * self.op(x)
 
 
 class Distiller:
@@ -48,6 +79,18 @@ class Distiller:
             shuffle=True,
             collate_fn=data["collator"],
         )
+
+        # Optional GELU->activation homotopy warmup (polynomial ops only). Wrap the
+        # FFN activations so distillation ramps from exact GELU into the op; the
+        # bare op is restored after training so the saved student carries no scaffold.
+        homotopy = self.cfg.distill.homotopy_epochs > 0 and self.cfg.model.activation != "exact"
+        if homotopy:
+            warmup_steps = len(loader) * self.cfg.distill.homotopy_epochs
+            for layer in self.student.bert.encoder.layer:
+                act = layer.intermediate.intermediate_act_fn
+                layer.intermediate.intermediate_act_fn = _HomotopyWarmup(act, warmup_steps).to(
+                    self.device
+                )
 
         optimizer = AdamW(
             self.student.parameters(),
@@ -117,6 +160,10 @@ class Distiller:
 
         if best_state is not None:
             self.student.load_state_dict(best_state)
+
+        if homotopy:  # restore the bare op (t=1); saved student has no scaffold/buffer
+            for layer in self.student.bert.encoder.layer:
+                layer.intermediate.intermediate_act_fn = layer.intermediate.intermediate_act_fn.op
 
     @torch.no_grad()
     def evaluate(self):
