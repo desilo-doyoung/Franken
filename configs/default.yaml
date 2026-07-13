@@ -12,7 +12,7 @@ model:
   # "approx"/"poly" are stubs to implement in the tutorial.
   softmax: exact # -> approx  for the HE-friendly softmax
   softmax_kwargs: {}
-  activation: exact # exact | poly (deg-3 SiLU) | cheb_gelu (Chebyshev GELU, FHE)
+  activation: exact # exact | cheb_gelu (Chebyshev GELU approx, FHE-friendly)
   activation_kwargs: {} # cheb_gelu: {degree: 52, domain: 32}
 
 distill:

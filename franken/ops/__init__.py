@@ -65,59 +65,6 @@ class ExactGELU(nn.Module):
         return F.gelu(x)
 
 
-class PolySiLU(nn.Module):
-    """Degree-3 (default) polynomial approximation of SiLU (x * sigmoid(x)).
-
-    The FFN activation must run under homomorphic encryption, which supports
-    only additions and multiplications — so this op uses *only* those: no
-    exp/sigmoid, no clamping, no data-dependent branches. Coefficients are a
-    density-weighted least-squares fit to SiLU over the empirical BERT FFN
-    pre-activation domain [-12, 5] (see PROGRESS.md). Degree 3 is the default:
-    same multiplicative depth as degree 4 but a far better fit than degree 2
-    (a parabola cannot track SiLU's linear rise on firing tokens).
-
-    Evaluated in the power basis (x2 = x*x, x3 = x2*x, x4 = x2*x2) so the
-    multiplicative depth is ceil(log2(degree)) = 2 for degrees 2-4, versus
-    Horner's `degree`. The coeff * power products are plaintext * ciphertext.
-    """
-
-    # density-weighted fits to SiLU over [-12, 5], high -> low order.
-    _FITTED = {
-        2: (4.3665e-02, 2.2396e-01, 2.9755e-02),
-        3: (9.3172e-03, 1.2586e-01, 3.6631e-01, 3.3845e-02),
-        4: (6.3491e-04, 1.7505e-02, 1.4519e-01, 3.5259e-01, 3.5574e-04),
-    }
-
-    def __init__(self, degree: int = 3, coeffs=None, learnable: bool = False, **kwargs):
-        super().__init__()
-        if degree not in (2, 3, 4):
-            raise ValueError(f"PolySiLU supports degrees 2-4, got {degree}.")
-        if coeffs is None:
-            coeffs = self._FITTED[degree]
-        elif len(coeffs) != degree + 1:
-            raise ValueError(f"degree {degree} needs {degree + 1} coeffs, got {len(coeffs)}.")
-
-        self.degree = degree
-        c = torch.tensor(coeffs, dtype=torch.float32)  # high -> low order
-        # Fixed constants at HE inference; `learnable` lets distillation refine
-        # them from this fit, after which they are frozen (still just constants).
-        if learnable:
-            self.coeffs = nn.Parameter(c)
-        else:
-            self.register_buffer("coeffs", c)
-
-    def forward(self, x):
-        c = self.coeffs
-        x2 = x * x
-        if self.degree == 2:
-            return c[0] * x2 + c[1] * x + c[2]
-        x3 = x2 * x
-        if self.degree == 3:
-            return c[0] * x3 + c[1] * x2 + c[2] * x + c[3]
-        x4 = x2 * x2
-        return c[0] * x4 + c[1] * x3 + c[2] * x2 + c[3] * x + c[4]
-
-
 class ChebyshevGELU(nn.Module):
     """GELU as a single Chebyshev polynomial on ``u = x / domain``, evaluated by
     the Clenshaw recurrence so all intermediate values stay O(1) — FHE-stable,
@@ -174,7 +121,7 @@ class ChebyshevGELU(nn.Module):
 
 
 SOFTMAX_OPS = {"exact": ExactSoftmax, "approx": ApproxSoftmax}
-ACTIVATION_OPS = {"exact": ExactGELU, "poly": PolySiLU, "cheb_gelu": ChebyshevGELU}
+ACTIVATION_OPS = {"exact": ExactGELU, "cheb_gelu": ChebyshevGELU}
 
 
 def build_softmax(name: str, **kwargs) -> nn.Module:
