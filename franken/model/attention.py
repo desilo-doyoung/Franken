@@ -40,10 +40,9 @@ class BertSelfAttention(nn.Module):
 
         scores = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim**0.5)  # (B, num_heads, S, S)
 
-        if attention_mask is not None:
-            scores = scores + attention_mask
-
-        probs = self.softmax(scores, dim=-1)
+        # The softmax op applies the additive mask itself (exact adds it; the
+        # CGF approx needs the raw scores + a binary mask, not -inf-added scores).
+        probs = self.softmax(scores, mask=attention_mask, dim=-1)
         probs = self.dropout(probs)
         context = torch.matmul(probs, v)  # (B, num_heads, S, head_dim)
         context = context.transpose(1, 2).contiguous().view(B, S, H)  # (B, S, H)

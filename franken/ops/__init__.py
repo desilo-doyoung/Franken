@@ -13,25 +13,44 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# --- softmax ops: forward(scores, dim=-1) -> attention weights ---
+# --- softmax ops: forward(scores, mask=None, dim=-1) -> attention weights ---
+# `scores` are RAW (unmasked); `mask` is the additive attention mask
+# (0 = visible, large-negative = masked). Ops apply the mask themselves.
 
 
 class ExactSoftmax(nn.Module):
-    """Standard numerically-stable softmax."""
+    """Standard numerically-stable softmax (adds the additive mask if given)."""
 
-    def forward(self, scores, dim=-1):
+    def forward(self, scores, mask=None, dim=-1):
+        if mask is not None:
+            scores = scores + mask
         return F.softmax(scores, dim=dim)
 
 
 class ApproxSoftmax(nn.Module):
-    """HE-friendly softmax approximation (to be implemented in the tutorial)."""
+    """CGF (cumulant-generating-function) softmax — HE-friendly.
+
+    Replaces the log-sum-exp normalizer with its 2nd-order cumulant (Gaussian)
+    approximation: ``log(sum_j exp x_j) ~= mu + var/2 + log(n_vis)``, where mu
+    and var are the mean/variance of the *visible* scores. So
+    ``softmax_i ~= exp(x_i - mu - var/2 - log n_vis)``. Statistics use a binary
+    plaintext mask (visible positions only); the ops are plaintext-mask
+    multiply, add, square, and exp — no ciphertext division or max-subtraction.
+    Output is unnormalized-by-design (no reciprocal); distillation adapts to it.
+    """
 
     def __init__(self, **kwargs):
         super().__init__()
         self.kwargs = kwargs
 
-    def forward(self, scores, dim=-1):
-        raise NotImplementedError("ApproxSoftmax is a stub — implement the approximation.")
+    def forward(self, scores, mask=None, dim=-1):
+        m = (mask == 0).to(scores.dtype) if mask is not None else torch.ones_like(scores)
+        n_vis = m.sum(dim=dim, keepdim=True)
+        x_vis = scores * m  # zero out masked positions before taking statistics
+        mu = x_vis.sum(dim=dim, keepdim=True) / n_vis
+        var = (x_vis**2).sum(dim=dim, keepdim=True) / n_vis - mu**2
+        logits = scores - mu - 0.5 * var - torch.log(n_vis)
+        return torch.exp(logits) * m
 
 
 # --- activation ops: forward(x) -> x ---
