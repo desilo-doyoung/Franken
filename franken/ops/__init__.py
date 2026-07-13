@@ -9,9 +9,11 @@ one class and one dict entry.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 # --- softmax ops: forward(scores, mask=None, dim=-1) -> attention weights ---
 # `scores` are RAW (unmasked); `mask` is the additive attention mask
@@ -116,8 +118,63 @@ class PolySiLU(nn.Module):
         return c[0] * x4 + c[1] * x3 + c[2] * x2 + c[3] * x + c[4]
 
 
+class ChebyshevGELU(nn.Module):
+    """GELU as a single Chebyshev polynomial on ``u = x / domain``, evaluated by
+    the Clenshaw recurrence so all intermediate values stay O(1) — FHE-stable,
+    unlike the monomial basis whose ``x**k`` terms explode. Fit once to GELU over
+    ``[-domain, domain]``; the coefficients approximate a fixed function and are
+    task-independent (no refit per dataset).
+
+    ⚠️ Domain / blow-up (read this). A polynomial diverges outside its fit
+    interval, so for ``|x| > domain`` the polynomial explodes. During *training*
+    the input is clamped to ``[-1, 1]`` — a numerical scaffold so distillation
+    does not NaN on the teacher's ~±150 outlier activations at init. At
+    *inference* the clamp is gone (a clamp is min/max, expensive under FHE), so
+    the deployed op is the bare polynomial. It is therefore safe **only while
+    activations stay in ``[-domain, domain]``** — an *empirical, per-dataset*
+    property you must verify with an activation-range check. This is NOT a hard
+    guarantee: an out-of-domain activation on unseen data will blow up and
+    cascade through later layers. Widen ``domain`` (costs FHE depth) to buy more
+    escape margin.
+    """
+
+    def __init__(self, degree: int = 52, domain: float = 32.0, **kwargs):
+        super().__init__()
+        self.degree = degree
+        self.domain = float(domain)
+        # Least-squares fit of GELU over [-domain, domain] in the Chebyshev basis
+        # (numerically stable over wide domains, unlike a monomial fit).
+        xs = np.linspace(-self.domain, self.domain, max(8001, int(self.domain * 400)))
+        xt = torch.from_numpy(xs)
+        y = (0.5 * xt * (1.0 + torch.erf(xt / 2.0**0.5))).numpy()
+        coef = np.polynomial.chebyshev.Chebyshev.fit(
+            xs, y, degree, domain=[-self.domain, self.domain]
+        ).coef
+        self.register_buffer("coef", torch.tensor(coef, dtype=torch.float32))
+
+    def _clenshaw(self, u):
+        # Sum_k c_k T_k(u) via Clenshaw; T_k(u) in [-1,1] for u in [-1,1].
+        b1 = torch.zeros_like(u)
+        b2 = torch.zeros_like(u)
+        c = self.coef
+        for k in range(c.numel() - 1, 0, -1):
+            b0 = 2.0 * u * b1 - b2 + c[k]
+            b2, b1 = b1, b0
+        return u * b1 - b2 + c[0]
+
+    def forward(self, x):
+        u = x / self.domain
+        if self.training:
+            u = u.clamp(-1.0, 1.0)  # numerical scaffold; bare (no clamp) at inference
+        if self.training and u.requires_grad:
+            # Checkpoint the degree-length recurrence: otherwise autograd stores
+            # `degree` intermediates per layer and OOMs at high degree.
+            return checkpoint(self._clenshaw, u, use_reentrant=False)
+        return self._clenshaw(u)
+
+
 SOFTMAX_OPS = {"exact": ExactSoftmax, "approx": ApproxSoftmax}
-ACTIVATION_OPS = {"exact": ExactGELU, "poly": PolySiLU}
+ACTIVATION_OPS = {"exact": ExactGELU, "poly": PolySiLU, "cheb_gelu": ChebyshevGELU}
 
 
 def build_softmax(name: str, **kwargs) -> nn.Module:
