@@ -55,6 +55,10 @@ class DistillConfig:
     temperature: float = 2.0
     # None -> auto uniform-stride map computed from teacher/student depths.
     hidden_layer_map: list[int] | None = None
+    # Squash-penalty weight: keeps FFN pre-activations inside a polynomial
+    # activation's valid domain (e.g. cheb_gelu) so the bare poly is FHE-safe at
+    # inference. 0 = off; ignored for ops without a bounded domain (e.g. exact).
+    range_penalty: float = 0.0
 
 
 @dataclass

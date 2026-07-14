@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup, set_seed
@@ -10,6 +11,20 @@ from franken.distill.loss import DistillationLoss
 from franken.model.bert import BertForClassification
 from franken.model.loader import init_student_from_teacher
 from franken.teacher import load_teacher
+
+
+def _range_penalty(preacts, domain):
+    """Squared distance past +/-domain, meaned over the OUT-OF-RANGE elements only
+    (averaging over all elements would let the in-range bulk dilute the gradient on
+    the rare outliers). Pulls FFN pre-activations into the polynomial op's valid
+    domain so the deployed bare poly is FHE-safe. Training-only. None if all in range."""
+    terms = []
+    for x in preacts:
+        over, under = F.relu(x - domain), F.relu(-domain - x)
+        outside = (over > 0) | (under > 0)
+        if outside.any():
+            terms.append(((over**2 + under**2)[outside]).mean())
+    return torch.stack(terms).mean() if terms else None
 
 
 class Distiller:
@@ -59,6 +74,22 @@ class Distiller:
             optimizer, int(total_steps * self.cfg.train.distill.warmup_ratio), total_steps
         )
 
+        # Range penalty (FHE): pull FFN pre-activations into the activation op's
+        # valid domain so the deployed bare polynomial never sees out-of-range
+        # inputs. Engages only for ops that expose `domain` (e.g. cheb_gelu); each
+        # FFN dense's output (the pre-activation) is read off via a forward hook.
+        penalty_weight = self.cfg.distill.range_penalty
+        first_act = self.student.bert.encoder.layer[0].intermediate.intermediate_act_fn
+        domain = getattr(first_act, "domain", None) if penalty_weight > 0 else None
+        preacts, hooks = [], []
+        if domain is not None:
+            def _capture(module, _inp, out):
+                if module.training:
+                    preacts.append(out)
+
+            hooks = [ly.intermediate.dense.register_forward_hook(_capture)
+                     for ly in self.student.bert.encoder.layer]
+
         self.student.train()
 
         best_f1 = -1.0
@@ -77,6 +108,7 @@ class Distiller:
                         output_hidden_states=True,
                     )
 
+                preacts.clear()
                 student_outputs = self.student(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
@@ -92,8 +124,14 @@ class Distiller:
                     batch["attention_mask"],
                 )
 
+                loss = total
+                if domain is not None:
+                    penalty = _range_penalty(preacts, domain)
+                    if penalty is not None:
+                        loss = total + penalty_weight * penalty
+
                 optimizer.zero_grad()
-                total.backward()
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
@@ -114,6 +152,9 @@ class Distiller:
                 }
             print(f"epoch {epoch}: {metrics} | ce={ce:.3f} kl={kl:.3f} hidden={hidden:.3f}")
             self.student.train()
+
+        for h in hooks:
+            h.remove()
 
         if best_state is not None:
             self.student.load_state_dict(best_state)
