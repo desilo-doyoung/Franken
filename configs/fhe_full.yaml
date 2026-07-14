@@ -1,0 +1,45 @@
+# Full HE-friendly student: 8 layers + Chebyshev-GELU (domain 32, deg 52, held
+# in-domain by the squash penalty) + CGF softmax. All three student ops are
+# FHE-friendly. MRPC test F1 ~0.866 (teacher 0.881), self-contained ~[-31, 25].
+#   distill: uv run main.py distill --config configs/fhe_full.yaml
+
+model:
+  num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
+  hidden_size: 768 # same width as teacher (no hidden-MSE projection)
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: cgf # CGF (cumulant) softmax, FHE-friendly
+  softmax_kwargs: {}
+  activation: cheb_gelu # degree-52 Chebyshev GELU, FHE mult-depth ~6
+  activation_kwargs: {degree: 52, domain: 32} # self-contains observed acts ~[-31, 25]
+
+distill:
+  alpha: 0.5 # weight on logit KL vs hard-label CE
+  beta: 1.0 # weight on hidden-state MSE
+  temperature: 2.0 # KD temperature T
+  hidden_layer_map: null # null -> auto uniform stride computed from teacher/student depths
+  range_penalty: 1.0 # squash FFN pre-activations into [-domain, domain] (keeps the poly valid)
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (test F1 0.881)
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 6
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
