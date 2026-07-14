@@ -8,9 +8,8 @@ model:
   intermediate_size: 3072
   num_labels: 2
 
-  # Swappable ops: registry name + optional kwargs. "exact" runs today;
-  # "approx"/"poly" are stubs to implement in the tutorial.
-  softmax: exact # -> approx  for the HE-friendly softmax
+  # Swappable ops: registry name + optional kwargs (resolved in franken/ops).
+  softmax: exact # exact | cgf (CGF softmax, FHE-friendly)
   softmax_kwargs: {}
   activation: exact # exact | cheb_gelu (Chebyshev GELU approx, FHE-friendly)
   activation_kwargs: {} # cheb_gelu: {degree: 52, domain: 32}

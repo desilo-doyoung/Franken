@@ -29,7 +29,7 @@ class ExactSoftmax(nn.Module):
         return F.softmax(scores, dim=dim)
 
 
-class ApproxSoftmax(nn.Module):
+class CGFSoftmax(nn.Module):
     """CGF softmax (HE-friendly): approximate log-sum-exp by its 2nd-order
     cumulant, so ``softmax_i ~= exp(x_i - mu - var/2 - log n_vis)`` with mu/var
     over visible positions (binary mask). Only masked multiply/add/square/exp —
@@ -115,7 +115,7 @@ class ChebyshevGELU(nn.Module):
         return self._eval_poly(u)
 
 
-SOFTMAX_OPS = {"exact": ExactSoftmax, "approx": ApproxSoftmax}
+SOFTMAX_OPS = {"exact": ExactSoftmax, "cgf": CGFSoftmax}
 ACTIVATION_OPS = {"exact": ExactGELU, "cheb_gelu": ChebyshevGELU}
 
 
