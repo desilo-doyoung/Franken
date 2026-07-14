@@ -19,7 +19,6 @@ distill:
   beta: 1.0 # weight on hidden-state MSE
   temperature: 2.0 # KD temperature T
   hidden_layer_map: null # null -> auto uniform stride computed from teacher/student depths
-  homotopy_epochs: 0.0 # GELU->activation warmup epochs (poly ops only); 0 = off, try ~2 for cheb_gelu
 
 train:
   teacher_model: google-bert/bert-base-uncased
