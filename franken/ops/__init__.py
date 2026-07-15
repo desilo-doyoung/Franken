@@ -115,8 +115,21 @@ class ChebyshevGELU(nn.Module):
         return self._eval_poly(u)
 
 
+class QuadGELU(nn.Module):
+    """MPCFormer's quadratic GELU replacement: ``0.125 x^2 + 0.25 x + 0.5``. A
+    degree-2 activation (FHE mult-depth 1) evaluated everywhere — NOT a
+    domain-limited approximation, so it never explodes. But the ``x^2`` term
+    amplifies large activations, so (a) its output range is ~5x wider than exact
+    GELU (a dynamic-range cost for FHE, not bounded by this op), and (b) it needs
+    heavy hidden-state alignment to train — a plain single-stage KD (beta=1) gets
+    stuck; set a large ``distill.beta`` (e.g. 10). See configs/quad.yaml."""
+
+    def forward(self, x):
+        return 0.125 * x * x + 0.25 * x + 0.5
+
+
 SOFTMAX_OPS = {"exact": ExactSoftmax, "cgf": CGFSoftmax}
-ACTIVATION_OPS = {"exact": ExactGELU, "cheb_gelu": ChebyshevGELU}
+ACTIVATION_OPS = {"exact": ExactGELU, "cheb_gelu": ChebyshevGELU, "quad": QuadGELU}
 
 
 def build_softmax(name: str, **kwargs) -> nn.Module:

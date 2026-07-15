@@ -1,0 +1,50 @@
+# MPCFormer-style quadratic GELU (0.125x^2 + 0.25x + 0.5), FHE mult-depth 1 (one
+# multiply). It's a *replacement*, not a domain approximation, so it never explodes
+# — but its x^2 amplifies, so it (a) needs heavy hidden-state alignment to train
+# and (b) has a wider output range than GELU (a dynamic-range cost, not bounded here).
+#
+# Recovery via high hidden weight (beta=10): reproduces our result MRPC test F1
+# ~0.88 @8L (matches cheb@8 0.879) and ~0.89 @12L (reproduces MPCFormer 0.887).
+# A plain beta=1 gets stuck near the majority-class baseline. (An alternative
+# recovery is staged/multi-stage KD, not wired here — beta=10 matched it at 8L.)
+#   distill: uv run main.py distill --config configs/quad.yaml
+
+model:
+  num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: exact # exact | cgf (add cgf for the full HE stack)
+  softmax_kwargs: {}
+  activation: quad # MPCFormer quadratic GELU (degree 2)
+  activation_kwargs: {}
+
+distill:
+  alpha: 0.5 # weight on logit KL vs hard-label CE
+  beta: 10.0 # HEAVY hidden-state alignment — needed to train the aggressive quad
+  temperature: 2.0
+  hidden_layer_map: null
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (test F1 0.881)
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 12 # quad trains slowly; needs a longer schedule than the 6ep default
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
