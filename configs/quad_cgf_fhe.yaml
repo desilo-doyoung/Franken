@@ -1,0 +1,50 @@
+# Full FHE-friendly student (minimal mult-depth GELU): 8 layers + MPCFormer
+# quadratic GELU (0.125x^2+0.25x+0.5, degree 2 / mult-depth 1) with its output
+# bounded by the range penalty (domain 32) + CGF softmax. All student ops are
+# FHE-friendly and the GELU is the cheapest possible (depth 1) rather than the
+# deg-52 cheb_gelu used in fhe_full.yaml (depth ~6).
+#
+# Companion to fhe_full.yaml (8L + cheb_gelu + cgf, test F1 ~0.866). This swaps
+# cheb_gelu -> quad to trade GELU accuracy/range for minimal mult-depth.
+#   distill: uv run main.py distill --config configs/quad_cgf_fhe.yaml
+
+model:
+  num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
+  hidden_size: 768 # same width as teacher (no hidden-MSE projection)
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: cgf # CGF (cumulant) softmax, FHE-friendly
+  softmax_kwargs: {}
+  activation: quad # MPCFormer quadratic GELU (degree 2, FHE mult-depth 1)
+  activation_kwargs: {domain: 32} # exposes domain -> range penalty squashes pre-acts into [-32, 32]
+
+distill:
+  alpha: 0.5
+  beta: 10.0 # heavy hidden alignment — needed to train the aggressive quad
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 1.0 # squash pre-acts into [-domain, domain] -> bounds the quad output (~0.125*32^2 = ~128)
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (test F1 0.881)
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 12 # quad trains slowly; needs a longer schedule than the 6ep default
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
