@@ -30,18 +30,26 @@ L = (1 - alpha) * CE(student, labels)              # hard-label
 The hidden-state term stays well-defined under layer reduction via a **uniform-stride layer map**
 (teacher→student, overridable in config), since student and teacher no longer align 1:1.
 
+For polynomial ops that are only valid on a bounded domain (e.g. `cheb_gelu`, or `quad` with a
+`domain` set), `distill.range_penalty` adds a training-time term that squashes FFN pre-activations
+into `[-domain, domain]`, so the deployed bare polynomial never sees out-of-range inputs.
+
 ## Layout
 
 ```
 franken/
   config.py            dataclass config + YAML loader
-  ops/                 swappable-op registry: exact/approx softmax, exact/poly gelu
+  ops/                 swappable-op registry: softmax (exact|cgf), activation (exact|cheb_gelu|quad)
   model/               custom BERT: embeddings, attention, ffn, layer, encoder, bert, loader
   distill/             layer_map, loss, trainer (Distiller)
   data/mrpc.py         GLUE MRPC load / tokenize / metrics
   teacher.py           HF teacher fine-tune + frozen load
   cli.py               train-teacher | distill | eval
-configs/default.yaml   example config exercising all three customizations
+configs/               default.yaml + HE recipes (fhe_gelu, fhe_full, quad, quad_fhe, quad_cgf_fhe)
+scripts/
+  evaluate.py          score teacher + student on MRPC val & test
+  stage_distill.py     op-curriculum (staged op-replacement) distillation
+  act_range.py         FHE activation-range / self-containment check + histogram
 ```
 
 ## Setup
@@ -54,15 +62,30 @@ uv sync                 # Python >=3.11; installs torch (CUDA), transformers, da
 
 ```bash
 # 1. fine-tune the teacher on MRPC
-python main.py train-teacher --config configs/default.yaml
+uv run python main.py train-teacher --config configs/default.yaml
 
 # 2. point configs/default.yaml at the teacher checkpoint (train.teacher_ckpt: outputs/teacher),
 #    then distill a student
-python main.py distill --config configs/default.yaml
+uv run python main.py distill --config configs/default.yaml
 
-# 3. evaluate a saved student
-python main.py eval --config configs/default.yaml --ckpt outputs/student
+# 3. evaluate — scores teacher + student on MRPC validation & test
+#    (delegates to scripts/evaluate.py; --ckpt defaults to <output_dir>/student)
+uv run python main.py eval --config configs/default.yaml --ckpt outputs/student
 ```
 
-Swap ops by editing `configs/default.yaml` (`model.softmax: approx`, `model.gelu: poly`) and
-re-running `distill`.
+Swap ops by editing the config (`model.softmax: cgf`, `model.activation: cheb_gelu` or `quad`, with
+per-op `*_kwargs`) and re-running `distill`, or start from a ready-made recipe in `configs/`.
+
+### FHE-friendly extras
+
+```bash
+# Op-curriculum: distill the easier op set first, then warm-start and swap in the harder op.
+# Helps when two aggressive ops interact (e.g. quad GELU + cgf softmax); see PROGRESS.md.
+uv run python scripts/stage_distill.py \
+  --config-a configs/quad_fhe.yaml --config-b configs/quad_cgf_fhe.yaml \
+  --stagea-dir outputs/stageA_quad --stageb-dir outputs/stageB_quad_cgf
+
+# Verify a polynomial-op student stays in-domain (FHE self-containment) + write a histogram.
+uv run python scripts/act_range.py --config configs/quad_cgf_fhe.yaml \
+  --student-ckpt outputs/stageB_quad_cgf/pytorch_model.bin --out preact.png
+```

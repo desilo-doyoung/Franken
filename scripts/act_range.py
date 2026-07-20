@@ -1,0 +1,143 @@
+"""Activation-range / FHE self-containment check for a trained student.
+
+Runs the student over MRPC splits and records, per FFN layer:
+  * pre-activation range  (intermediate.dense output -> input to the poly GELU)
+  * activation output range (intermediate_act_fn output)
+
+For the quad GELU with domain D, self-containment means every pre-activation
+stays within [-D, D] (so the deployed bare poly is never fed out-of-domain) and
+the output magnitude stays <= ~0.125*D^2 (the FHE dynamic-range budget). Prints
+a numeric per-layer table and writes a pre-activation histogram PNG.
+
+Usage:
+    python scripts/act_range.py --config configs/quad_cgf_fhe.yaml --out preact.png
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import torch
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer, DataCollatorWithPadding
+
+from franken.config import Config
+from franken.model.bert import BertForClassification
+
+
+@torch.no_grad()
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--config", default="configs/quad_cgf_fhe.yaml")
+    p.add_argument("--student-ckpt", default=None)
+    p.add_argument("--splits", nargs="+", default=["validation", "test"])
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--device", default="cuda")
+    p.add_argument("--out", default="preact.png", help="histogram PNG path")
+    args = p.parse_args()
+
+    cfg = Config.from_yaml(args.config)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
+
+    student = BertForClassification(cfg.model)
+    sc = args.student_ckpt or os.path.join(cfg.train.output_dir, "student", "pytorch_model.bin")
+    student.load_state_dict(torch.load(sc, map_location=device))
+    student = student.to(device).eval()
+
+    layers = student.bert.encoder.layer
+    n_layers = len(layers)
+    domain = getattr(layers[0].intermediate.intermediate_act_fn, "domain", None)
+
+    # Capture pre-activations (dense out) and post-activations (act_fn out) per layer.
+    preacts = {i: [] for i in range(n_layers)}
+    postacts = {i: [] for i in range(n_layers)}
+    hooks = []
+    for i, ly in enumerate(layers):
+        hooks.append(ly.intermediate.dense.register_forward_hook(
+            lambda m, inp, out, i=i: preacts[i].append(out.detach().float().flatten().cpu())))
+        hooks.append(ly.intermediate.intermediate_act_fn.register_forward_hook(
+            lambda m, inp, out, i=i: postacts[i].append(out.detach().float().flatten().cpu())))
+
+    ds = load_dataset("nyu-mll/glue", "mrpc")
+    ds = ds.map(lambda b: tokenizer(b["sentence1"], b["sentence2"], truncation=True,
+                                    max_length=cfg.train.max_seq_len), batched=True)
+    collator = DataCollatorWithPadding(tokenizer)
+    cols = ["input_ids", "token_type_ids", "attention_mask", "label"]
+
+    for split in args.splits:
+        if set(ds[split].unique("label")) == {-1}:
+            continue
+        d = ds[split].with_format("torch", columns=cols)
+        dl = DataLoader(d, batch_size=args.batch_size, collate_fn=collator)
+        for batch in dl:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            student(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
+                    token_type_ids=batch["token_type_ids"])
+
+    for h in hooks:
+        h.remove()
+
+    pre = {i: torch.cat(v) for i, v in preacts.items()}
+    post = {i: torch.cat(v) for i, v in postacts.items()}
+
+    print(f"\nsplits={args.splits}  domain={domain}")
+    print(f"{'layer':>5} {'pre min':>9} {'pre max':>9} {'pre p99.9':>10} "
+          f"{'post min':>9} {'post max':>9} {'>|D| frac':>10}")
+    print("-" * 66)
+    all_pre_max = 0.0
+    all_post_max = 0.0
+    for i in range(n_layers):
+        x = pre[i]
+        y = post[i]
+        pmin, pmax = x.min().item(), x.max().item()
+        xa = x.abs()
+        # torch.quantile caps at ~16M elems; subsample for the percentile.
+        if xa.numel() > 5_000_000:
+            idx = torch.randint(0, xa.numel(), (5_000_000,))
+            p999 = torch.quantile(xa[idx], 0.999).item()
+        else:
+            p999 = torch.quantile(xa, 0.999).item()
+        ymin, ymax = y.min().item(), y.max().item()
+        over = ((x.abs() > domain).float().mean().item() if domain else float("nan"))
+        all_pre_max = max(all_pre_max, abs(pmin), abs(pmax))
+        all_post_max = max(all_post_max, abs(ymin), abs(ymax))
+        print(f"{i:>5} {pmin:>9.2f} {pmax:>9.2f} {p999:>10.2f} "
+              f"{ymin:>9.2f} {ymax:>9.2f} {over:>10.5f}")
+
+    print("-" * 66)
+    print(f"overall  pre |max| = {all_pre_max:.2f}   post |max| = {all_post_max:.2f}")
+    if domain is not None:
+        contained = all_pre_max <= domain
+        verdict = "SELF-CONTAINED" if contained else "OUT OF DOMAIN"
+        rel = "<=" if contained else ">"
+        print(f"domain = {domain}  ->  pre-acts {verdict} (|max| {all_pre_max:.2f} {rel} {domain})")
+        print(f"quad output budget 0.125*D^2 = {0.125*domain**2:.1f}  (teacher GELU |max| = 143)")
+
+    # Histogram of all pre-activations pooled across layers.
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    pooled = torch.cat([pre[i] for i in range(n_layers)]).numpy()
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.hist(pooled, bins=300, color="#4C72B0", log=True)
+    if domain is not None:
+        ax.axvline(domain, color="crimson", ls="--", lw=1.5, label=f"±domain ({domain:g})")
+        ax.axvline(-domain, color="crimson", ls="--", lw=1.5)
+    ax.set_xlabel("FFN pre-activation")
+    ax.set_ylabel("count (log)")
+    ax.set_title(f"quad+cgf student — FFN pre-activations ({'+'.join(args.splits)})")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(args.out, dpi=120)
+    print(f"\nhistogram -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()

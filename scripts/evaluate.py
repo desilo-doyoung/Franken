@@ -68,7 +68,7 @@ def build_loaders(tokenizer, splits, max_seq_len, batch_size):
     return loaders
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="configs/default.yaml", help="config (student arch + teacher_ckpt)")
     p.add_argument("--student-ckpt", default=None,
@@ -78,7 +78,7 @@ def main() -> None:
     p.add_argument("--splits", nargs="+", default=["validation", "test"])
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--device", default="cuda")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")

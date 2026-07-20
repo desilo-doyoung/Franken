@@ -42,20 +42,24 @@ def cmd_distill(args: argparse.Namespace) -> None:
     print(f"Student saved to {path}")
 
 
-def cmd_eval(args):
+def cmd_eval(args: argparse.Namespace) -> None:
+    # Delegate to scripts/evaluate.py — the single evaluation implementation. It
+    # scores both splits (validation + test) and both models (teacher + student),
+    # unlike Distiller.evaluate() which is validation-only (checkpoint selection).
+    import importlib.util
     import os
 
-    import torch
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = os.path.join(repo_root, "scripts", "evaluate.py")
+    spec = importlib.util.spec_from_file_location("franken_evaluate_script", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
 
-    from franken.distill.trainer import Distiller
-
-    cfg = _load_config(args)
-    d = Distiller(cfg)
-    d.setup()  # builds student (strided init) + teacher
-    if args.ckpt:  # load trained student weights over the init
-        sd = torch.load(os.path.join(args.ckpt, "pytorch_model.bin"), map_location=d.device)
-        d.student.load_state_dict(sd)
-    print(d.evaluate())
+    argv = ["--config", args.config]
+    if args.ckpt:  # a directory holding pytorch_model.bin, or the file itself
+        ckpt = os.path.join(args.ckpt, "pytorch_model.bin") if os.path.isdir(args.ckpt) else args.ckpt
+        argv += ["--student-ckpt", ckpt]
+    mod.main(argv)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,9 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_config(p_distill)
     p_distill.set_defaults(func=cmd_distill)
 
-    p_eval = sub.add_parser("eval", help="evaluate a student checkpoint on MRPC")
+    p_eval = sub.add_parser("eval", help="score teacher + student on MRPC val & test (via scripts/evaluate.py)")
     add_config(p_eval)
-    p_eval.add_argument("--ckpt", help="path to a student checkpoint")
+    p_eval.add_argument("--ckpt", help="student checkpoint dir or .bin (default: <output_dir>/student)")
     p_eval.set_defaults(func=cmd_eval)
 
     return parser
