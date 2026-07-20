@@ -1,0 +1,50 @@
+# FHE-safe depth-1 GELU: MPCFormer quadratic (0.125x^2+0.25x+0.5) with its output
+# dynamic range bounded. The quad's x^2 amplifies (output ~700 unbounded), so the
+# range penalty squashes pre-activations into [-domain, domain] -> output ~0.125*domain^2.
+#
+# Verified (MRPC test): F1 ~0.874, self-contained (pre-act ~[-24, 30] <= 32),
+# max quad output ~120 (below the teacher's own GELU output of 143). vs unbounded
+# quad 0.881/out~700, and cheb_gelu 0.879/out~30/depth-6. This is the minimal-depth
+# (mult-depth 1) FHE GELU; cheb_gelu trades +1pt accuracy & tighter range for depth 6.
+#   distill: uv run main.py distill --config configs/quad_fhe.yaml
+
+model:
+  num_hidden_layers: 8
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: exact # exact | cgf (add cgf for the full HE stack)
+  softmax_kwargs: {}
+  activation: quad # MPCFormer quadratic GELU (degree 2, FHE mult-depth 1)
+  activation_kwargs: {domain: 32} # exposes domain -> range penalty squashes pre-acts into [-32, 32]
+
+distill:
+  alpha: 0.5
+  beta: 10.0 # heavy hidden alignment — needed to train the aggressive quad
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 1.0 # squash pre-acts into [-domain, domain] -> bounds the quad output (~0.125*32^2 = ~128)
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (test F1 0.881)
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 12 # quad trains slowly; needs a longer schedule than the 6ep default
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
