@@ -1,15 +1,19 @@
 """Op-curriculum (progressive op-replacement) distillation.
 
-Stage A: distill the student with the *easier* op set (config-A, e.g. quad +
-         exact softmax) from the teacher-strided init -> a strong single-
-         distortion student.
-Stage B: warm-start from Stage A's weights, switch to the *full* op set
-         (config-B, e.g. quad + cgf softmax), and keep distilling.
+Stage A: distill the student with the *easier* op set (config-A) from the
+         teacher-strided init -> a strong single-distortion student.
+Stage B: warm-start from Stage A's weights, switch to the *harder* op set
+         (config-B), and keep distilling.
+
+The two configs may differ in *any* op — a softmax approximation, a polynomial
+activation, or whatever op is added later; nothing here is softmax-specific.
+(Example: A = quad + exact softmax, B = quad + cgf softmax.)
 
 This differs from TinyBERT/MPCFormer two-stage KD (which stages *loss targets*
 with all ops live throughout, ~ what beta=10 already does). Here we stage *which
-ops are active*, so the model absorbs one approximation at a time. Softmax ops
-are parameter-free, so Stage A weights load 1:1 into the Stage B model.
+ops are active*, so the model absorbs one approximation at a time. Weights
+transfer by name (strict=False): the shared backbone warm-starts, and any params
+a new op introduces are left at their init and reported.
 
 Usage:
     python scripts/stage_distill.py \
@@ -85,9 +89,18 @@ def main() -> None:
           f"warm-started from {stagea_ckpt}")
 
     db = Distiller(cfg_b)
-    db.setup()  # strided init (overwritten next)
+    db.setup()  # strided init (kept for any params the Stage B op adds)
     sd = torch.load(stagea_ckpt, map_location=db.device)
-    missing, unexpected = db.student.load_state_dict(sd, strict=True)
+    # strict=False so the swapped op need not be parameter-free: shared backbone
+    # params warm-start from Stage A; params only the Stage B op introduces keep
+    # their init. Both cases are reported so a silent name mismatch can't hide.
+    incompatible = db.student.load_state_dict(sd, strict=False)
+    if incompatible.missing_keys:
+        print(f"[stageB] newly-initialized (absent in Stage A): {len(incompatible.missing_keys)} "
+              f"params, e.g. {incompatible.missing_keys[:5]}")
+    if incompatible.unexpected_keys:
+        print(f"[stageB] dropped (absent in Stage B): {len(incompatible.unexpected_keys)} "
+              f"params, e.g. {incompatible.unexpected_keys[:5]}")
     db.student.to(db.device)
     db.train()
     _save(db.student, args.stageb_dir)
