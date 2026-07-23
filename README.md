@@ -62,15 +62,15 @@ uv sync                 # Python >=3.11; installs torch (CUDA), transformers, da
 
 ```bash
 # 1. fine-tune the teacher on MRPC
-uv run python main.py train-teacher --config configs/default.yaml
+uv run python main.py train-teacher --config configs/bert/default.yaml
 
-# 2. point configs/default.yaml at the teacher checkpoint (train.teacher_ckpt: outputs/teacher),
+# 2. point configs/bert/default.yaml at the teacher checkpoint (train.teacher_ckpt: outputs/bert/teacher),
 #    then distill a student
-uv run python main.py distill --config configs/default.yaml
+uv run python main.py distill --config configs/bert/default.yaml
 
 # 3. evaluate — scores teacher + student on MRPC validation & test
-#    (delegates to scripts/evaluate.py; --ckpt defaults to <output_dir>/student)
-uv run python main.py eval --config configs/default.yaml --ckpt outputs/student
+#    (delegates to scripts/bert/evaluate.py; --ckpt defaults to <output_dir>/student)
+uv run python main.py eval --config configs/bert/default.yaml --ckpt outputs/bert/student
 ```
 
 Swap ops by editing the config (`model.softmax: cgf`, `model.activation: cheb_gelu` or `quad`, with
@@ -82,10 +82,10 @@ per-op `*_kwargs`) and re-running `distill`, or start from a ready-made recipe i
 # Op-curriculum: distill the easier op set first, then warm-start and swap in the harder op.
 # Helps when two aggressive ops interact (e.g. quad GELU + cgf softmax); see PROGRESS.md.
 uv run python scripts/stage_distill.py \
-  --config-a configs/quad_fhe.yaml --config-b configs/quad_cgf_fhe.yaml \
-  --stagea-dir outputs/stageA_quad --stageb-dir outputs/stageB_quad_cgf
+  --config-a configs/bert/quad_fhe.yaml --config-b configs/bert/quad_cgf_fhe.yaml \
+  --stagea-dir outputs/bert/stageA_quad --stageb-dir outputs/bert/stageB_quad_cgf
 
 # Verify a polynomial-op student stays in-domain (FHE self-containment) + write a histogram.
-uv run python scripts/act_range.py --config configs/quad_cgf_fhe.yaml \
-  --student-ckpt outputs/stageB_quad_cgf/pytorch_model.bin --out preact.png
+uv run python scripts/bert/act_range.py --config configs/bert/quad_cgf_fhe.yaml \
+  --student-ckpt outputs/bert/stageB_quad_cgf/pytorch_model.bin --out preact.png
 ```

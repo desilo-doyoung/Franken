@@ -1,7 +1,7 @@
 from torch import nn
 
 from franken.config import ModelConfig
-from franken.model.layer import BertLayer
+from franken.models.bert.layer import BertLayer
 
 
 class BertEncoder(nn.Module):

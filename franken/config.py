@@ -20,6 +20,12 @@ class ModelConfig:
     """Student architecture. Width matches the teacher (768); only depth and
     ops change, so hidden-state MSE needs no projection."""
 
+    # Which model backend builds/runs the model (franken.models registry).
+    # "bert" = the from-scratch BERT student; "qwen3" = Qwen3-Embedding (stub).
+    # BERT-shaped fields below are read only by the "bert" backend; other backends
+    # inherit their architecture from the pretrained checkpoint.
+    backend: str = "bert"
+
     num_hidden_layers: int = 6
     hidden_size: int = 768
     num_attention_heads: int = 12
@@ -83,6 +89,13 @@ class TrainConfig:
     teacher_model: str = "google-bert/bert-base-uncased"
     teacher_ckpt: str | None = None
     output_dir: str = "outputs"
+    # Which task drives data/tokenizer/loss/metric/teacher-training (franken.tasks
+    # registry). "mrpc" = GLUE MRPC classification; "embed" = embedding self-distill (stub).
+    task: str = "mrpc"
+    # Output namespace under output_dir: outputs/<run_name or model.backend>/...
+    # None -> namespace by the model backend (e.g. outputs/bert/, outputs/qwen3/).
+    # Set it to carve a specific experiment its own subtree.
+    run_name: str | None = None
     max_seq_len: int = 128
     seed: int = 42
     device: str = "cuda"

@@ -2,8 +2,8 @@ import torch
 from torch import nn
 
 from franken.config import ModelConfig
-from franken.model.embeddings import BertEmbeddings
-from franken.model.encoder import BertEncoder
+from franken.models.bert.embeddings import BertEmbeddings
+from franken.models.bert.encoder import BertEncoder
 
 
 class BertPooler(nn.Module):

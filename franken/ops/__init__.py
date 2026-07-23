@@ -122,7 +122,7 @@ class QuadGELU(nn.Module):
     amplifies large activations, so (a) its output range is ~5x wider than exact
     GELU (a dynamic-range cost for FHE, not bounded by this op), and (b) it needs
     heavy hidden-state alignment to train — a plain single-stage KD (beta=1) gets
-    stuck; set a large ``distill.beta`` (e.g. 10). See configs/quad.yaml.
+    stuck; set a large ``distill.beta`` (e.g. 10). See configs/bert/quad.yaml.
 
     ``domain`` (optional): if set, it's exposed so ``distill.range_penalty`` squashes
     pre-activations into ``[-domain, domain]`` during training, bounding the output to

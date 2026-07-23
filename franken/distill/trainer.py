@@ -2,15 +2,11 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import AutoTokenizer, get_linear_schedule_with_warmup, set_seed
+from transformers import get_linear_schedule_with_warmup, set_seed
 
 from franken.config import Config
-from franken.data.mrpc import compute_metrics, load_mrpc
-from franken.distill.layer_map import resolve_layer_map
-from franken.distill.loss import DistillationLoss
-from franken.model.bert import BertForClassification
-from franken.model.loader import init_student_from_teacher
-from franken.teacher import load_teacher
+from franken.models import build_backend
+from franken.tasks import build_task
 
 
 def _range_penalty(preacts, domain):
@@ -31,32 +27,25 @@ class Distiller:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
-        self.loss_fn = DistillationLoss(cfg.distill)
+        self.backend = build_backend(cfg.model.backend)
+        self.task = build_task(cfg.train.task)
         self.teacher = None
         self.student = None
         self.tokenizer = None
 
     def setup(self):
-        self.teacher = load_teacher(self.cfg).to(self.device)
-        self.student = BertForClassification(self.cfg.model)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.cfg.train.teacher_model)
+        self.teacher = self.backend.load_teacher(self.cfg).to(self.device)
+        self.student = self.backend.build_student(self.cfg)
+        self.tokenizer = self.task.build_tokenizer(self.cfg)
 
-        # strided weight init
-        teacher_state_dict = self.teacher.state_dict()
-        n_teacher = self.teacher.config.num_hidden_layers
-        layer_map = resolve_layer_map(
-            n_teacher, self.cfg.model.num_hidden_layers, self.cfg.distill.hidden_layer_map
-        )
-
-        init_student_from_teacher(self.student, teacher_state_dict, layer_map)
+        # strided weight init (backend owns the model-specific remapping)
+        self.backend.seed_student(self.student, self.teacher, self.cfg)
         self.student.to(self.device)
 
     def train(self):
         set_seed(self.cfg.train.seed)
-        data = load_mrpc(self.tokenizer, self.cfg.train.max_seq_len)
-        train_data = data["train"].with_format(
-            "torch", columns=["input_ids", "token_type_ids", "attention_mask", "label"]
-        )
+        data = self.task.datasets(self.tokenizer, self.cfg)
+        train_data = data["train"].with_format("torch", columns=self.task.torch_columns())
         loader = DataLoader(
             train_data,
             batch_size=self.cfg.train.distill.batch_size,
@@ -77,51 +66,43 @@ class Distiller:
         # Range penalty (FHE): pull FFN pre-activations into the activation op's
         # valid domain so the deployed bare polynomial never sees out-of-range
         # inputs. Engages only for ops that expose `domain` (e.g. cheb_gelu); each
-        # FFN dense's output (the pre-activation) is read off via a forward hook.
+        # FFN pre-activation is read off via a forward hook. Module paths come from
+        # the backend so this is model-agnostic.
         penalty_weight = self.cfg.distill.range_penalty
-        first_act = self.student.bert.encoder.layer[0].intermediate.intermediate_act_fn
-        domain = getattr(first_act, "domain", None) if penalty_weight > 0 else None
+        acts = self.backend.activation_ops(self.student)
+        first_act = acts[0] if acts else None
+        domain = getattr(first_act, "domain", None) if (penalty_weight > 0 and first_act) else None
         preacts, hooks = [], []
         if domain is not None:
+
             def _capture(module, _inp, out):
                 if module.training:
                     preacts.append(out)
 
-            hooks = [ly.intermediate.dense.register_forward_hook(_capture)
-                     for ly in self.student.bert.encoder.layer]
+            hooks = [
+                m.register_forward_hook(_capture)
+                for m in self.backend.ffn_preact_modules(self.student)
+            ]
 
         self.student.train()
 
-        best_f1 = -1.0
+        metric_name, higher_is_better = self.task.select_metric()
+        best = float("-inf") if higher_is_better else float("inf")
         best_state = None
 
         for epoch in range(self.cfg.train.distill.epochs):
             for batch in loader:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
-                labels = batch["labels"]
+                inputs = self.task.model_inputs(batch)
 
                 with torch.no_grad():
-                    teacher_outputs = self.teacher(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        token_type_ids=batch["token_type_ids"],
-                        output_hidden_states=True,
-                    )
+                    teacher_outputs = self.backend.forward(self.teacher, inputs)
 
                 preacts.clear()
-                student_outputs = self.student(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    token_type_ids=batch["token_type_ids"],
-                )
+                student_outputs = self.backend.forward(self.student, inputs)
 
-                total, ce, kl, hidden = self.loss_fn(
-                    student_outputs["logits"],
-                    teacher_outputs["logits"],
-                    labels,
-                    student_outputs["hidden_states"],
-                    teacher_outputs["hidden_states"],
-                    batch["attention_mask"],
+                total, components = self.task.compute_loss(
+                    student_outputs, teacher_outputs, batch, self.cfg
                 )
 
                 loss = total
@@ -137,20 +118,20 @@ class Distiller:
                 scheduler.step()
 
             metrics = self.evaluate()
-            # Select on validation F1 (the headline metric). Unlike the teacher —
-            # where eval_loss/CE selects the best-calibrated *soft targets* — the
-            # student is scored on its own task performance (discrimination), which
-            # val CE tracks poorly: it inits from the calibrated teacher, so CE
-            # bottoms before the student finishes specializing. The student is
-            # deterministic, so F1-max is stable run-to-run (no epoch-flipping).
-            if metrics["f1"] > best_f1:
-                best_f1 = metrics["f1"]
+            # Select on the task's headline metric (max F1 for MRPC; min distance for
+            # embedding self-distill). The student is deterministic, so the argmax/argmin
+            # is stable run-to-run.
+            value = metrics[metric_name]
+            improved = value > best if higher_is_better else value < best
+            if improved:
+                best = value
                 # Clone off-device: state_dict() returns live references that the
                 # next optimizer.step() would mutate in place.
                 best_state = {
                     k: v.detach().cpu().clone() for k, v in self.student.state_dict().items()
                 }
-            print(f"epoch {epoch}: {metrics} | ce={ce:.3f} kl={kl:.3f} hidden={hidden:.3f}")
+            comp_str = " ".join(f"{k}={float(v):.3f}" for k, v in components.items())
+            print(f"epoch {epoch}: {metrics} | {comp_str}")
             self.student.train()
 
         for h in hooks:
@@ -161,32 +142,4 @@ class Distiller:
 
     @torch.no_grad()
     def evaluate(self):
-        data = load_mrpc(self.tokenizer, self.cfg.train.max_seq_len)
-        validation_data = data["validation"].with_format(
-            "torch", columns=["input_ids", "token_type_ids", "attention_mask", "label"]
-        )
-        loader = DataLoader(
-            validation_data,
-            batch_size=self.cfg.train.distill.batch_size,
-            collate_fn=data["collator"],
-        )
-
-        self.student.eval()
-        logits = []
-        labels = []
-
-        for batch in loader:
-            batch = {k: v.to(self.device) for k, v in batch.items()}
-            outputs = self.student(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                token_type_ids=batch["token_type_ids"],
-            )
-            logits.append(outputs["logits"].cpu())
-            labels.append(batch["labels"].cpu())
-
-        logits = torch.cat(logits)
-        labels = torch.cat(labels)
-        metrics = compute_metrics(logits.argmax(dim=-1).numpy(), labels.numpy())
-
-        return metrics
+        return self.task.evaluate(self.backend, self.student, self.tokenizer, self.cfg)

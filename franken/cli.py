@@ -1,9 +1,9 @@
 """Command-line entrypoints: train-teacher | distill | eval.
 
 Usage:
-    python main.py train-teacher --config configs/default.yaml
-    python main.py distill       --config configs/default.yaml
-    python main.py eval          --config configs/default.yaml --ckpt outputs/student
+    python main.py train-teacher --config configs/bert/default.yaml
+    python main.py distill       --config configs/bert/default.yaml
+    python main.py eval          --config configs/bert/default.yaml --ckpt outputs/bert/student
 """
 
 import argparse
@@ -16,11 +16,17 @@ def _load_config(args: argparse.Namespace) -> Config:
 
 
 def cmd_train_teacher(args: argparse.Namespace) -> None:
-    from franken import teacher
+    from franken.tasks import build_task
 
     cfg = _load_config(args)
-    path = teacher.train_teacher(cfg)
-    print(f"Teacher checkpoint saved to {path}")
+    path = build_task(cfg.train.task).train_teacher(cfg)
+    if path:
+        print(f"Teacher checkpoint saved to {path}")
+    else:
+        print(
+            f"Task {cfg.train.task!r}: no teacher training needed "
+            "(the pretrained checkpoint is the teacher)."
+        )
 
 
 def cmd_distill(args: argparse.Namespace) -> None:
@@ -29,6 +35,7 @@ def cmd_distill(args: argparse.Namespace) -> None:
     import torch
 
     from franken.distill.trainer import Distiller
+    from franken.paths import RunPaths
 
     cfg = _load_config(args)  # validate config early
     d = Distiller(cfg)
@@ -36,28 +43,36 @@ def cmd_distill(args: argparse.Namespace) -> None:
     d.train()
 
     # Save the student checkpoint
-    path = os.path.join(cfg.train.output_dir, "student")
-    os.makedirs(path, exist_ok=True)
-    torch.save(d.student.state_dict(), os.path.join(path, "pytorch_model.bin"))
-    print(f"Student saved to {path}")
+    paths = RunPaths(cfg)
+    os.makedirs(paths.student, exist_ok=True)
+    torch.save(d.student.state_dict(), paths.student_bin())
+    print(f"Student saved to {paths.student}")
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
-    # Delegate to scripts/evaluate.py — the single evaluation implementation. It
-    # scores both splits (validation + test) and both models (teacher + student),
-    # unlike Distiller.evaluate() which is validation-only (checkpoint selection).
+    # Delegate to the per-model evaluator scripts/<backend>/evaluate.py — the single
+    # evaluation implementation. It scores both splits (validation + test) and both
+    # models (teacher + student), unlike Distiller.evaluate() which is validation-only.
     import importlib.util
     import os
 
+    cfg = _load_config(args)  # backend name selects which model's evaluator to run
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    script = os.path.join(repo_root, "scripts", "evaluate.py")
+    script = os.path.join(repo_root, "scripts", cfg.model.backend, "evaluate.py")
+    if not os.path.exists(script):
+        raise SystemExit(
+            f"No evaluator for backend {cfg.model.backend!r} at {script} "
+            "(implement scripts/<backend>/evaluate.py)."
+        )
     spec = importlib.util.spec_from_file_location("franken_evaluate_script", script)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
     argv = ["--config", args.config]
     if args.ckpt:  # a directory holding pytorch_model.bin, or the file itself
-        ckpt = os.path.join(args.ckpt, "pytorch_model.bin") if os.path.isdir(args.ckpt) else args.ckpt
+        ckpt = (
+            os.path.join(args.ckpt, "pytorch_model.bin") if os.path.isdir(args.ckpt) else args.ckpt
+        )
         argv += ["--student-ckpt", ckpt]
     mod.main(argv)
 
@@ -67,9 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_config(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--config", default="configs/default.yaml", help="path to YAML config")
+        p.add_argument("--config", default="configs/bert/default.yaml", help="path to YAML config")
 
-    p_teacher = sub.add_parser("train-teacher", help="fine-tune the HF teacher on MRPC")
+    p_teacher = sub.add_parser(
+        "train-teacher", help="prepare the task's teacher (fine-tune if needed)"
+    )
     add_config(p_teacher)
     p_teacher.set_defaults(func=cmd_train_teacher)
 
@@ -77,9 +94,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_config(p_distill)
     p_distill.set_defaults(func=cmd_distill)
 
-    p_eval = sub.add_parser("eval", help="score teacher + student on MRPC val & test (via scripts/evaluate.py)")
+    p_eval = sub.add_parser(
+        "eval", help="score teacher + student via scripts/<backend>/evaluate.py"
+    )
     add_config(p_eval)
-    p_eval.add_argument("--ckpt", help="student checkpoint dir or .bin (default: <output_dir>/student)")
+    p_eval.add_argument(
+        "--ckpt", help="student checkpoint dir or .bin (default: <output_dir>/student)"
+    )
     p_eval.set_defaults(func=cmd_eval)
 
     return parser

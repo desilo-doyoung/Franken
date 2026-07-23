@@ -1,7 +1,5 @@
-# Depth-6 FHE-friendly GELU student: 8 layers + Chebyshev-GELU (domain 32, deg 52)
-# held in-domain by the squash penalty. Softmax left exact (swap to cgf separately).
-# Same teacher/optim as default.yaml; only the student op + range penalty differ.
-#   distill: uv run main.py distill --config configs/fhe_gelu.yaml
+# Example Franken config exercising all three student customizations.
+# Ops (softmax/activation) are resolved against the registries in franken/ops.
 
 model:
   num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
@@ -10,26 +8,28 @@ model:
   intermediate_size: 3072
   num_labels: 2
 
+  # Swappable ops: registry name + optional kwargs (resolved in franken/ops).
   softmax: exact # exact | cgf (CGF softmax, FHE-friendly)
   softmax_kwargs: {}
-  activation: cheb_gelu # degree-52 Chebyshev GELU, FHE mult-depth ~6
-  activation_kwargs: {degree: 52, domain: 32} # self-contains observed acts ~[-30, 22]
+  activation: exact # exact | cheb_gelu (Chebyshev GELU approx, FHE-friendly)
+  activation_kwargs: {} # cheb_gelu: {degree: 52, domain: 32}
 
 distill:
   alpha: 0.5 # weight on logit KL vs hard-label CE
   beta: 1.0 # weight on hidden-state MSE
   temperature: 2.0 # KD temperature T
   hidden_layer_map: null # null -> auto uniform stride computed from teacher/student depths
-  range_penalty: 1.0 # squash FFN pre-activations into [-domain, domain] (keeps the poly valid)
 
 train:
   teacher_model: google-bert/bert-base-uncased
-  teacher_ckpt: outputs/teacher # fine-tuned MRPC teacher (test F1 0.881)
+  teacher_ckpt: outputs/bert/teacher # fine-tuned MRPC teacher (test F1 0.881)
   output_dir: outputs
   max_seq_len: 128
   seed: 42
   device: cuda
 
+  # Teacher and student tune independently. Teacher: bs32/lr5e-5/3ep (confirmed best
+  # via LR sweep; HF Trainer restores the eval_loss-min checkpoint).
   teacher:
     lr: 5.0e-5
     epochs: 3
@@ -37,6 +37,9 @@ train:
     warmup_ratio: 0.1
     weight_decay: 0.01
 
+  # Distillation: tuned bs32/lr5e-5/6ep. The loop restores the best-val-F1 checkpoint
+  # (peaks ~ep4 at depth 8); 6ep matches a 10ep budget at 40% less compute — the
+  # LR-schedule anneals to 0 near the peak instead of mid-decay.
   distill:
     lr: 5.0e-5
     epochs: 6
