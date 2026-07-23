@@ -13,5 +13,8 @@ __pycache__/
 AGENT.md
 CLAUDE.md
 PROGRESS.md
+EXECUTION_NOTES.md
 
+light_plaintexts/
 outputs/
+forward-batch-results/

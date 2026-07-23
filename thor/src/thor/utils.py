@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 from safetensors.torch import load_file as load_safetensors
+from torch import nn
 from transformers import BertConfig, BertForSequenceClassification
 
 
@@ -28,19 +29,36 @@ def load_bert_config(model_dir: Path) -> BertConfig:
     )
 
 
+class _QuadGELU(nn.Module):
+    """MPCFormer quadratic GELU replacement: 0.125 x^2 + 0.25 x + 0.5. An nn.Module
+    because HF's BertIntermediate stores intermediate_act_fn as a child module."""
+
+    def forward(self, x):
+        return 0.125 * x * x + 0.25 * x + 0.5
+
+
 def load_model(data_type: str, model_path: str, type: str = "default"):
     """Load the distilled BERT as an HF BertForSequenceClassification.
 
     ``model_path`` is the path to the model's safetensors file; the matching
     config.json is read from the same directory. The distilled state dict is
     HF-name-matched and complete, so it loads with no missing/unexpected keys.
+
+    If config.json declares ``"activation": "quad"``, each layer's FFN activation
+    is swapped for the quadratic GELU so this plaintext reference matches what the
+    HE forward computes (he.stage_13_gelu). Any other value keeps HF's GELU.
     """
     model_path = Path(model_path)
     config = load_bert_config(model_path.parent)
     model = BertForSequenceClassification(config)
     model.load_state_dict(load_safetensors(str(model_path)))
     model.eval()
-    print(f"Model loaded for {data_type} ({config.num_hidden_layers} layers)")
+
+    activation = json.loads((model_path.parent / "config.json").read_text()).get("activation", "exact")
+    if activation == "quad":
+        for layer in model.bert.encoder.layer:
+            layer.intermediate.intermediate_act_fn = _QuadGELU()
+    print(f"Model loaded for {data_type} ({config.num_hidden_layers} layers, activation={activation})")
     return model
 
 

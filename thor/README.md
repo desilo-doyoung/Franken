@@ -3,6 +3,8 @@
 THOR is a secure Transformer inference framework that uses homomorphic encryption to run a BERT sequence-classification forward pass over encrypted data.
 It is built on the [DESILO FHE library](https://fhe.desilo.dev/latest).
 
+> **Running Franken students under THOR?** See [`EXECUTION_NOTES.md`](EXECUTION_NOTES.md) first — scale conventions, level/bootstrap management, per-layer approximation domains, and execution gotchas learned from wiring in the quad-GELU student.
+
 The repository exposes three CLI commands:
 
 - `encode_weights`: generates encoded plaintext weights and masks under `light_plaintexts/`
