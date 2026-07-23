@@ -5,8 +5,8 @@ Reads every ``forward-batch-results/*/result.json`` (relative to this file, so i
 runs from anywhere) and prints:
   - HE accuracy vs ground-truth labels
   - PT (plaintext reference) accuracy vs ground-truth labels
-  - divergent samples (HE argmax != PT argmax), the logit MAE over the rest, and
-    the raw logits of the divergent samples for inspection.
+  - divergent samples (HE forward blew up numerically, |he_logit| > DIVERGENCE_ABS),
+    the logit MAE over the sane rest, and the raw logits of the divergent samples.
 
 No arguments. Run it with:  python thor/analyze_results.py
 """
@@ -18,6 +18,11 @@ from pathlib import Path
 import numpy as np
 
 RESULTS_DIR = Path(__file__).resolve().parent / "forward-batch-results"
+
+# A sample is "divergent" when the HE forward blew up numerically, not merely when
+# its argmax flips. Sane HE logits track PT (~+-5); benign argmax-flips are all
+# |he| < 1, while the smallest real explosion seen is ~27, so 10 cleanly separates.
+DIVERGENCE_ABS = 10.0
 
 
 def main() -> None:
@@ -42,7 +47,7 @@ def main() -> None:
     he_correct = int((pred == label).sum())
     pt_correct = int((ppred == label).sum())
 
-    div = pred != ppred
+    div = np.abs(he).max(axis=1) > DIVERGENCE_ABS
     keep = ~div
     div_idx = idx[div]
     mae = float(np.abs(he[keep] - pt[keep]).mean()) if keep.any() else float("nan")
