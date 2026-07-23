@@ -27,15 +27,25 @@ Measured for the quad ``distilled-model/`` (default domains in he.py; via
     ``he_layernorm3`` (var <= 2500; the quad output is range-penalty-bounded so
     the peak 1188 stays under 2500 — plain unbounded quad would not).
 
-History: the exact-GELU 8-layer student needed WIDE_SOFTMAX_LAYERS = {1} and
+History: the exact-GELU 8-layer student needed SOFTMAX2_LAYERS = {1} and
 WIDE_LAYERNORM_LAYERS = {6}; the earlier 12-layer ``finetuned_models/mrpc`` model
-needed WIDE_SOFTMAX_LAYERS = {2} and WIDE_LAYERNORM_LAYERS = {9, 10}.
+needed SOFTMAX2_LAYERS = {2} and WIDE_LAYERNORM_LAYERS = {9, 10}.
 """
 
 NUM_LAYERS = 8
 
-# Encoder layers that need the wide-range softmax (he_softmax2) instead of he_softmax1.
-WIDE_SOFTMAX_LAYERS = frozenset({1, 2, 4})
+# Layers dispatched to he_softmax2 (wide exp domain he_exp2, [-70,70], vs he_softmax1's
+# [-27,22]). Disjoint from SOFTMAX3_LAYERS below.
+SOFTMAX2_LAYERS = frozenset({1, 2})
+
+# Subset also needing he_softmax3 (= he_softmax2 + exp_scale): its sum-of-exps is too small
+# for he_inv's Goldschmidt, so 1/Sum overshoots and detonates (sftmx_out ~1e+86). Checked
+# first in stage_07_softmax; same domain/encoding as softmax2, so no re-encode.
+SOFTMAX3_LAYERS = frozenset({4})
+
+# Union = all wide-exp-domain layers. Drives encoding scale (1/1024 vs 1/512), stage_07
+# level handling, and the plot rescale -- NOT dispatch (that uses the two sets above).
+WIDE_SOFTMAX_LAYERS = SOFTMAX2_LAYERS | SOFTMAX3_LAYERS
 
 # Encoder layers that need the wide-range output layernorm (he_layernorm3) instead of he_layernorm2.
 WIDE_LAYERNORM_LAYERS = frozenset({3, 6})

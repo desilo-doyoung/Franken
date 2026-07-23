@@ -6,7 +6,7 @@ report per encoder layer:
   - layernorm: max per-token variance of the 2nd-LayerNorm input (output_dense +
                layernorm_1_output), across the hidden dim, per valid token
 
-and suggest WIDE_SOFTMAX_LAYERS / WIDE_LAYERNORM_LAYERS for thor/src/thor/model_config.py.
+and suggest SOFTMAX2_LAYERS / WIDE_LAYERNORM_LAYERS for thor/src/thor/model_config.py.
 
 Domain references (thor/src/thor/he.py):
   he_softmax1 [-27, 22]   he_softmax2 [-70, 70]
@@ -150,8 +150,9 @@ def main() -> None:
     sm_ok = not over_sm2
     print(f"\nSOFTMAX verdict: {'PASS' if sm_ok else 'FAIL'} — every layer's score range fits its assigned exp domain"
           + ("" if sm_ok else f"; layers {over_sm2} exceed he_softmax2's [-70,70]!"))
-    print("\n# suggested thor/src/thor/model_config.py")
-    print(f"WIDE_SOFTMAX_LAYERS   = frozenset({set(wide_softmax) if wide_softmax else set()})")
+    print("\n# suggested thor/src/thor/model_config.py (move any layer that detonates at")
+    print("# runtime from SOFTMAX2_LAYERS to SOFTMAX3_LAYERS — see he_inv notes)")
+    print(f"SOFTMAX2_LAYERS       = frozenset({set(wide_softmax) if wide_softmax else set()})")
     print(f"WIDE_LAYERNORM_LAYERS = frozenset({set(wide_ln) if wide_ln else set()})")
     if over_ln:
         print(f"# WARNING: layers {over_ln} exceed he_layernorm3's var<=2500 — no domain covers them.")

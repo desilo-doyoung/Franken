@@ -13,7 +13,12 @@ from desilofhe import (
     SecretKey,
 )
 
-from .model_config import WIDE_LAYERNORM_LAYERS, WIDE_SOFTMAX_LAYERS
+from .model_config import (
+    SOFTMAX2_LAYERS,
+    SOFTMAX3_LAYERS,
+    WIDE_LAYERNORM_LAYERS,
+    WIDE_SOFTMAX_LAYERS,
+)
 from .paths import get_light_plaintext_path
 
 SLOT_COUNT = 2**15
@@ -875,7 +880,7 @@ class HE:
         inv_D = self.multiply(inv_D, masking)
         return exp_2u, inv_D, D_delta, output_precision
 
-    def he_softmax(self, u, attention_mask, min_x, max_x, n, l, inv_epsilon, output_alpha):  # noqa: E741
+    def he_softmax(self, u, attention_mask, min_x, max_x, n, l, inv_epsilon, output_alpha, exp_scale=1.0):  # noqa: E741
         if max_x < 30:
             exp_u = [self.he_exp1(ct, min_x=min_x, max_x=max_x, n=n) for ct in u]
         else:
@@ -883,6 +888,10 @@ class HE:
 
         for index in range(8):
             exp_u[index] = self.multiply(exp_u[index], attention_mask[index])
+        # exp_scale lifts sigma_exp into he_inv's stable band (softmax is scale-invariant,
+        # so num & denom cancel); cures the small-denominator overshoot. EXECUTION_NOTES §5.
+        if exp_scale != 1.0:
+            exp_u = [self.multiply(e, exp_scale) for e in exp_u]
 
         sigma_exp = self.add(exp_u[0], exp_u[1])
         for index in range(2, len(exp_u)):
@@ -961,6 +970,23 @@ class HE:
             output_alpha=0.01,
         )
 
+    def he_softmax3(self, x, attention_mask):
+        # he_softmax2 + exp_scale, for layers whose sum-of-exps is too small for he_inv
+        # (it overshoots -> sftmx_out ~1e+86). Same domain/encoding as softmax2 (no
+        # re-encode). exp_scale is the knob (inv_epsilon is inert); tune per §5 of
+        # EXECUTION_NOTES.md so layer-4 inv_D matches the healthy layers.
+        return self.he_softmax(
+            x,
+            attention_mask,
+            min_x=-70,
+            max_x=70,
+            n=2,
+            l=4,
+            inv_epsilon=2 ** (-18),
+            output_alpha=0.01,
+            exp_scale=16.0,
+        )
+
     def stage_07_softmax(self, x, attention_mask, layer_index):
         new_x = np.full((8,), None, dtype=object)
         for index in range(4):
@@ -973,7 +999,9 @@ class HE:
             new_x[index + 4] = self.multiply_1j(self.subtract(conj, temp))
         x = new_x
 
-        if layer_index in WIDE_SOFTMAX_LAYERS:
+        if layer_index in SOFTMAX3_LAYERS:
+            output = self.he_softmax3(x, attention_mask)
+        elif layer_index in SOFTMAX2_LAYERS:
             output = self.he_softmax2(x, attention_mask)
         else:
             output = self.he_softmax1(x, attention_mask)
@@ -1402,18 +1430,10 @@ class HE:
             gelu_input[0, index] = self.add(temp, conj)
             gelu_input[1, index] = self.multiply_1j(self.subtract(conj, temp))
 
-        # Quadratic (MPCFormer) GELU replacement: quad(z) = 0.125 z^2 + 0.25 z + 0.5,
-        # multiplicative depth 1 (one ciphertext-ciphertext multiply) vs the degree-31/27
-        # tanh path above. The student is distilled with this exact op (configs/quad_fhe.yaml),
-        # so no domain approximation is needed — quad is exact everywhere.
-        #
-        # SCALE: gelu_input holds the pre-activation at 1/64 scale (intermediate_dense is
-        # stored /64; cf. forward.plot_variables `intermediate_dense *= 64`). Like the tanh
-        # path (which forms x_scaled = 64*x), we first recover the true pre-activation
-        # z = 64*x, then return true-scale quad(z) so the output matches the plaintext
-        # reference; stage_14's 1/64-scaled weights re-store output_dense at 1/64.
-        #   quad(z) = 0.125 z^2 + 0.25 z + 0.5 = 0.125 * z * (z + 2) + 0.5
-        # (factored to one ct*ct multiply, avoiding ciphertext adds at mismatched levels).
+        # MPCFormer quadratic GELU: quad(z) = 0.125 z^2 + 0.25 z + 0.5 = 0.125*z*(z+2) + 0.5,
+        # mult-depth 1 vs the deep tanh path above (student trained with it, quad_fhe.yaml).
+        # gelu_input is the pre-activation at 1/64 scale, so recover z = 64*x and return
+        # true-scale quad(z) (stage_14's 1/64 weights expect it). See EXECUTION_NOTES.md §2.
         output = np.full((2, 8), None, dtype=object)
         for row in range(2):
             for col in range(8):
