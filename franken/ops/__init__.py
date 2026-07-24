@@ -136,8 +136,18 @@ class QuadGELU(nn.Module):
         return 0.125 * x * x + 0.25 * x + 0.5
 
 
+class ExactSiLU(nn.Module):
+    def forward(self, x):
+        return F.silu(x)
+
+
 SOFTMAX_OPS = {"exact": ExactSoftmax, "cgf": CGFSoftmax}
-ACTIVATION_OPS = {"exact": ExactGELU, "cheb_gelu": ChebyshevGELU, "quad": QuadGELU}
+ACTIVATION_OPS = {
+    "exact": ExactGELU,
+    "cheb_gelu": ChebyshevGELU,
+    "quad": QuadGELU,
+    "silu": ExactSiLU,
+}
 
 
 def build_softmax(name: str, **kwargs) -> nn.Module:
