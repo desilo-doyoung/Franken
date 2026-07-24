@@ -17,27 +17,24 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    """Student architecture. Width matches the teacher (768); only depth and
-    ops change, so hidden-state MSE needs no projection."""
+    """Model-agnostic student knobs shared by every backend: which backend builds
+    the model, the depth-reduction lever, and the swappable ops.
+
+    Backend-specific architecture (widths, vocab, dropout, ...) lives in a
+    per-backend subclass under that model's package — e.g.
+    ``franken.models.bert.config.BertModelConfig`` and
+    ``franken.models.qwen3.config.Qwen3ModelConfig``. Each from-scratch student
+    hardcodes its dims as subclass defaults (matching the checkpoint it loads
+    weights from); only depth + ops vary per experiment. The concrete subclass is
+    chosen by ``backend`` when the config loads (see ``_model_config_cls``)."""
 
     # Which model backend builds/runs the model (franken.models registry).
-    # "bert" = the from-scratch BERT student; "qwen3" = Qwen3-Embedding (stub).
-    # BERT-shaped fields below are read only by the "bert" backend; other backends
-    # inherit their architecture from the pretrained checkpoint.
+    # "bert" = the from-scratch BERT student; "qwen3" = Qwen3-Embedding.
     backend: str = "bert"
 
+    # Depth-reduction lever: number of student layers (< teacher for FHE). Strided
+    # teacher->student init fills these from the teacher (see resolve_layer_map).
     num_hidden_layers: int = 6
-    hidden_size: int = 768
-    num_attention_heads: int = 12
-    intermediate_size: int = 3072
-    max_position_embeddings: int = 512
-    vocab_size: int = 30522
-    type_vocab_size: int = 2
-    num_labels: int = 2
-    pad_token_id: int = 0
-    hidden_dropout_prob: float = 0.1
-    attention_dropout_prob: float = 0.1
-    layer_norm_eps: float = 1e-12
 
     # Swappable ops: a registry name + optional construction kwargs.
     # Resolved via franken.ops.build_softmax / build_activation.
@@ -121,11 +118,30 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Config:
+        model_raw = raw.get("model", {})
+        model_cls = _model_config_cls(model_raw.get("backend", ModelConfig.backend))
         return cls(
-            model=_build(ModelConfig, raw.get("model", {})),
+            model=_build(model_cls, model_raw),
             distill=_build(DistillConfig, raw.get("distill", {})),
             train=_build_train(raw.get("train", {})),
         )
+
+
+def _model_config_cls(backend: str) -> type[ModelConfig]:
+    """Resolve the per-backend ModelConfig subclass for a ``backend`` name.
+
+    Lazy-imported to avoid a config<->models import cycle (the model packages import
+    this module). Each from-scratch backend declares its architecture dims in a
+    subclass; a backend with no subclass falls back to the agnostic base."""
+    if backend == "bert":
+        from franken.models.bert.config import BertModelConfig
+
+        return BertModelConfig
+    if backend == "qwen3":
+        from franken.models.qwen3.config import Qwen3ModelConfig
+
+        return Qwen3ModelConfig
+    return ModelConfig
 
 
 def _build(dc_type: type, values: dict[str, Any]):

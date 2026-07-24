@@ -1,11 +1,11 @@
 import torch
 from torch import nn
 
-from franken.config import ModelConfig
+from franken.models.bert.config import BertModelConfig
 
 
 class BertEmbeddings(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.word_embeddings = nn.Embedding(
             config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id

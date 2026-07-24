@@ -1,26 +1,26 @@
 import torch
 from torch import nn
 
-from franken.config import ModelConfig
+from franken.models.bert.config import BertModelConfig
 from franken.models.bert.embeddings import BertEmbeddings
 from franken.models.bert.encoder import BertEncoder
 
 
 class BertPooler(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
 
     def forward(self, hidden_states):
-        first_token_tensor = hidden_states[:, 0]
+        first_token_tensor = hidden_states[:, 0] # pool the first token (CLS token) from the hidden states
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         return pooled_output
 
 
 class BertModel(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.embeddings = BertEmbeddings(config)
         self.encoder = BertEncoder(config)
@@ -47,7 +47,7 @@ class BertModel(nn.Module):
 
 
 class BertForClassification(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.bert = BertModel(config)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)

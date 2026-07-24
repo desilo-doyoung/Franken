@@ -1,11 +1,11 @@
 from torch import nn
 
-from franken.config import ModelConfig
+from franken.models.bert.config import BertModelConfig
 from franken.models.bert.layer import BertLayer
 
 
 class BertEncoder(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])

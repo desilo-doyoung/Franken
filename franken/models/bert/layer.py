@@ -1,12 +1,12 @@
 from torch import nn
 
-from franken.config import ModelConfig
 from franken.models.bert.attention import BertAttention
+from franken.models.bert.config import BertModelConfig
 from franken.models.bert.ffn import BertIntermediate, BertOutput
 
 
 class BertLayer(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.attention = BertAttention(config)
         self.intermediate = BertIntermediate(config)

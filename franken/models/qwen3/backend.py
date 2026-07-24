@@ -1,32 +1,33 @@
 """Qwen3-Embedding-0.6B backend — STUB (to be implemented).
 
-This is intentionally unimplemented: the model internals will be built by hand
-(mirroring how the from-scratch BERT student was built), with guidance. The class
-is importable so the registry resolves; every method raises until filled in.
+The Qwen3 student is built **from scratch**, mirroring ``franken.models.bert`` —
+hand-written modules (RMSNorm, RoPE, GQA attention with QK-norm, SwiGLU MLP)
+composed into a student whose softmax/activation are injected ops from
+``franken.ops``, with teacher weights loaded by name + strided depth reduction.
+This is the same design as the BERT student and keeps the ops genuinely swappable;
+we do NOT inject ops into an HF ``Qwen3Model`` (see ``franken/models/qwen3/PROGRESS.md``
+for the module checklist). The class is importable so the registry resolves; every
+method raises until filled in.
 
 Implementation notes (parallels ``franken.models.bert.backend.BertBackend``):
 
-- build_student(cfg):
-    Load the HF Qwen3-Embedding backbone from ``cfg.train.teacher_model`` with
-    ``output_hidden_states=True``, then INJECT the FHE ops (reusing HF's RoPE / GQA /
-    QK-norm / RMSNorm — only softmax + activation are FHE-relevant):
-      * activation: for each ``layer`` in ``model.model.layers`` set ``layer.mlp.act_fn``
-        to ``build_activation(cfg.model.activation, **cfg.model.activation_kwargs)``.
-        NOTE Qwen3's SwiGLU nonlinearity is SiLU, not GELU — the current
-        ``ACTIVATION_OPS`` are all GELU-family, so add SiLU-family ops (ExactSiLU +
-        polynomial approximations with ``.domain``) before using non-exact activations.
-      * softmax: register a custom attention interface once via
-        ``transformers.AttentionInterface.register("franken", fn)`` where ``fn`` does
-        ``repeat_kv`` (GQA) + scaled scores + ``module.franken_softmax(scores, mask, dim=-1)``;
-        set ``model.config._attn_implementation = "franken"`` and attach
-        ``layer.self_attn.franken_softmax = build_softmax(cfg.model.softmax, ...)`` per layer.
-- load_teacher(cfg): same backbone, exact ops, ``.eval()`` + ``requires_grad_(False)``.
-- seed_student(student, teacher, cfg): same width/depth => ``student.load_state_dict(
-    teacher.state_dict(), strict=False)`` (strict=False so buffer-only injected ops don't error).
-- forward(model, inputs): return {"output": <pooled last-token embedding>, "hidden_states": tuple};
-    hidden_states[0] must be the embedding output (HF convention). Pooling may live in the task.
-- ffn_preact_modules(model): ``[layer.mlp.gate_proj for layer in model.model.layers]``.
-- activation_ops(model): ``[layer.mlp.act_fn for layer in model.model.layers]``.
+- build_student(cfg): construct the from-scratch student from a resolved Qwen3 config
+    (dims read from ``AutoConfig(cfg.train.teacher_model)``, depth overridden by
+    ``cfg.model.num_hidden_layers``), with the FHE ops injected at build time —
+    ``build_softmax``/``build_activation`` on ``cfg.model.{softmax,activation}``.
+    NOTE Qwen3's SwiGLU nonlinearity is SiLU, not GELU — the current ``ACTIVATION_OPS``
+    are all GELU-family, so add SiLU-family ops (ExactSiLU + polynomial approximations
+    exposing ``.domain``) before using a non-exact activation.
+- load_teacher(cfg): HF ``AutoModel`` backbone, exact ops, ``output_hidden_states=True``,
+    ``.eval()`` + ``requires_grad_(False)``.
+- seed_student(student, teacher, cfg): name-matched load of the teacher state_dict with a
+    strided ``resolve_layer_map`` for depth reduction (``embed_tokens``/final ``norm``
+    verbatim), mirroring ``franken.models.bert.loader``.
+- forward(model, inputs): return {"output": <L2-normed last-token pooled embedding>,
+    "hidden_states": tuple}; hidden_states[0] must be the embedding output (HF convention).
+    Pool the teacher the same way.
+- ffn_preact_modules(model): the per-layer ``gate_proj`` modules (range-penalty hooks).
+- activation_ops(model): the per-layer SwiGLU activation op modules (some expose ``.domain``).
 """
 
 from __future__ import annotations

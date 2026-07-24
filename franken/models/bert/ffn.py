@@ -1,11 +1,11 @@
 from torch import nn
 
-from franken.config import ModelConfig
+from franken.models.bert.config import BertModelConfig
 from franken.ops import build_activation
 
 
 class BertIntermediate(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
         self.intermediate_act_fn = build_activation(config.activation, **config.activation_kwargs)
@@ -17,7 +17,7 @@ class BertIntermediate(nn.Module):
 
 
 class BertOutput(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: BertModelConfig):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
