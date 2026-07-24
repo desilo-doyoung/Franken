@@ -12,7 +12,7 @@ class Qwen3ModelConfig(ModelConfig):
     hidden_size: int = 1024
     num_attention_heads: int = 16
     num_key_value_heads: int = 8  # GQA
-    head_dim: int = 128 # different from hidden_size // num_attention_heads
+    head_dim: int = 128  # different from hidden_size // num_attention_heads
     intermediate_size: int = 3072
     rms_norm_eps: float = 1e-6
     rope_theta: float = 1e6

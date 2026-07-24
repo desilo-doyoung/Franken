@@ -24,15 +24,14 @@ import math
 from pathlib import Path
 
 import torch
-from torch import nn
 from datasets import load_dataset
-from transformers import (AutoTokenizer, BertConfig, BertForSequenceClassification,
-                          DataCollatorWithPadding)
+from torch import nn
+from transformers import AutoTokenizer, BertConfig, BertForSequenceClassification, DataCollatorWithPadding
 
 # Exact domains the fixed exp polynomials in he.py are fit to (he_softmax1/he_softmax2).
-SOFTMAX1_DOMAIN = (-27.2493, 21.72692)   # he_softmax1 -> he_exp1
-SOFTMAX2_DOMAIN = (-70.0, 70.0)          # he_softmax2 -> he_exp2
-LAYERNORM2_MAX_VAR = 150.0        # he_layernorm2 ceiling; above -> he_layernorm3 (<=2500)
+SOFTMAX1_DOMAIN = (-27.2493, 21.72692)  # he_softmax1 -> he_exp1
+SOFTMAX2_DOMAIN = (-70.0, 70.0)  # he_softmax2 -> he_exp2
+LAYERNORM2_MAX_VAR = 150.0  # he_layernorm2 ceiling; above -> he_layernorm3 (<=2500)
 LAYERNORM3_MAX_VAR = 2500.0
 
 
@@ -47,15 +46,21 @@ class _QuadGELU(nn.Module):
 def load_model(model_dir: Path):
     raw = json.loads((model_dir / "config.json").read_text())
     cfg = BertConfig(
-        num_hidden_layers=raw["num_hidden_layers"], hidden_size=raw["hidden_size"],
-        num_attention_heads=raw["num_attention_heads"], intermediate_size=raw["intermediate_size"],
-        max_position_embeddings=raw["max_position_embeddings"], vocab_size=raw["vocab_size"],
-        type_vocab_size=raw["type_vocab_size"], num_labels=raw.get("num_labels", 2),
-        pad_token_id=raw.get("pad_token_id", 0), layer_norm_eps=raw.get("layer_norm_eps", 1e-12),
+        num_hidden_layers=raw["num_hidden_layers"],
+        hidden_size=raw["hidden_size"],
+        num_attention_heads=raw["num_attention_heads"],
+        intermediate_size=raw["intermediate_size"],
+        max_position_embeddings=raw["max_position_embeddings"],
+        vocab_size=raw["vocab_size"],
+        type_vocab_size=raw["type_vocab_size"],
+        num_labels=raw.get("num_labels", 2),
+        pad_token_id=raw.get("pad_token_id", 0),
+        layer_norm_eps=raw.get("layer_norm_eps", 1e-12),
         output_hidden_states=True,
     )
     model = BertForSequenceClassification(cfg)
     from safetensors.torch import load_file
+
     model.load_state_dict(load_file(str(model_dir / "model.safetensors")))
     model.eval()
     act = raw.get("activation", "exact")
@@ -75,7 +80,9 @@ def layer_ranges(model, hidden_states, layer_idx, attn_mask, device):
     def heads(x):
         return x.view(*x.shape[:-1], a.num_attention_heads, a.attention_head_size).transpose(1, 2)
 
-    q = heads(a.query(hidden_states)); k = heads(a.key(hidden_states)); v = heads(a.value(hidden_states))
+    q = heads(a.query(hidden_states))
+    k = heads(a.key(hidden_states))
+    v = heads(a.value(hidden_states))
     scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(a.attention_head_size)  # (1,H,S,S) pre-mask
     valid = scores[..., :n, :n]
     score_min, score_max = valid.min().item(), valid.max().item()
@@ -108,8 +115,9 @@ def main() -> None:
 
     tok = AutoTokenizer.from_pretrained(args.tokenizer)
     ds = load_dataset("nyu-mll/glue", "mrpc")[args.split]
-    ds = ds.map(lambda b: tok(b["sentence1"], b["sentence2"], truncation=True, max_length=args.max_seq_len),
-                batched=True).with_format("torch", columns=["input_ids", "token_type_ids", "attention_mask"])
+    ds = ds.map(
+        lambda b: tok(b["sentence1"], b["sentence2"], truncation=True, max_length=args.max_seq_len), batched=True
+    ).with_format("torch", columns=["input_ids", "token_type_ids", "attention_mask"])
     coll = DataCollatorWithPadding(tok)
 
     nL = cfg.num_hidden_layers
@@ -138,18 +146,25 @@ def main() -> None:
         return min(smax[li] - lo, hi - smax[li], smin[li] - lo, hi - smin[li])  # min distance to either wall
 
     print(f"\nsplit={args.split}")
-    print(f"{'layer':>5}{'score min':>11}{'score max':>11}{'softmax(domain)':>22}{'margin':>9}{'ln2 var':>10}{'layernorm':>14}")
+    print(
+        f"{'layer':>5}{'score min':>11}{'score max':>11}{'softmax(domain)':>22}"
+        f"{'margin':>9}{'ln2 var':>10}{'layernorm':>14}"
+    )
     print("-" * 82)
     for li in range(nL):
         wide = li in wide_softmax
-        sfx = f"he_softmax2[-70,70]" if wide else "he_softmax1[-27,22]"
+        sfx = "he_softmax2[-70,70]" if wide else "he_softmax1[-27,22]"
         lnx = "he_layernorm3" if li in wide_ln else "he_layernorm2"
         flags = ("  OVER-SM!" if li in over_sm2 else "") + ("  OVER-LN2500!" if li in over_ln else "")
-        print(f"{li:>5}{smin[li]:>11.2f}{smax[li]:>11.2f}{sfx:>22}{sm_margin(li):>9.2f}{max_var[li]:>10.1f}{lnx:>14}{flags}")
+        print(
+            f"{li:>5}{smin[li]:>11.2f}{smax[li]:>11.2f}{sfx:>22}{sm_margin(li):>9.2f}{max_var[li]:>10.1f}{lnx:>14}{flags}"
+        )
 
     sm_ok = not over_sm2
-    print(f"\nSOFTMAX verdict: {'PASS' if sm_ok else 'FAIL'} — every layer's score range fits its assigned exp domain"
-          + ("" if sm_ok else f"; layers {over_sm2} exceed he_softmax2's [-70,70]!"))
+    print(
+        f"\nSOFTMAX verdict: {'PASS' if sm_ok else 'FAIL'} — every layer's score range fits its assigned exp domain"
+        + ("" if sm_ok else f"; layers {over_sm2} exceed he_softmax2's [-70,70]!")
+    )
     print("\n# suggested thor/src/thor/model_config.py (move any layer that detonates at")
     print("# runtime from SOFTMAX2_LAYERS to SOFTMAX3_LAYERS — see he_inv notes)")
     print(f"SOFTMAX2_LAYERS       = frozenset({set(wide_softmax) if wide_softmax else set()})")
