@@ -63,7 +63,7 @@ franken/
   models/
     base.py          ModelBackend ABC; __init__ = build_backend registry
     bert/            from-scratch BERT student + backend (backend.py, bert.py, …, loader.py)
-    qwen3/           Qwen3-Embedding backend (stub)
+    qwen3/           from-scratch Qwen3-Embedding student + backend (parity-gated vs HF)
   tasks/
     base.py          Task ABC; __init__ = build_task registry
     mrpc.py          MRPC data + ClassificationDistillLoss + teacher fine-tune
