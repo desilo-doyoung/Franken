@@ -13,6 +13,7 @@ from desilofhe import (
 )
 
 from .model_config import (
+    CGF_SOFTMAX_LAYERS,
     SOFTMAX2_LAYERS,
     SOFTMAX3_LAYERS,
     WIDE_LAYERNORM_LAYERS,
@@ -22,6 +23,25 @@ from .paths import get_light_plaintext_path
 
 SLOT_COUNT = 2**15
 GROUP_SIZE = 2**11
+
+# CGF-specific exp: he_exp_cgf(x) = P(x - mid/S)^2 with input x = logit/S (S=64), a
+# degree-31 unweighted least-squares fit of exp over the CGF-logit domain [-130, 6].
+# Unlike he_exp1/2 (fit only up to a constant, fine for the normalized exact softmax),
+# this is absolute-accurate (no C factor) AND stays ~0 in the deep tail (no blow-up at
+# layer 1's -127). Meaningful-range MSE ~1e-9, worst |err| ~5e-4 over [-127, 6].
+# Coefficients are ascending monomial (constant first), as evaluate_polynomial_stockmeyer expects.
+CGF_EXP_MID = -62.0
+CGF_EXP_S = 64.0
+CGF_EXP_COEF = np.array([
+    -8.993364344345167e-07, -1.2058703459105757e-05, 0.0004124220215759866, 0.0019556198372030487,
+    -0.031271127138317256, -0.09408388120302447, 0.9332439252594171, 2.114759605557089,
+    -14.55582282436849, -26.980759079600976, 136.5358892381867, 217.26827925097564,
+    -835.3568684896069, -1177.707209782058, 3504.5985457679526, 4475.005579249088,
+    -10396.590989406839, -12220.140078925726, 22178.732254920837, 24295.57400395039,
+    -34192.536878264335, -35249.78371664668, 37817.04271441701, 36979.75960392576,
+    -29316.540264173138, -27369.573033362794, 15168.305038362449, 13595.03617080444,
+    -4724.711123282936, -4085.371567013034, 675.5342612536336, 566.2492493624084,
+])
 
 
 class DeltaCiphertext:
@@ -778,6 +798,13 @@ class HE:
         exp_x = self.multiply(exp_x, 128)
         return exp_x
 
+    def he_exp_cgf(self, x):
+        """Absolute-accurate exp for the unnormalized CGF softmax (see CGF_EXP_* above).
+        Input x is the CGF logit at scale 1/S (S=64); returns ~exp(logit)."""
+        x = self.add(x, -CGF_EXP_MID / CGF_EXP_S)  # recenter -> y = (logit - mid)/S
+        p = self.evaluate_polynomial_stockmeyer(x, CGF_EXP_COEF)
+        return self.relinearize(self.square(p))
+
     def he_inv(
         self,
         denominator: Ciphertext,
@@ -986,19 +1013,104 @@ class HE:
             exp_scale=16.0,
         )
 
-    def stage_07_softmax(self, x, attention_mask, layer_index):
+    # repack's conjugate-add doubles the output; divide it back out (he_exp_cgf is
+    # absolute-accurate). Calibrated to 1/1.9268; drives sftmx_out MSE to ~8e-6.
+    CGF_OUT_SCALE = 0.519
+
+    def he_softmax_cgf(self, u, attention_mask, n_vis):
+        """CGF (cumulant) softmax under FHE -- the op the distilled quad+cgf student was
+        trained with (franken/ops::CGFSoftmax): softmax_i ~= exp(x_i - mu - var/2 - log n_vis) * m,
+        mu/var over visible keys. UNNORMALIZED and division-free, so no he_inv/update_inv_D
+        (EXECUTION_NOTES.md 8). mu/var reuse the interval_sum key-axis reduction; n_vis is public
+        so 1/n_vis and log n_vis are plaintext scalars. Exp is he_exp_cgf (absolute-accurate).
+
+        Scale: u arrives at s_u = 1/64 (all CGF layers wide). mu at s_u, var at s_u**2 (a square),
+        so 0.5*var uses coefficient 0.5/s_u and log n_vis is scaled by s_u; logits land at 1/S,
+        which he_exp_cgf expects (S=64). Returns 128 ct in the transposed layout stage_08 consumes.
+        """
+        s_u = 1 / 64
+        inv_n = 1.0 / n_vis
+
+        x_vis = [self.multiply(u[i], attention_mask[i]) for i in range(8)]  # visibility-masked scores
+
+        # mean over keys: sum across the 16 diagonal blocks (interval_sum -> coeff domain, ntt back)
+        sum_x = self.add(x_vis[0], x_vis[1])
+        for i in range(2, 8):
+            self.add_inplace(sum_x, x_vis[i])
+        sum_x = self.ntt(self.interval_sum(sum_x, interval=2**11, need_intt=True))
+        mu = self.multiply(sum_x, inv_n)  # scale s_u
+
+        # var = E[x^2] - mu^2 over keys
+        sq = [self.relinearize(self.square(x_vis[i])) for i in range(8)]
+        sum_x2 = self.add(sq[0], sq[1])
+        for i in range(2, 8):
+            self.add_inplace(sum_x2, sq[i])
+        sum_x2 = self.ntt(self.interval_sum(sum_x2, interval=2**11, need_intt=True))
+        msq = self.multiply(sum_x2, inv_n)  # scale s_u**2
+        var = self.subtract(msq, self.relinearize(self.square(mu)))  # scale s_u**2
+
+        # centering constant c = mu + 0.5*var + log(n_vis), at scale s_u
+        c = self.add(mu, self.multiply(var, 0.5 / s_u))
+        c = self.add(c, float(np.log(n_vis)) * s_u)
+        # refuel via c (one ct) BEFORE exp: mu/var consumed ~4 levels; this lifts logits back to
+        # full level so exp runs accurately without a post-exp bootstrap (which would inflate the
+        # downstream FFN). bootstrap needs coefficient form -> intt -> bootstrap -> ntt.
+        c = self.ntt(self.bootstrap(self.intt(c)))
+
+        logits = [self.subtract(self.engine.level_down(u[i], c.level), c) for i in range(8)]
+        exp_u = [self.he_exp_cgf(ct) for ct in logits]
+        for i in range(8):
+            exp_u[i] = self.multiply(exp_u[i], attention_mask[i])  # re-zero masked keys after exp
+
+        # Transpose/unpack 8 -> 128 with a constant-1 stand-in for he_softmax's inv_D: CGF is
+        # unnormalized so the per-row 1/Sum factor is 1. Feed the block-0 head-pad ones mask so
+        # the identical repack loop emits the pure transpose of exp*m.
+        masking = np.array(([1] * 12 + [0.0] * 4) * 2**7)
+        inv_D = self.encrypt(masking, exp_u[0].level)
+
+        cplx_softmax = np.empty((128,), dtype=object)
+        rotated_inv_D = [inv_D]
+        for index in range(15):
+            rotated_inv_D.append(self.rotate(rotated_inv_D[-1], GROUP_SIZE))
+        prepared_rotated_inv_D = [self.prepare_for_multiply(rotated) for rotated in rotated_inv_D]
+        scale = self.CGF_OUT_SCALE
+
+        for index in range(4):
+            exp_cplx = self.add(exp_u[index], self.multiply_1j(exp_u[index + 4]))
+            exp_cplx = self.multiply(exp_cplx, scale)
+            prepared = self.rescale(exp_cplx)
+            for rotated_index in range(16):
+                masked_softmax = self.relinearize(self.multiply(prepared, prepared_rotated_inv_D[rotated_index]))
+                softmax_copied = self.interval_sum(masked_softmax, interval=GROUP_SIZE)
+                conj = self.conjugate(softmax_copied)
+
+                output_index = index * 16 + rotated_index
+                cplx_softmax[output_index] = self.add(softmax_copied, conj)
+                cplx_softmax[output_index + 64] = self.multiply_1j(self.subtract(conj, softmax_copied))
+
+        return cplx_softmax
+
+    def stage_07_softmax(self, x, attention_mask, layer_index, n_vis=None):
         new_x = np.full((8,), None, dtype=object)
+        is_cgf = layer_index in CGF_SOFTMAX_LAYERS
         for index in range(4):
             temp = self.add(x[index], self.multiply_1j(x[index + 4]))
             temp = self.bootstrap(temp)
-            if layer_index not in WIDE_SOFTMAX_LAYERS:
+            # CGF spends its post-bootstrap budget on mu/var + exp (no deep he_inv
+            # afterwards), so it keeps all 14 levels; the exact path thins non-wide
+            # layers to leave headroom for the reciprocal.
+            if not is_cgf and layer_index not in WIDE_SOFTMAX_LAYERS:
                 temp = self.level_down(temp, 3)
             conj = self.conjugate(temp)
             new_x[index] = self.add(temp, conj)
             new_x[index + 4] = self.multiply_1j(self.subtract(conj, temp))
         x = new_x
 
-        if layer_index in SOFTMAX3_LAYERS:
+        if is_cgf:
+            if n_vis is None:
+                raise ValueError("CGF softmax requires n_vis (valid-token count)")
+            output = self.he_softmax_cgf(x, attention_mask, n_vis)
+        elif layer_index in SOFTMAX3_LAYERS:
             output = self.he_softmax3(x, attention_mask)
         elif layer_index in SOFTMAX2_LAYERS:
             output = self.he_softmax2(x, attention_mask)
@@ -1302,7 +1414,15 @@ class HE:
                 weight[index] = self.engine.read_light_plaintext(str(path / f"w_{index}"))
                 bias[index] = self.engine.read_light_plaintext(str(path / f"b_{index}"))
 
-        output = self.he_layernorm1(layernorm_input, weight, bias)
+        # LN1 (stage_11): the exact model has tiny LN1 variance -> he_layernorm1 (max_var
+        # 10). Unnormalized CGF makes it far larger (var ~140-320) -> use the wide dispatch
+        # (he_layernorm3 for WIDE_LAYERNORM_LAYERS, else he_layernorm2), like stage_16.
+        if layer_index not in CGF_SOFTMAX_LAYERS:
+            output = self.he_layernorm1(layernorm_input, weight, bias)
+        elif layer_index in WIDE_LAYERNORM_LAYERS:
+            output = self.he_layernorm3(layernorm_input, weight, bias)
+        else:
+            output = self.he_layernorm2(layernorm_input, weight, bias)
 
         return output
 

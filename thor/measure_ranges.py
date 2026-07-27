@@ -72,7 +72,14 @@ def load_model(model_dir: Path):
 
 @torch.no_grad()
 def layer_ranges(model, hidden_states, layer_idx, attn_mask, device):
-    """(max|score|, max per-token LN2-input variance) for one layer, valid tokens only."""
+    """(score min/max, CGF-logit min/max, max per-token LN2-input variance) for one
+    layer, valid tokens only.
+
+    The CGF-logit range is the domain the FHE exp (he_exp1/he_exp2) actually sees for
+    the distilled CGF student -- NOT the raw score range. CGF recenters each row by
+    mu + var/2 + log n_vis (the log-sum-exp estimate), so the top logit sits near
+    log(max prob) ~ 0 and the range is the score spread shifted down. This is the
+    quantity that must fit he_exp1's [-27.25, 21.73] / he_exp2's [-70, 70]."""
     n = int(attn_mask.sum().item())  # valid length (mask is 1s then 0s after collation)
     L = model.bert.encoder.layer[layer_idx]
     a = L.attention.self
@@ -84,18 +91,32 @@ def layer_ranges(model, hidden_states, layer_idx, attn_mask, device):
     k = heads(a.key(hidden_states))
     v = heads(a.value(hidden_states))
     scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(a.attention_head_size)  # (1,H,S,S) pre-mask
-    valid = scores[..., :n, :n]
+    valid = scores[..., :n, :n]  # valid query x valid key (all keys visible => n_vis = n)
     score_min, score_max = valid.min().item(), valid.max().item()
 
+    # CGF logits over valid positions (franken CGFSoftmax; population var, n_vis = n)
+    mu = valid.mean(dim=-1, keepdim=True)
+    var = valid.var(dim=-1, unbiased=False, keepdim=True)
+    cgf_logits = valid - mu - 0.5 * var - math.log(n)
+    cgf_min, cgf_max = cgf_logits.min().item(), cgf_logits.max().item()
+
     ext = model.get_extended_attention_mask(attn_mask, hidden_states.shape).to(device)
-    probs = torch.softmax(scores + ext, dim=-1)
+    # CGF softmax (unnormalized) for the downstream LN2-variance measurement
+    m = (ext == 0).to(scores.dtype)
+    x_vis = scores * m
+    n_vis = m.sum(dim=-1, keepdim=True)
+    mu_f = x_vis.sum(dim=-1, keepdim=True) / n_vis
+    var_f = (x_vis**2).sum(dim=-1, keepdim=True) / n_vis - mu_f**2
+    probs = torch.exp(scores - mu_f - 0.5 * var_f - torch.log(n_vis)) * m
     ctx = torch.matmul(probs, v).permute(0, 2, 1, 3).contiguous().view(*hidden_states.shape[:-1], a.all_head_size)
     att_dense = L.attention.output.dense(ctx)
-    ln1 = L.attention.output.LayerNorm(att_dense + hidden_states)
+    ln1_in = att_dense + hidden_states  # input to the 1st LayerNorm (stage_11)
+    var_ln1 = ln1_in[0, :n].var(dim=-1, unbiased=False).max().item()
+    ln1 = L.attention.output.LayerNorm(ln1_in)
     inter = L.intermediate.intermediate_act_fn(L.intermediate.dense(ln1))
-    ln2_in = L.output.dense(inter) + ln1  # input to the 2nd LayerNorm
-    per_token_var = ln2_in[0, :n].var(dim=-1, unbiased=False)  # variance across hidden dim per token
-    return score_min, score_max, per_token_var.max().item()
+    ln2_in = L.output.dense(inter) + ln1  # input to the 2nd LayerNorm (stage_16)
+    var_ln2 = ln2_in[0, :n].var(dim=-1, unbiased=False).max().item()
+    return score_min, score_max, cgf_min, cgf_max, var_ln1, var_ln2
 
 
 def main() -> None:
@@ -123,54 +144,52 @@ def main() -> None:
     nL = cfg.num_hidden_layers
     smin = [0.0] * nL
     smax = [0.0] * nL
-    max_var = [0.0] * nL
+    cmin = [0.0] * nL
+    cmax = [0.0] * nL
+    var1 = [0.0] * nL  # layernorm-1 input variance (stage_11)
+    var2 = [0.0] * nL  # layernorm-2 input variance (stage_16)
     for ex in ds:
         batch = coll([{k: ex[k] for k in ("input_ids", "token_type_ids", "attention_mask")}])
         batch = {k: v.to(device) for k, v in batch.items()}
         out = model.bert(**batch)  # output_hidden_states=True via config
         for li in range(nL):
-            lo, hi, var = layer_ranges(model, out.hidden_states[li], li, batch["attention_mask"], device)
+            lo, hi, clo, chi, v1, v2 = layer_ranges(model, out.hidden_states[li], li, batch["attention_mask"], device)
             smin[li] = min(smin[li], lo)
             smax[li] = max(smax[li], hi)
-            max_var[li] = max(max_var[li], var)
+            cmin[li] = min(cmin[li], clo)
+            cmax[li] = max(cmax[li], chi)
+            var1[li] = max(var1[li], v1)
+            var2[li] = max(var2[li], v2)
 
-    # he_softmax1 covers [-27, 22] (asymmetric): a layer needs he_softmax2 only if its
-    # scores actually exceed that box on either side.
-    wide_softmax = [li for li in range(nL) if smax[li] > SOFTMAX1_DOMAIN[1] or smin[li] < SOFTMAX1_DOMAIN[0]]
-    over_sm2 = [li for li in wide_softmax if smax[li] > SOFTMAX2_DOMAIN[1] or smin[li] < SOFTMAX2_DOMAIN[0]]
-    wide_ln = [li for li in range(nL) if max_var[li] > LAYERNORM2_MAX_VAR]
-    over_ln = [li for li in range(nL) if max_var[li] > LAYERNORM3_MAX_VAR]
+    wide_softmax = [li for li in range(nL) if cmax[li] > SOFTMAX1_DOMAIN[1] or cmin[li] < SOFTMAX1_DOMAIN[0]]
+    over_sm2 = [li for li in wide_softmax if cmax[li] > SOFTMAX2_DOMAIN[1] or cmin[li] < SOFTMAX2_DOMAIN[0]]
+    # a layer needs the wide layernorm (he_layernorm3) if EITHER of its two LayerNorm
+    # inputs exceeds he_layernorm2's var<=150. Unnormalized CGF inflates these vs the
+    # exact softmax, so both LN1 (stage_11) and LN2 (stage_16) must be checked.
+    vmax = [max(var1[li], var2[li]) for li in range(nL)]
+    wide_ln = [li for li in range(nL) if vmax[li] > LAYERNORM2_MAX_VAR]
+    over_ln = [li for li in range(nL) if vmax[li] > LAYERNORM3_MAX_VAR]
 
-    def sm_margin(li):
-        lo, hi = SOFTMAX2_DOMAIN if li in wide_softmax else SOFTMAX1_DOMAIN
-        return min(smax[li] - lo, hi - smax[li], smin[li] - lo, hi - smin[li])  # min distance to either wall
-
-    print(f"\nsplit={args.split}")
+    print(f"\nsplit={args.split}  (CGF softmax; LN1=stage_11 input var, LN2=stage_16 input var)")
     print(
-        f"{'layer':>5}{'score min':>11}{'score max':>11}{'softmax(domain)':>22}"
-        f"{'margin':>9}{'ln2 var':>10}{'layernorm':>14}"
+        f"{'layer':>5}{'cgf lo':>9}{'cgf hi':>9}{'softmax':>10}"
+        f"{'LN1 var':>10}{'LN2 var':>10}{'layernorm':>14}"
     )
-    print("-" * 82)
+    print("-" * 72)
     for li in range(nL):
-        wide = li in wide_softmax
-        sfx = "he_softmax2[-70,70]" if wide else "he_softmax1[-27,22]"
+        sfx = "cgf2" if li in wide_softmax else "cgf1"
         lnx = "he_layernorm3" if li in wide_ln else "he_layernorm2"
         flags = ("  OVER-SM!" if li in over_sm2 else "") + ("  OVER-LN2500!" if li in over_ln else "")
         print(
-            f"{li:>5}{smin[li]:>11.2f}{smax[li]:>11.2f}{sfx:>22}{sm_margin(li):>9.2f}{max_var[li]:>10.1f}{lnx:>14}{flags}"
+            f"{li:>5}{cmin[li]:>9.2f}{cmax[li]:>9.2f}{sfx:>10}"
+            f"{var1[li]:>10.1f}{var2[li]:>10.1f}{lnx:>14}{flags}"
         )
 
-    sm_ok = not over_sm2
-    print(
-        f"\nSOFTMAX verdict: {'PASS' if sm_ok else 'FAIL'} — every layer's score range fits its assigned exp domain"
-        + ("" if sm_ok else f"; layers {over_sm2} exceed he_softmax2's [-70,70]!")
-    )
-    print("\n# suggested thor/src/thor/model_config.py (move any layer that detonates at")
-    print("# runtime from SOFTMAX2_LAYERS to SOFTMAX3_LAYERS — see he_inv notes)")
-    print(f"SOFTMAX2_LAYERS       = frozenset({set(wide_softmax) if wide_softmax else set()})")
+    print("\n# suggested thor/src/thor/model_config.py (CGF path)")
+    print(f"WIDE_SOFTMAX_LAYERS   = frozenset({set(wide_softmax) if wide_softmax else set()})")
     print(f"WIDE_LAYERNORM_LAYERS = frozenset({set(wide_ln) if wide_ln else set()})")
     if over_ln:
-        print(f"# WARNING: layers {over_ln} exceed he_layernorm3's var<=2500 — no domain covers them.")
+        print(f"# WARNING: layers {over_ln} exceed he_layernorm3's var<=2500 — a wider layernorm poly is needed.")
 
 
 if __name__ == "__main__":

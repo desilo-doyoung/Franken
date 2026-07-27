@@ -34,21 +34,29 @@ needed SOFTMAX2_LAYERS = {2} and WIDE_LAYERNORM_LAYERS = {9, 10}.
 
 NUM_LAYERS = 8
 
-# Layers dispatched to he_softmax2 (wide exp domain he_exp2, [-70,70], vs he_softmax1's
-# [-27,22]). Disjoint from SOFTMAX3_LAYERS below.
-SOFTMAX2_LAYERS = frozenset({1, 2})
+# Layers whose attention softmax uses the CGF (cumulant) approximation instead of THOR's
+# exact-softmax poly. CGF is unnormalized/division-free, so he_inv/update_inv_D (and
+# SOFTMAX2/3) are bypassed -- see he_softmax_cgf and EXECUTION_NOTES.md 8. The distilled
+# quad+cgf student uses CGF on every layer.
+CGF_SOFTMAX_LAYERS = frozenset(range(NUM_LAYERS))
 
-# Subset also needing he_softmax3 (= he_softmax2 + exp_scale): its sum-of-exps is too small
-# for he_inv's Goldschmidt, so 1/Sum overshoots and detonates (sftmx_out ~1e+86). Checked
-# first in stage_07_softmax; same domain/encoding as softmax2, so no re-encode.
+# Non-CGF (exact-softmax) dispatch: he_softmax2 (wide he_exp2 [-70,70]) and its he_inv-stable
+# subset he_softmax3. Ignored on the CGF path.
+SOFTMAX2_LAYERS = frozenset({1, 2})
 SOFTMAX3_LAYERS = frozenset({4})
 
-# Union = all wide-exp-domain layers. Drives encoding scale (1/1024 vs 1/512), stage_07
-# level handling, and the plot rescale -- NOT dispatch (that uses the two sets above).
-WIDE_SOFTMAX_LAYERS = SOFTMAX2_LAYERS | SOFTMAX3_LAYERS
+# Wide-softmax layers -> K-weight softmax_scale 1/1024 (stored 1/128 -> s_u=1/64) in
+# encode_weights.py, plus the stage_07 plot rescale / level handling. CGF assumes s_u=1/64
+# everywhere (he_softmax_cgf / he_exp_cgf), so all CGF layers must be wide. Non-CGF models
+# fall back to the measured SOFTMAX2|SOFTMAX3 set.
+WIDE_SOFTMAX_LAYERS = CGF_SOFTMAX_LAYERS if CGF_SOFTMAX_LAYERS else (SOFTMAX2_LAYERS | SOFTMAX3_LAYERS)
 
-# Encoder layers that need the wide-range output layernorm (he_layernorm3) instead of he_layernorm2.
-WIDE_LAYERNORM_LAYERS = frozenset({3, 6})
+# Layers using the wide layernorm (he_layernorm3, var<=2500) vs he_layernorm2 (var<=150),
+# for BOTH stage_11 (LN1) and stage_16 (LN2). Unnormalized CGF inflates the LayerNorm-input
+# variance, so more layers qualify than the exact model's {3,6}. Measured (measure_ranges.py,
+# CGF, val+test): LN1 breaches {0,2,3}, LN2 breaches {3,6}. NB these are input-dependent and
+# only fit target-idx 0 -- see EXECUTION_NOTES.md 8 (range-penalty re-distill is the real fix).
+WIDE_LAYERNORM_LAYERS = frozenset({0, 2, 3, 6})
 
 MODEL_DIR = "./distilled-model"
 MODEL_PATH = f"{MODEL_DIR}/model.safetensors"

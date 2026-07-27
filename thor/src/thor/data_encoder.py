@@ -63,11 +63,15 @@ class DataEncoder:
 
     def encode_attention_mask(self, attention_mask: np.ndarray, level: int = 14) -> np.ndarray:
         """
-        Return an array of size (8,) which contains 8 plaintexts.
+        Return (8 plaintexts, 8 clear masks, n_tokens).
+
+        ``n_tokens`` is the number of valid (non-pad) tokens -- public, known at
+        tokenization. It equals the CGF ``n_vis`` (visible key count, identical for
+        every query row), so the CGF softmax uses it as a plaintext scalar.
         """
         if attention_mask.shape != (128,):
             raise ValueError("Shape of attention mask should be (128,)")
-        n_tokens = np.count_nonzero(attention_mask)
+        n_tokens = int(np.count_nonzero(attention_mask))
         attention_mask = np.full((8,), None, dtype=object)
         clear_attention_mask = np.full((8,), None, dtype=object)
         for i in range(8):
@@ -82,7 +86,7 @@ class DataEncoder:
                         msg[temp + t * 16 + head] = is_token
             attention_mask[i] = self.he.encode(msg, level)
             clear_attention_mask[i] = msg
-        return attention_mask, clear_attention_mask
+        return attention_mask, clear_attention_mask, n_tokens
 
     def encrypt_attention_mask(self, attention_mask: np.ndarray, level: int = 0) -> np.ndarray:
         """

@@ -56,7 +56,7 @@ def load_encrypted_input(dataset_type, target_idx, he):
             embedding = data_encryptor.embed_data(data)
             x = data_encryptor.encrypt_embedding(embedding, level=9)
             attention_mask = batch["attention_mask"]
-            thor_attention_mask, clear_attention_mask = data_encryptor.encode_attention_mask(
+            thor_attention_mask, clear_attention_mask, n_tokens = data_encryptor.encode_attention_mask(
                 attention_mask.cpu().numpy().squeeze().T,
                 level=14,
             )
@@ -66,6 +66,7 @@ def load_encrypted_input(dataset_type, target_idx, he):
                 attention_mask,
                 thor_attention_mask,
                 clear_attention_mask,
+                n_tokens,
             )
 
     raise IndexError(f"target_idx={target_idx} is out of range for the evaluation dataloader")
@@ -115,8 +116,16 @@ def get_nonlinear_reference(model_plain, outputs, attention_mask, device):
             v = project_to_heads(attention_m.value(hidden_states))
             attention_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(attention_m.attention_head_size)
             extended_att_mask = model_plain.get_extended_attention_mask(attention_mask, 768).to(device)
-            sftmx_in = attention_scores + extended_att_mask
-            att_probs_m = torch.nn.functional.softmax(sftmx_in, dim=-1)
+            sftmx_in = attention_scores + extended_att_mask  # raw score plotted vs HE stage_06
+            # CGF (cumulant) softmax reference (franken/ops::CGFSoftmax), matching he_softmax_cgf:
+            # unnormalized exp(x - mu - var/2 - log n_vis) * m, mu/var over visible keys.
+            m = (extended_att_mask == 0).to(attention_scores.dtype)
+            n_vis = m.sum(dim=-1, keepdim=True)
+            x_vis = attention_scores * m
+            mu = x_vis.sum(dim=-1, keepdim=True) / n_vis
+            var = (x_vis**2).sum(dim=-1, keepdim=True) / n_vis - mu**2
+            cgf_logits = attention_scores - mu - 0.5 * var - torch.log(n_vis)
+            att_probs_m = torch.exp(cgf_logits) * m
             sftmx_out = att_probs_m
             att_context_m = torch.matmul(att_probs_m, v)
             context_layer = att_context_m.permute(0, 2, 1, 3).contiguous()
@@ -210,7 +219,7 @@ def get_nonlinear_reference(model_plain, outputs, attention_mask, device):
     )
 
 
-def forward_layer(x, layer_idx, clear_attention_mask, he):
+def forward_layer(x, layer_idx, clear_attention_mask, n_tokens, he):
     print("layer_idx:", layer_idx)
     print("now:", datetime.now())
 
@@ -236,7 +245,7 @@ def forward_layer(x, layer_idx, clear_attention_mask, he):
         sftmx_in = he.stage_06_attention_score(q_wo_rescale, k)
 
     with timer.stage(7, "softmax"):
-        sftmx_out = he.stage_07_softmax(sftmx_in, clear_attention_mask, layer_idx)
+        sftmx_out = he.stage_07_softmax(sftmx_in, clear_attention_mask, layer_idx, n_tokens)
 
     with timer.stage(8, "attention context"):
         att_context = he.stage_08_attention_context(v, sftmx_out)
@@ -379,7 +388,7 @@ def run_forward(args):
     timer = Timer()
     with timer.setup():
         he = HE(args.device, compact, key_size, timer)
-        data_loader, x, attention_mask, thor_attention_mask, clear_attention_mask = load_encrypted_input(
+        data_loader, x, attention_mask, thor_attention_mask, clear_attention_mask, n_tokens = load_encrypted_input(
             args.dataset_type,
             args.target_idx,
             he,
@@ -391,7 +400,7 @@ def run_forward(args):
 
     for layer_idx in range(NUM_LAYERS):
         with timer.layer(layer_idx):
-            x, variables = forward_layer(x, layer_idx, clear_attention_mask, he)
+            x, variables = forward_layer(x, layer_idx, clear_attention_mask, n_tokens, he)
         if not args.no_plots:
             with timer.paused():
                 plot_variables(variables, plain_reference, he, layer_idx, output_dir)
