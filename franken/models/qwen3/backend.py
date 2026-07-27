@@ -1,60 +1,82 @@
-"""Qwen3-Embedding-0.6B backend — STUB (to be implemented).
+"""Qwen3-Embedding backend: the from-scratch Qwen3 student + HF Qwen3 teacher.
 
-The Qwen3 student is built **from scratch**, mirroring ``franken.models.bert`` —
-hand-written modules (RMSNorm, RoPE, GQA attention with QK-norm, SwiGLU MLP)
-composed into a student whose softmax/activation are injected ops from
-``franken.ops``, with teacher weights loaded by name + strided depth reduction.
-This is the same design as the BERT student and keeps the ops genuinely swappable;
-we do NOT inject ops into an HF ``Qwen3Model`` (see ``franken/models/qwen3/PROGRESS.md``
-for the module checklist). The class is importable so the registry resolves; every
-method raises until filled in.
+Builds the from-scratch ``Qwen3Model`` student (RMSNorm, RoPE, GQA attention with
+QK-norm, SwiGLU MLP; softmax/activation injected from ``franken.ops``), seeds it
+from the HF teacher via ``init_student_from_teacher`` (name-matched, strided for
+depth reduction), and loads the frozen HF ``AutoModel`` backbone as teacher.
 
-Implementation notes (parallels ``franken.models.bert.backend.BertBackend``):
-
-- build_student(cfg): construct the from-scratch student from a resolved Qwen3 config
-    (dims read from ``AutoConfig(cfg.train.teacher_model)``, depth overridden by
-    ``cfg.model.num_hidden_layers``), with the FHE ops injected at build time —
-    ``build_softmax``/``build_activation`` on ``cfg.model.{softmax,activation}``.
-    NOTE Qwen3's SwiGLU nonlinearity is SiLU, not GELU — the current ``ACTIVATION_OPS``
-    are all GELU-family, so add SiLU-family ops (ExactSiLU + polynomial approximations
-    exposing ``.domain``) before using a non-exact activation.
-- load_teacher(cfg): HF ``AutoModel`` backbone, exact ops, ``output_hidden_states=True``,
-    ``.eval()`` + ``requires_grad_(False)``.
-- seed_student(student, teacher, cfg): name-matched load of the teacher state_dict with a
-    strided ``resolve_layer_map`` for depth reduction (``embed_tokens``/final ``norm``
-    verbatim), mirroring ``franken.models.bert.loader``.
-- forward(model, inputs): return {"output": <L2-normed last-token pooled embedding>,
-    "hidden_states": tuple}; hidden_states[0] must be the embedding output (HF convention).
-    Pool the teacher the same way.
-- ffn_preact_modules(model): the per-layer ``gate_proj`` modules (range-penalty hooks).
-- activation_ops(model): the per-layer SwiGLU activation op modules (some expose ``.domain``).
+The distillation output contract is the *pooled sentence embedding*: Qwen3-Embedding
+pools the **last non-pad token** of the final hidden state and L2-normalizes it.
+Both models are pooled here by the same code path, so the task's loss only ever
+compares like with like.
 """
 
 from __future__ import annotations
 
+import torch
+import torch.nn.functional as F
 from torch import nn
+from transformers import AutoModel
 
 from franken.config import Config
+from franken.distill.layer_map import resolve_layer_map
 from franken.models.base import ModelBackend
+from franken.models.qwen3.loader import init_student_from_teacher
+from franken.models.qwen3.model import Qwen3Model
 
-_TODO = "Qwen3Backend.{} is not implemented yet — see franken/models/qwen3/backend.py docstring."
+
+def _last_token_pool(last_hidden: torch.Tensor, attention_mask: torch.Tensor | None):
+    """Qwen3-Embedding pooling: the hidden state at the last visible position.
+
+    Indexed as "last position where the mask is 1" rather than ``mask.sum() - 1`` so
+    it is correct under either padding side (Qwen3-Embedding's reference code pads
+    left; HF's collator pads right).
+    """
+    if attention_mask is None:
+        return last_hidden[:, -1]
+    seq_len = attention_mask.shape[-1]
+    idx = seq_len - 1 - attention_mask.flip(-1).argmax(-1)
+    return last_hidden[torch.arange(last_hidden.shape[0], device=last_hidden.device), idx]
 
 
 class Qwen3Backend(ModelBackend):
     def build_student(self, cfg: Config) -> nn.Module:
-        raise NotImplementedError(_TODO.format("build_student"))
+        return Qwen3Model(cfg.model)
 
     def load_teacher(self, cfg: Config) -> nn.Module:
-        raise NotImplementedError(_TODO.format("load_teacher"))
+        # Frozen HF backbone (no lm_head), exact ops, per-layer hidden states enabled
+        # so the distillation loss can read them. dtype is pinned to fp32: transformers
+        # 5.x defaults to the checkpoint dtype (bf16 here), which would put the parity
+        # gate and the distillation targets at bf16 precision.
+        ckpt = cfg.train.teacher_ckpt or cfg.train.teacher_model
+        model = AutoModel.from_pretrained(ckpt, dtype=torch.float32, output_hidden_states=True)
+        model.eval()
+        model.requires_grad_(False)
+        return model
 
     def seed_student(self, student: nn.Module, teacher: nn.Module, cfg: Config) -> None:
-        raise NotImplementedError(_TODO.format("seed_student"))
+        layer_map = resolve_layer_map(
+            teacher.config.num_hidden_layers,
+            cfg.model.num_hidden_layers,
+            cfg.distill.hidden_layer_map,
+        )
+        init_student_from_teacher(student, teacher.state_dict(), layer_map)
 
     def forward(self, model: nn.Module, inputs: dict) -> dict:
-        raise NotImplementedError(_TODO.format("forward"))
+        out = model(**inputs)
+        # Custom student returns a dict; the HF teacher returns a ModelOutput.
+        if isinstance(out, dict):
+            last_hidden, hidden_states = out["last_hidden_state"], out["hidden_states"]
+        else:
+            last_hidden, hidden_states = out.last_hidden_state, out.hidden_states
+        pooled = _last_token_pool(last_hidden, inputs.get("attention_mask"))
+        return {
+            "output": F.normalize(pooled, p=2, dim=-1),
+            "hidden_states": hidden_states,
+        }
 
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:
-        raise NotImplementedError(_TODO.format("ffn_preact_modules"))
+        return [ly.mlp.gate_proj for ly in model.layers]
 
     def activation_ops(self, model: nn.Module) -> list[nn.Module]:
-        raise NotImplementedError(_TODO.format("activation_ops"))
+        return [ly.mlp.act_fn for ly in model.layers]
