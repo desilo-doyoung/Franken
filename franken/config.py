@@ -87,8 +87,13 @@ class TrainConfig:
     teacher_ckpt: str | None = None
     output_dir: str = "outputs"
     # Which task drives data/tokenizer/loss/metric/teacher-training (franken.tasks
-    # registry). "mrpc" = GLUE MRPC classification; "embed" = embedding self-distill (stub).
+    # registry). "mrpc" = GLUE MRPC classification; "embed" = embedding self-distill.
     task: str = "mrpc"
+    # Corpus for the label-free embedding task (franken.data.embed_corpus registry):
+    # a named preset, not a dataset id, so a mix stays one config value. Ignored by
+    # tasks that bring their own data (MRPC). corpus_size = training examples to take.
+    corpus: str = "smoke"
+    corpus_size: int = 2000
     # Output namespace under output_dir: outputs/<run_name or model.backend>/...
     # None -> namespace by the model backend (e.g. outputs/bert/, outputs/qwen3/).
     # Set it to carve a specific experiment its own subtree.

@@ -1,51 +1,52 @@
-"""Embedding self-distillation task — STUB (to be implemented).
+"""Embedding self-distillation: match a pretrained embedding teacher, no labels.
 
-Objective: distill a pretrained Qwen3-Embedding teacher into an FHE-op student of the
-same architecture, matching the teacher's OUTPUT EMBEDDINGS (no labels, no fine-tune).
-Switching to a fine-tuned downstream task later is a Task swap only (the backend is unchanged).
+The teacher is the pretrained checkpoint (no fine-tune), and the target is its pooled
+embedding, so the "task" is agreement with the teacher rather than any downstream
+objective. Data is plain text from a corpus preset (``franken.data.embed_corpus``);
+the backend owns pooling, so this module never sees hidden-state layout.
 
-Implementation notes (parallels ``franken.tasks.mrpc.MrpcTask``):
-
-- build_tokenizer(cfg): ``AutoTokenizer.from_pretrained(cfg.train.teacher_model)``.
-- datasets(tokenizer, cfg): a representative text corpus (wikitext-2 for a smoke test;
-    wikitext-103 or a broad-corpus slice for real runs). Consider a config field for the
-    corpus id. Tokenize plain text (single field, no sentence pairs).
-- torch_columns(): ``["input_ids", "attention_mask"]``  (NO token_type_ids for Qwen3).
-- model_inputs(batch): ``{"input_ids": ..., "attention_mask": ...}``.
-- compute_loss(student_out, teacher_out, batch, cfg): embedding-match loss
-    (cosine distance or MSE between student_out["output"] and teacher_out["output"]) +
-    hidden-state MSE reusing ``franken.distill.loss.masked_mse_loss`` +
-    ``franken.distill.layer_map.resolve_layer_map``. Return (total, {"embed": ..., "hidden": ...}).
-- select_metric(): ``("embed_dist", False)``  (lower distance-to-teacher is better).
-- evaluate(...): compute mean embedding distance (and/or cosine sim) to the teacher on the
-    validation split. NOTE: needs the teacher too — thread it in when implementing (the
-    Distiller has both models), or recompute teacher embeddings here.
-- train_teacher(cfg): return None (the pretrained checkpoint is the teacher).
+Pairs with the Qwen3 backend, but nothing here is Qwen3-specific.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from transformers import AutoTokenizer
+
 from franken.config import Config
+from franken.data.embed_corpus import load_embed_corpus
 from franken.models.base import ModelBackend
 from franken.tasks.base import Task
 
-_TODO = "EmbedSelfDistillTask.{} is not implemented yet — see franken/tasks/embed.py docstring."
+_COLUMNS = ["input_ids", "attention_mask"]  # no token_type_ids for Qwen3
+
+_TODO = "EmbedSelfDistillTask.{} is not implemented yet."
 
 
 class EmbedSelfDistillTask(Task):
     def build_tokenizer(self, cfg: Config) -> Any:
-        raise NotImplementedError(_TODO.format("build_tokenizer"))
+        tok = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
+        # Right padding — the tokenizer's default, pinned for consistency, NOT correctness.
+        # Padding side does not change the embeddings: `model.py` (and HF) build position_ids
+        # as a plain arange, so left padding shifts every real token's RoPE position by the
+        # pad count — but RoPE is *relative*, attention depends only on position differences,
+        # and a constant shift cancels. Verified: same text alone vs batched with a much
+        # longer neighbour gives cosine 1.0 under either side, for teacher and student.
+        # (The model card recommends left; it makes no difference here.)
+        tok.padding_side = "right"
+        return tok
 
     def datasets(self, tokenizer: Any, cfg: Config) -> dict:
-        raise NotImplementedError(_TODO.format("datasets"))
+        return load_embed_corpus(
+            tokenizer, cfg.train.corpus, cfg.train.corpus_size, cfg.train.max_seq_len
+        )
 
     def torch_columns(self) -> list[str]:
-        raise NotImplementedError(_TODO.format("torch_columns"))
+        return list(_COLUMNS)
 
     def model_inputs(self, batch: dict) -> dict:
-        raise NotImplementedError(_TODO.format("model_inputs"))
+        return {"input_ids": batch["input_ids"], "attention_mask": batch["attention_mask"]}
 
     def compute_loss(self, student_out, teacher_out, batch, cfg: Config) -> tuple:
         raise NotImplementedError(_TODO.format("compute_loss"))
