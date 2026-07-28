@@ -84,11 +84,15 @@ class Distiller:
                 for m in self.backend.ffn_preact_modules(self.student)
             ]
 
-        self.student.train()
-
         metric_name, higher_is_better = self.task.select_metric()
         best = float("-inf") if higher_is_better else float("inf")
         best_state = None
+
+        # Baseline before any update: the student starts from teacher weights, so "did
+        # training help?" is only answerable against it. Not a checkpoint candidate.
+        print(f"init: {self.evaluate()}")
+
+        self.student.train()
 
         for epoch in range(self.cfg.train.distill.epochs):
             for batch in loader:
