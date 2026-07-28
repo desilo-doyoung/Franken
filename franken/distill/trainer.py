@@ -142,4 +142,6 @@ class Distiller:
 
     @torch.no_grad()
     def evaluate(self):
-        return self.task.evaluate(self.backend, self.student, self.tokenizer, self.cfg)
+        return self.task.evaluate(
+            self.backend, self.student, self.tokenizer, self.cfg, teacher=self.teacher
+        )

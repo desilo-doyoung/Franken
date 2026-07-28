@@ -12,8 +12,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
 from franken.config import Config, DistillConfig
@@ -105,11 +107,38 @@ class EmbedSelfDistillTask(Task):
         return total, {"embed": embed.detach(), "hidden": hidden.detach()}
 
     def select_metric(self) -> tuple[str, bool]:
-        raise NotImplementedError(_TODO.format("select_metric"))
+        # Distance to the teacher: lower is better. There are no labels, so "best" can only
+        # mean "closest to the teacher" — the same quantity the loss minimizes.
+        return ("embed_dist", False)
 
+    @torch.no_grad()
     def evaluate(
-        self, backend: ModelBackend, model, tokenizer, cfg: Config, split="validation"
+        self, backend: ModelBackend, model, tokenizer, cfg: Config, split="validation", teacher=None
     ) -> dict:
-        raise NotImplementedError(_TODO.format("evaluate"))
+        if teacher is None:
+            raise ValueError(
+                "EmbedSelfDistillTask.evaluate needs `teacher`: the metric is agreement with "
+                "the teacher, so there is nothing to score against without it."
+            )
+        data = self.datasets(tokenizer, cfg)
+        ds = data[split].with_format("torch", columns=self.torch_columns())
+        loader = DataLoader(ds, batch_size=cfg.train.distill.batch_size, collate_fn=data["collator"])
+        device = next(model.parameters()).device
+
+        model.eval()
+        cos_sum, n = 0.0, 0
+        for batch in loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            inputs = self.model_inputs(batch)
+            cos = F.cosine_similarity(
+                backend.forward(model, inputs)["output"],
+                backend.forward(teacher, inputs)["output"],
+                dim=-1,
+            )
+            cos_sum += cos.sum().item()
+            n += cos.numel()
+
+        mean_cos = cos_sum / n
+        return {"embed_dist": 1.0 - mean_cos, "embed_cos": mean_cos}
 
     # train_teacher inherits the base no-op (pretrained checkpoint is the teacher).
