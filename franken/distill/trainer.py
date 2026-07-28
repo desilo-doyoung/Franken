@@ -1,3 +1,5 @@
+import contextlib
+
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
@@ -21,6 +23,20 @@ def _range_penalty(preacts, domain):
         if outside.any():
             terms.append(((over**2 + under**2)[outside]).mean())
     return torch.stack(terms).mean() if terms else None
+
+
+def _precision_ctx(precision: str):
+    """Arithmetic for the training loop. TF32/bf16 also lower the precision of the *teacher's*
+    targets, not just the student's math, so a run's recall@10 must be checked against an fp32
+    reference before the speedup is trusted. Evaluation stays fp32 either way."""
+    if precision not in ("fp32", "tf32", "bf16"):
+        raise ValueError(f"Unknown precision {precision!r}; use fp32 | tf32 | bf16")
+    if precision != "fp32":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    if precision == "bf16":
+        return lambda: torch.autocast("cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext
 
 
 class Distiller:
@@ -94,20 +110,24 @@ class Distiller:
 
         self.student.train()
 
+        # Training-loop arithmetic (evaluation stays fp32 whatever this is).
+        precision_ctx = _precision_ctx(self.cfg.train.precision)
+
         for epoch in range(self.cfg.train.distill.epochs):
             for batch in loader:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 inputs = self.task.model_inputs(batch)
 
-                with torch.no_grad():
-                    teacher_outputs = self.backend.forward(self.teacher, inputs)
+                with precision_ctx():
+                    with torch.no_grad():
+                        teacher_outputs = self.backend.forward(self.teacher, inputs)
 
-                preacts.clear()
-                student_outputs = self.backend.forward(self.student, inputs)
+                    preacts.clear()
+                    student_outputs = self.backend.forward(self.student, inputs)
 
-                total, components = self.task.compute_loss(
-                    student_outputs, teacher_outputs, batch, self.cfg
-                )
+                    total, components = self.task.compute_loss(
+                        student_outputs, teacher_outputs, batch, self.cfg
+                    )
 
                 loss = total
                 if domain is not None:

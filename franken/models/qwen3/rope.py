@@ -12,7 +12,11 @@ class Qwen3RotaryEmbedding(nn.Module):
         )
 
     def forward(self, x, position_ids):
-        freqs = torch.einsum("bi, j -> bij", position_ids.float(), self.inv_freq)
+        # Broadcast multiply, not einsum: autocast intercepts einsum by name and casts its
+        # inputs to bf16 despite the .float() here, which corrupts the angles (measured
+        # max|Δcos| = 0.35 on a [-1, 1] range). A plain fp32 mul is bit-identical to the
+        # einsum (this is an outer product, no contraction) and autocast leaves it alone.
+        freqs = position_ids.float().unsqueeze(-1) * self.inv_freq
         emb = torch.cat((freqs, freqs), dim=-1)
         return emb.cos().to(x.dtype), emb.sin().to(x.dtype)
 
