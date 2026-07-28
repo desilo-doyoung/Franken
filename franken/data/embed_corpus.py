@@ -2,41 +2,99 @@
 
 The teacher supplies the targets, so no labels are needed — the corpus only has to
 resemble the text the student will embed. ``train.corpus`` names a *preset* (a recipe)
-rather than a dataset id, so when the corpus becomes a mix it stays one config value
-instead of a list of ids plus weights.
+rather than a dataset id, so a mix stays one config value instead of a list of ids plus
+weights.
 
-Texts are kept as **natural units** (a paragraph, later a query) rather than chunked into
-fixed-length blocks: an embedding model is deployed on whole passages, so blocks that start
-and end mid-sentence would be off-distribution. Each preset owns its own cleaning — what
-counts as junk is a property of the source, not a general rule.
+Texts are kept as **natural units** (a paragraph, a query) rather than chunked into
+fixed-length blocks: an embedding model is deployed on whole passages, so blocks that
+start and end mid-sentence would be off-distribution. Each source owns its own cleaning —
+what counts as junk is a property of that source, not a general rule.
+
+Queries carry the instruction prefix the model card specifies and documents carry none.
+The model has one forward pass for both — no query/document encoders — so this asymmetry
+is purely about covering the input distribution: distillation only repairs the student
+where data exists, and queries are short (~5-15 tokens), which is the regime where CGF
+softmax behaves differently (it normalizes by the visible-token count).
+
+Sources yield ``list[str]``; ``load_embed_corpus`` tokenizes and wraps them.
 """
 
+import random
 from typing import Any
 
 import datasets
 import transformers
 
+# Task-specific by design (the model card recommends tailoring it, worth 1-5%). MS MARCO is
+# web search, so this is its matching instruction.
+INSTRUCT = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{}"
+
 
 def _wikitext(config_name: str):
-    """Wikipedia paragraphs. Drops wikitext's blank lines and " = = Heading = = " rows,
-    which ship as records of their own and are junk to embed."""
+    """Wikipedia paragraphs (documents, unprefixed). Drops wikitext's blank lines and
+    " = = Heading = = " rows, which ship as records of their own."""
     min_chars = 32
 
-    def is_paragraph(example: dict) -> bool:
-        text = example["text"].strip()
-        return len(text) >= min_chars and not text.startswith("=")
-
-    def build(split: str, n: int):
-        ds = datasets.load_dataset("Salesforce/wikitext", config_name, split=split)
-        ds = ds.filter(is_paragraph)
-        return ds.select(range(min(n, len(ds))))
+    def build(split: str, n: int) -> list[str]:
+        ds = datasets.load_dataset("Salesforce/wikitext", config_name, split=split, streaming=True)
+        out = []
+        for example in ds:
+            text = example["text"].strip()
+            if len(text) >= min_chars and not text.startswith("="):
+                out.append(text)
+                if len(out) >= n:
+                    break
+        return out
 
     return build
 
 
-# name -> (split, n) -> dataset with a "text" column
+def _ms_marco(kind: str):
+    """Real web-search queries, or the passages they retrieve. ``kind`` is
+    ``"query"`` (instruction-prefixed, short) or ``"passage"`` (raw documents)."""
+
+    def build(split: str, n: int) -> list[str]:
+        ds = datasets.load_dataset("microsoft/ms_marco", "v1.1", split=split, streaming=True)
+        out = []
+        for example in ds:
+            if kind == "query":
+                out.append(INSTRUCT.format(example["query"].strip()))
+            else:
+                out += [p.strip() for p in example["passages"]["passage_text"] if p.strip()]
+            if len(out) >= n:
+                break
+        return out[:n]
+
+    return build
+
+
+def _mixed(weighted_sources):
+    """Draw each source in proportion, then interleave. The shuffle is seeded so a run is
+    reproducible, and it matters: unshuffled, every batch would be single-mode."""
+
+    def build(split: str, n: int) -> list[str]:
+        out = []
+        for source, weight in weighted_sources:
+            out += source(split, max(1, round(n * weight)))
+        random.Random(0).shuffle(out)
+        return out[:n]
+
+    return build
+
+
 CORPORA = {
+    # Pipeline proof only, never a result.
     "smoke": _wikitext("wikitext-2-raw-v1"),
+    # Proportions are a judgment call, set from the length profile rather than derived:
+    # enough query coverage that the mode is not unseen, without letting ~10-token texts
+    # dominate a corpus whose max_seq_len is 128.
+    "mixed": _mixed(
+        [
+            (_ms_marco("query"), 0.2),
+            (_ms_marco("passage"), 0.4),
+            (_wikitext("wikitext-103-raw-v1"), 0.4),
+        ]
+    ),
 }
 
 
@@ -56,12 +114,9 @@ def load_embed_corpus(
         return tokenizer(batch["text"], truncation=True, max_length=max_seq_len)
 
     splits = {"train": build("train", size), "validation": build("validation", val_size)}
-    splits = {
-        k: v.map(tok, batched=True, remove_columns=v.column_names) for k, v in splits.items()
+    out = {
+        k: datasets.Dataset.from_dict({"text": v}).map(tok, batched=True, remove_columns=["text"])
+        for k, v in splits.items()
     }
-
-    return {
-        "train": splits["train"],
-        "validation": splits["validation"],
-        "collator": transformers.DataCollatorWithPadding(tokenizer),
-    }
+    out["collator"] = transformers.DataCollatorWithPadding(tokenizer)
+    return out

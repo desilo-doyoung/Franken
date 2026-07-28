@@ -24,29 +24,34 @@ from franken.models import build_backend
 from franken.tasks import build_task
 from torch.utils.data import DataLoader
 
-SAMPLE = 20_000  # values kept per layer per batch, so quantiles fit in memory
+SAMPLE = 20_000  # values kept per layer per batch, for quantiles only
 
 
-def _sample(x):
+def _record(store, i, x, domain):
+    """min/max/over-domain counts are EXACT over every value — with no clamp at inference the
+    single largest value decides safety, so that statistic must never be subsampled. Only the
+    quantile uses a subsample."""
     x = x.flatten().float()
-    if x.numel() > SAMPLE:
-        x = x[torch.randint(0, x.numel(), (SAMPLE,), device=x.device)]
-    return x.cpu()
+    s = store.setdefault(i, {"min": float("inf"), "max": -float("inf"), "over": 0, "n": 0, "q": []})
+    s["min"] = min(s["min"], x.min().item())
+    s["max"] = max(s["max"], x.max().item())
+    s["over"] += int((x.abs() > domain).sum())
+    s["n"] += x.numel()
+    s["q"].append(x[torch.randint(0, x.numel(), (SAMPLE,), device=x.device)] if x.numel() > SAMPLE else x)
 
 
-def _report(title, per_layer, domain=None):
+def _report(title, store, show_over):
     print(f"\n{title}")
-    head = f"{'layer':>5} {'min':>10} {'max':>10} {'p99.9|x|':>10}"
-    print(head + (f" {'%|x|>D':>9}" if domain else ""))
+    print(f"{'layer':>5} {'min':>10} {'max':>10} {'p99.9|x|':>10}" + (f" {'%|x|>D':>9}" if show_over else ""))
     worst = 0.0
-    for i in sorted(per_layer):
-        x = torch.cat(per_layer[i])
-        worst = max(worst, x.abs().max().item())
-        row = f"{i:>5} {x.min():>10.2f} {x.max():>10.2f} {x.abs().quantile(0.999):>10.2f}"
-        if domain:
-            row += f" {(x.abs() > domain).float().mean() * 100:>8.3f}%"
+    for i in sorted(store):
+        s = store[i]
+        worst = max(worst, abs(s["min"]), abs(s["max"]))
+        row = f"{i:>5} {s['min']:>10.2f} {s['max']:>10.2f} {torch.cat(s['q']).abs().quantile(0.999):>10.2f}"
+        if show_over:
+            row += f" {100 * s['over'] / s['n']:>8.3f}%"
         print(row)
-    print(f"  max|x| over all layers: {worst:.1f}")
+    print(f"  max|x| over all layers: {worst:.1f}  (exact, not subsampled)")
     return worst
 
 
@@ -81,9 +86,7 @@ def main(argv: list[str] | None = None) -> None:
     for i, module in enumerate(backend.ffn_preact_modules(model)):
         hooks.append(
             module.register_forward_hook(
-                lambda m, inp, out, i=i: preact.setdefault(i, []).append(
-                    _sample(out[mask_holder["m"]])
-                )
+                lambda m, inp, out, i=i: _record(preact, i, out[mask_holder["m"]], domain)
             )
         )
     for i, layer in enumerate(model.layers):
@@ -91,8 +94,8 @@ def main(argv: list[str] | None = None) -> None:
         # actually visible: both tokens real, and key <= query (causal).
         hooks.append(
             layer.self_attn.softmax.register_forward_pre_hook(
-                lambda m, a, i=i: scores.setdefault(i, []).append(
-                    _sample(a[0][mask_holder["vis"].expand_as(a[0])])
+                lambda m, a, i=i: _record(
+                    scores, i, a[0][mask_holder["vis"].expand_as(a[0])], domain
                 )
             )
         )
@@ -113,10 +116,10 @@ def main(argv: list[str] | None = None) -> None:
         h.remove()
 
     print(f"\n{len(ds)} texts, {n_tok} real tokens")
-    worst = _report("FFN pre-activations — input to the polynomial activation", preact, domain)
-    _report("attention scores — input to the softmax (visible entries only)", scores)
+    worst = _report("FFN pre-activations — input to the polynomial activation", preact, True)
+    _report("attention scores — input to the softmax (visible entries only)", scores, False)
 
-    over = [i for i in sorted(preact) if torch.cat(preact[i]).abs().max() > domain]
+    over = [i for i in sorted(preact) if max(abs(preact[i]["min"]), preact[i]["max"]) > domain]
     print(f"\nlayers exceeding D={domain}: {over or 'none'}")
     print(f"a single domain covering every layer would need D >= {worst:.0f}\n")
 
