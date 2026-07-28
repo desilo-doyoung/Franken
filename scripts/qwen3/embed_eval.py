@@ -48,14 +48,18 @@ def _embed(backend, model, task, batches, device):
 def _neighbour_agreement(student, teacher):
     """recall@K vs the teacher's neighbours, plus Spearman over all pairwise similarities."""
     ss, st = student @ student.T, teacher @ teacher.T  # unit-norm rows -> cosine
+
+    # Mask out self-similarity (diagonal) so it doesn't count as a neighbour.
     eye = torch.eye(ss.size(0), dtype=torch.bool)
     ss.masked_fill_(eye, float("-inf"))
     st.masked_fill_(eye, float("-inf"))
 
+    # Recall@K: how many of the teacher's top-K neighbours are also in the student's top-K.
     top_s, top_t = ss.topk(K, dim=-1).indices, st.topk(K, dim=-1).indices
     hits = sum(len(set(a.tolist()) & set(b.tolist())) for a, b in zip(top_s, top_t, strict=True))
     recall = hits / (top_s.size(0) * K)
 
+    # Extracts every off-diagonal pairwise similarity and calculates Spearman rank correlation.
     off = ~eye
     rho = spearmanr(ss[off].numpy(), st[off].numpy()).statistic
     return recall, rho
@@ -81,6 +85,7 @@ def _stsb(backend, model, task, tokenizer, cfg, device):
         return torch.cat(out)
 
     sims = F.cosine_similarity(embed(ds["sentence1"]), embed(ds["sentence2"]), dim=-1)
+    # label range is [0, 5], but Spearman is rank-based so it doesn't matter.
     return spearmanr(sims.numpy(), ds["label"]).statistic
 
 
