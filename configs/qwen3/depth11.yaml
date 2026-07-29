@@ -1,0 +1,61 @@
+# Depth 11 — the collapse threshold. 17 of 28 layers removed (61%).
+#
+# The zero-training init curve is smooth down to 11 (recall@10 0.392) and collapses below it for
+# ANY map, so this is the last depth where the seeded student retains usable structure. The question
+# distillation answers here: is the cliff a property of the initialization only (recoverable) or of
+# an 11-layer network's capacity (not recoverable)? Depth 19 recovered 66% of its init deficit and
+# depth 24 48%; if the recovery fraction keeps rising, 11 lands near 0.75, and if the cliff is real
+# it lands far below.
+#
+# This is the run that decides how aggressive the FHE depth lever can be, since every removed layer
+# is a fixed multiplicative-depth saving.
+#
+# hidden_layer_map is set from the measured block scan, NOT the assumed middle — the scan moved the
+# best block off-centre at depth 19 (12-20, not 9-17).
+#
+#   scan:    uv run python scripts/qwen3/map_scan.py --config configs/qwen3/depth11.yaml
+#   distill: uv run python main.py distill --config configs/qwen3/depth11.yaml
+
+model:
+  backend: qwen3
+  num_hidden_layers: 11
+
+  softmax: exact # exact ops on purpose — isolate the cost of depth
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  # Remove teacher layers 5-21 — measured best of all 12 positions (init recall@10 0.3922). Here the
+  # best block IS the middle, unlike depth 14 (6-19) and 19 (12-20). Beyond 3-19..5-21 quality falls
+  # off hard in both directions, so at this depth the map is nearly forced.
+  hidden_layer_map: [0, 1, 2, 3, 4, 22, 23, 24, 25, 26, 27]
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 24000 # 750 steps/epoch at batch 32
+  output_dir: outputs
+  run_name: qwen3_depth11
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: tf32
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 2.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
