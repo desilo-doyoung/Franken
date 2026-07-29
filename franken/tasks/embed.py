@@ -27,7 +27,34 @@ from franken.tasks.base import Task
 
 _COLUMNS = ["input_ids", "attention_mask"]  # no token_type_ids for Qwen3
 
-_TODO = "EmbedSelfDistillTask.{} is not implemented yet."
+# Neighbourhood size for the selection metric. 10 because that is the scale retrieval is
+# consumed at; the pool is 500 texts, so recall@10 has 5000 slots and a quantum of 0.0002.
+RECALL_K = 10
+_RECALL_KEY = f"recall@{RECALL_K}"
+
+
+def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = RECALL_K) -> float:
+    """Fraction of each text's top-k teacher neighbours that the student also retrieves.
+
+    This is what an embedding model is actually used through — *relative* similarity — and it
+    is why per-vector agreement (``embed_dist`` = 1-cos) is not enough on its own: uniform
+    shrinkage of the near/far spread keeps cosine high while destroying the ranking, and a
+    global rotation does the reverse. Measured to disagree with ``embed_dist`` repeatedly, so
+    this is the selection metric and ``embed_dist`` is logging only.
+
+    Rows must be L2-normed (the backend's pooled output is), so ``x @ x.T`` is cosine.
+    Defined here rather than in the eval script so training-time selection and end-of-run
+    scoring cannot drift apart.
+    """
+    ss, st = student @ student.T, teacher @ teacher.T
+    # Mask self-similarity, else every row's nearest neighbour is itself and both models
+    # agree on it for free.
+    eye = torch.eye(ss.size(0), dtype=torch.bool, device=ss.device)
+    ss.masked_fill_(eye, float("-inf"))
+    st.masked_fill_(eye, float("-inf"))
+    top_s, top_t = ss.topk(k, dim=-1).indices, st.topk(k, dim=-1).indices
+    hits = sum(len(set(a.tolist()) & set(b.tolist())) for a, b in zip(top_s, top_t, strict=True))
+    return hits / (top_s.size(0) * k)
 
 
 class EmbeddingDistillLoss(nn.Module):
@@ -107,9 +134,10 @@ class EmbedSelfDistillTask(Task):
         return total, {"embed": embed.detach(), "hidden": hidden.detach()}
 
     def select_metric(self) -> tuple[str, bool]:
-        # Distance to the teacher: lower is better. There are no labels, so "best" can only
-        # mean "closest to the teacher" — the same quantity the loss minimizes.
-        return ("embed_dist", False)
+        # Deliberately NOT the quantity the loss minimizes. There are no labels, so "best"
+        # means "closest to the teacher", but per-vector closeness (what the loss and
+        # `embed_dist` measure) is not what the model is used through — see `recall_at_k`.
+        return (_RECALL_KEY, True)
 
     @torch.no_grad()
     def evaluate(
@@ -122,23 +150,31 @@ class EmbedSelfDistillTask(Task):
             )
         data = self.datasets(tokenizer, cfg)
         ds = data[split].with_format("torch", columns=self.torch_columns())
-        loader = DataLoader(ds, batch_size=cfg.train.distill.batch_size, collate_fn=data["collator"])
+        # The run's batch size, from config — eval needs no separate knob. Dynamic padding does
+        # perturb the embeddings across batch compositions, but only at ~5e-7: measured on the
+        # depth-19 checkpoint, recall@10 is *bit-identical* at eval batch 8/16/32/64 (0.863000)
+        # and only `embed_dist` moves, in its 8th decimal. Selection is therefore unaffected.
+        loader = DataLoader(
+            ds, batch_size=cfg.train.distill.batch_size, collate_fn=data["collator"]
+        )
         device = next(model.parameters()).device
 
+        # Whole-pool embeddings, not a streaming mean: recall@k is a property of the pool's
+        # neighbourhood structure, so it cannot be accumulated batch by batch. 500x1024 fp32.
         model.eval()
-        cos_sum, n = 0.0, 0
+        student_emb, teacher_emb = [], []
         for batch in loader:
             batch = {k: v.to(device) for k, v in batch.items()}
             inputs = self.model_inputs(batch)
-            cos = F.cosine_similarity(
-                backend.forward(model, inputs)["output"],
-                backend.forward(teacher, inputs)["output"],
-                dim=-1,
-            )
-            cos_sum += cos.sum().item()
-            n += cos.numel()
+            student_emb.append(backend.forward(model, inputs)["output"].float().cpu())
+            teacher_emb.append(backend.forward(teacher, inputs)["output"].float().cpu())
+        student_emb, teacher_emb = torch.cat(student_emb), torch.cat(teacher_emb)
 
-        mean_cos = cos_sum / n
-        return {"embed_dist": 1.0 - mean_cos, "embed_cos": mean_cos}
+        mean_cos = F.cosine_similarity(student_emb, teacher_emb, dim=-1).mean().item()
+        return {
+            _RECALL_KEY: recall_at_k(student_emb, teacher_emb),
+            "embed_dist": 1.0 - mean_cos,
+            "embed_cos": mean_cos,
+        }
 
     # train_teacher inherits the base no-op (pretrained checkpoint is the teacher).

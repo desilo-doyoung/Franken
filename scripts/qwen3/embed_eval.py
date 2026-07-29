@@ -31,10 +31,10 @@ import torch.nn.functional as F
 from franken.config import Config
 from franken.models import build_backend
 from franken.tasks import build_task
+from franken.tasks.embed import RECALL_K as K
+from franken.tasks.embed import recall_at_k
 from scipy.stats import spearmanr
 from torch.utils.data import DataLoader
-
-K = 10
 
 
 @torch.no_grad()
@@ -47,21 +47,17 @@ def _embed(backend, model, task, batches, device):
 
 
 def _neighbour_agreement(student, teacher):
-    """recall@K vs the teacher's neighbours, plus Spearman over all pairwise similarities."""
+    """recall@K vs the teacher's neighbours, plus Spearman over all pairwise similarities.
+
+    recall@K comes from `franken.tasks.embed.recall_at_k` — the same function the training loop
+    selects checkpoints with, so this script cannot silently score a different quantity than
+    the one that chose the checkpoint.
+    """
+    recall = recall_at_k(student, teacher, K)
+
     ss, st = student @ student.T, teacher @ teacher.T  # unit-norm rows -> cosine
-
-    # Mask out self-similarity (diagonal) so it doesn't count as a neighbour.
-    eye = torch.eye(ss.size(0), dtype=torch.bool)
-    ss.masked_fill_(eye, float("-inf"))
-    st.masked_fill_(eye, float("-inf"))
-
-    # Recall@K: how many of the teacher's top-K neighbours are also in the student's top-K.
-    top_s, top_t = ss.topk(K, dim=-1).indices, st.topk(K, dim=-1).indices
-    hits = sum(len(set(a.tolist()) & set(b.tolist())) for a, b in zip(top_s, top_t, strict=True))
-    recall = hits / (top_s.size(0) * K)
-
-    # Extracts every off-diagonal pairwise similarity and calculates Spearman rank correlation.
-    off = ~eye
+    # Every off-diagonal pairwise similarity (self-similarity excluded), Spearman-correlated.
+    off = ~torch.eye(ss.size(0), dtype=torch.bool)
     rho = spearmanr(ss[off].numpy(), st[off].numpy()).statistic
     return recall, rho
 
