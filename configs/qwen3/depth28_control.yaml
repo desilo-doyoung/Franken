@@ -1,11 +1,9 @@
-# CONTROL for the depth experiments: full depth 28, exact ops, identical long recipe.
+# CONTROL for every depth experiment: full depth 28, exact ops, identical recipe.
 #
-# Nothing is removed and the ops are exact, so the student starts AS the teacher and has
-# nothing to learn. Whatever recall@10 this run loses is therefore pure training-induced
-# drift (AdamW takes ~lr-sized steps even on noise-level gradients). Subtract it from the
-# reduced-depth runs to get the true cost of removing layers — without it, "cost of the depth
-# cut" and "cost of training for 9000 steps" are inseparable. The earlier 3.8% drift figure
-# came from a 750-step run and so understates this budget.
+# Nothing is removed and the ops are exact, so the student starts AS the teacher and has nothing to
+# learn. Whatever it loses is therefore pure training-induced drift, to be subtracted from the
+# reduced-depth runs. RESULT: recall@10 0.9648, STS-B 0.8739 (+0.1%) => drift costs 3.5% of recall and
+# 0% of STS-B, which is what makes STS-B the clean depth-attribution channel.
 #
 #   distill: uv run python main.py distill --config configs/qwen3/depth28_control.yaml
 

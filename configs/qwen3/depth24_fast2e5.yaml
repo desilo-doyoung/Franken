@@ -1,15 +1,11 @@
-# Depth 24, exact ops — THE REFERENCE RUN, and the template for the standard recipe
-# (precision: tf32 + batch 32 + lr 2e-5). Result: recall@10 0.9070, STS-B delta -0.0257,
-# 27 min on one A6000.
+# Depth 24, exact ops — THE REFERENCE RUN and the template for the standard recipe
+# (precision tf32 + batch 32 + lr 2e-5, verified to reproduce fp32/bs8 exactly at 2x the speed).
 #
-# This is depth 24's measured ceiling: 3x the data bought <1 point of recall (0.8982 -> 0.9070),
-# and STS-B was flat across every variant, so quality here is set by the architecture change
-# rather than the training budget. LR is also settled — 1e-5 vs 2e-5 at bs8 differed by 0.001.
-# See franken/models/qwen3/PROGRESS.md for the full recipe/fidelity tables.
+# RESULT: recall@10 0.9070, STS-B 0.8473 (-2.9% relative). This is depth 24's ceiling — 3x the data
+# bought <1 point, and LR barely matters (1e-5 vs 2e-5 differed by 0.001), so quality here is set by
+# the architecture change rather than the training budget.
 #
 #   distill: uv run python main.py distill --config configs/qwen3/depth24_fast2e5.yaml
-#   score:   uv run python scripts/qwen3/embed_eval.py --config configs/qwen3/depth24_fast2e5.yaml \
-#              --student-ckpt outputs/qwen3_depth24_fast2e5/student/pytorch_model.bin
 
 model:
   backend: qwen3

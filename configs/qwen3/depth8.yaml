@@ -1,17 +1,11 @@
-# Depth 8 — 20 of 28 layers removed (71%). Looking for the floor.
+# Depth 8, exact ops — 71% of layers removed. Where the floor finally starts to appear.
 #
-# The trained depth curve has been linear at ~0.9 recall points per layer from 24 down to 11, and STS-B
-# has not moved outside its noise band since depth 24 (0.8473 at 24, 0.8264 at 11). Both trends must
-# break somewhere; nothing measured so far says where. This run either finds that floor or shows the
-# depth lever runs further than this project assumed — a 3.5x cut in multiplicative depth, which is the
-# dominant FHE cost.
+# RESULT: recall@10 0.7486, STS-B 0.8130 (-6.9% relative), from an init of just 0.18 (72% recovery).
+# Two signs of an approaching limit: per-layer cost rose to 0.0123 (from ~0.0094 across 24->11), and
+# STS-B broke its plateau for the first time since depth 24 (-0.0134 vs depth 11, clearing the noise
+# band). Still usable — and a 3.5x cut in multiplicative depth, the dominant FHE cost.
 #
-# Extrapolating the linear trend predicts recall@10 ~0.76. Treat that as a null hypothesis, not a
-# forecast: at some depth the retained layers must run out of capacity to stand in for the removed ones.
-#
-# Map follows the only rule that survived trained testing: protect the ends. Keeps teacher 0-3 and
-# 24-27, removes the entire middle. NB at this depth "protect the first ~4 / last ~5" nearly determines
-# the map by itself — there is no freedom left to place a block.
+# Map is the middle block; at this depth "keep the ends" nearly determines it anyway.
 #
 #   distill: uv run python main.py distill --config configs/qwen3/depth8.yaml
 
@@ -27,7 +21,6 @@ model:
 distill:
   beta: 1.0
   hidden_layer_map: [0, 1, 2, 3, 24, 25, 26, 27]
-  freeze_layers: null
   range_penalty: 0.0
 
 train:

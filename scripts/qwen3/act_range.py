@@ -37,17 +37,23 @@ def _record(store, i, x, domain):
     s["max"] = max(s["max"], x.max().item())
     s["over"] += int((x.abs() > domain).sum())
     s["n"] += x.numel()
-    s["q"].append(x[torch.randint(0, x.numel(), (SAMPLE,), device=x.device)] if x.numel() > SAMPLE else x)
+    s["q"].append(
+        x[torch.randint(0, x.numel(), (SAMPLE,), device=x.device)] if x.numel() > SAMPLE else x
+    )
 
 
 def _report(title, store, show_over):
     print(f"\n{title}")
-    print(f"{'layer':>5} {'min':>10} {'max':>10} {'p99.9|x|':>10}" + (f" {'%|x|>D':>9}" if show_over else ""))
+    print(
+        f"{'layer':>5} {'min':>10} {'max':>10} {'p99.9|x|':>10}"
+        + (f" {'%|x|>D':>9}" if show_over else "")
+    )
     worst = 0.0
     for i in sorted(store):
         s = store[i]
         worst = max(worst, abs(s["min"]), abs(s["max"]))
-        row = f"{i:>5} {s['min']:>10.2f} {s['max']:>10.2f} {torch.cat(s['q']).abs().quantile(0.999):>10.2f}"
+        p999 = torch.cat(s["q"]).abs().quantile(0.999)
+        row = f"{i:>5} {s['min']:>10.2f} {s['max']:>10.2f} {p999:>10.2f}"
         if show_over:
             row += f" {100 * s['over'] / s['n']:>8.3f}%"
         print(row)

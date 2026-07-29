@@ -53,43 +53,6 @@ class Distiller:
         self.backend.seed_student(self.student, self.teacher, self.cfg)
         self.student.to(self.device)
 
-    def _apply_freeze(self) -> None:
-        """Hold `distill.freeze_layers` (student indices) at their seeded teacher weights.
-
-        The two ends of a depth-reduced student are in opposite situations. Layers *before* the
-        splice see inputs identical to their teacher counterparts and are pinned by the hidden loss
-        to targets they already match, so their gradient is noise that AdamW still converts into
-        ~lr-sized steps — freezing them should cost nothing and dodge that drift. Layers *after* the
-        splice receive activations from a layer they were never paired with, and adapting to that is
-        the distillation itself, so freezing those should hurt. Both directions are worth measuring.
-
-        NB the token embedding table stays trainable and is not pinned by any hidden term (the loss
-        skips `hidden_states[0]`), so it remains an untested drift surface — and at 155M params it is
-        a third of a depth-19 Qwen3 student. Measured on a short run, it takes the same maximum step
-        as a fully-trainable layer (both 8.0e-5), which is the lr-sized-step argument above showing
-        up directly in the weights.
-        """
-        frozen = self.cfg.distill.freeze_layers
-        if not frozen:
-            return
-        layers = self.backend.layer_modules(self.student)
-        bad = [i for i in frozen if not 0 <= i < len(layers)]
-        if bad:
-            raise ValueError(
-                f"freeze_layers {bad} out of range for a {len(layers)}-layer student "
-                f"(valid 0..{len(layers) - 1}; these are STUDENT indices, not teacher's)"
-            )
-        held = 0
-        for i in frozen:
-            for p in layers[i].parameters():
-                p.requires_grad = False
-                held += p.numel()
-        total = sum(p.numel() for p in self.student.parameters())
-        print(
-            f"frozen: student layers {sorted(frozen)} — {held / 1e6:.1f}M of {total / 1e6:.1f}M "
-            f"params ({100 * held / total:.0f}%) held at teacher init"
-        )
-
     def train(self):
         set_seed(self.cfg.train.seed)
         data = self.task.datasets(self.tokenizer, self.cfg)
@@ -101,9 +64,8 @@ class Distiller:
             collate_fn=data["collator"],
         )
 
-        self._apply_freeze()
         optimizer = AdamW(
-            [p for p in self.student.parameters() if p.requires_grad],
+            self.student.parameters(),
             lr=self.cfg.train.distill.lr,
             weight_decay=self.cfg.train.distill.weight_decay,
         )

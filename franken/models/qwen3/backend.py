@@ -75,9 +75,6 @@ class Qwen3Backend(ModelBackend):
             "hidden_states": hidden_states,
         }
 
-    def layer_modules(self, model: nn.Module) -> list[nn.Module]:
-        return list(model.layers)
-
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:
         return [ly.mlp.gate_proj for ly in model.layers]
 

@@ -56,8 +56,11 @@ def main() -> int:
     # The embed task will own this; until it exists, build it the same way it will.
     tokenizer = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
     enc = tokenizer(
-        PROBE_TEXTS, padding=True, truncation=True,
-        max_length=cfg.train.max_seq_len, return_tensors="pt",
+        PROBE_TEXTS,
+        padding=True,
+        truncation=True,
+        max_length=cfg.train.max_seq_len,
+        return_tensors="pt",
     )
     inputs = {k: enc[k].to(device) for k in ("input_ids", "attention_mask")}
 
@@ -90,12 +93,16 @@ def main() -> int:
     d = (sh[worst] - th[worst]).abs()
     at = th[worst].flatten()[d.argmax()].abs().item()
     ulp = math.ldexp(1.0, math.frexp(at)[1] - 24) if at else float("inf")
-    print(f"  worst: entry {worst} on |teacher|={at:.6g} -> {d.max().item() / ulp:.1f} ULP "
-          f"({'rounding' if d.max().item() / ulp <= MAX_ULP else 'CHECK THIS'})")
+    print(
+        f"  worst: entry {worst} on |teacher|={at:.6g} -> {d.max().item() / ulp:.1f} ULP "
+        f"({'rounding' if d.max().item() / ulp <= MAX_ULP else 'CHECK THIS'})"
+    )
 
     acts = backend.activation_ops(student)
-    print(f"ops: preact={len(backend.ffn_preact_modules(student))} act={len(acts)} "
-          f"{type(acts[0]).__name__} domain={getattr(acts[0], 'domain', None)}")
+    print(
+        f"ops: preact={len(backend.ffn_preact_modules(student))} act={len(acts)} "
+        f"{type(acts[0]).__name__} domain={getattr(acts[0], 'domain', None)}"
+    )
 
     ok = cos.min().item() > COS_THRESHOLD
     print(f"PARITY GATE {'PASSED' if ok else 'FAILED'} (threshold {COS_THRESHOLD})\n")

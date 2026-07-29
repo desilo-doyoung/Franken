@@ -1,19 +1,10 @@
-# Depth 11 — the collapse threshold. 17 of 28 layers removed (61%).
+# Depth 11, exact ops — 61% of layers removed, once believed to be past a cliff.
 #
-# The zero-training init curve is smooth down to 11 (recall@10 0.392) and collapses below it for
-# ANY map, so this is the last depth where the seeded student retains usable structure. The question
-# distillation answers here: is the cliff a property of the initialization only (recoverable) or of
-# an 11-layer network's capacity (not recoverable)? Depth 19 recovered 66% of its init deficit and
-# depth 24 48%; if the recovery fraction keeps rising, 11 lands near 0.75, and if the cliff is real
-# it lands far below.
+# The zero-training init curve collapses below depth 11 for any map (init here is just 0.3922), which
+# had been recorded as a capacity limit. RESULT: recall@10 0.7856, STS-B 0.8264 (-5.3% relative), i.e.
+# right on the same ~0.9-points-per-layer line as every milder cut. The "collapse" describes strided
+# INITIALIZATION, not an 11-layer network's capacity.
 #
-# This is the run that decides how aggressive the FHE depth lever can be, since every removed layer
-# is a fixed multiplicative-depth saving.
-#
-# hidden_layer_map is set from the measured block scan, NOT the assumed middle — the scan moved the
-# best block off-centre at depth 19 (12-20, not 9-17).
-#
-#   scan:    uv run python scripts/qwen3/map_scan.py --config configs/qwen3/depth11.yaml
 #   distill: uv run python main.py distill --config configs/qwen3/depth11.yaml
 
 model:

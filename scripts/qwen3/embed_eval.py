@@ -125,8 +125,7 @@ def main(argv: list[str] | None = None) -> None:
     t_sts = _stsb(backend, teacher, task, tokenizer, cfg, device)
     s_sts = _stsb(backend, student, task, tokenizer, cfg, device)
     print(
-        f"\nSTS-B spearman: teacher {t_sts:.4f}  student {s_sts:.4f}  "
-        f"delta {s_sts - t_sts:+.4f}\n"
+        f"\nSTS-B spearman: teacher {t_sts:.4f}  student {s_sts:.4f}  delta {s_sts - t_sts:+.4f}\n"
     )
 
     # Same numbers, structurally: run_experiments.py collects these instead of re-parsing the

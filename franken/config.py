@@ -58,11 +58,6 @@ class DistillConfig:
     temperature: float = 2.0
     # None -> auto uniform-stride map computed from teacher/student depths.
     hidden_layer_map: list[int] | None = None
-    # STUDENT layer indices to hold at their seeded (teacher) weights during distillation.
-    # None/[] = train everything. Layers whose inputs are unchanged by the depth cut are already
-    # optimal at init, so their gradient is noise — and AdamW turns noise into ~lr-sized steps.
-    # Freezing them trades away adaptation capacity for immunity to that drift.
-    freeze_layers: list[int] | None = None
     # Squash-penalty weight: keeps FFN pre-activations inside a polynomial
     # activation's valid domain (e.g. cheb_gelu) so the bare poly is FHE-safe at
     # inference. 0 = off; ignored for ops without a bounded domain (e.g. exact).

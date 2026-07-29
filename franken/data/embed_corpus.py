@@ -27,7 +27,9 @@ import transformers
 
 # Task-specific by design (the model card recommends tailoring it, worth 1-5%). MS MARCO is
 # web search, so this is its matching instruction.
-INSTRUCT = "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{}"
+INSTRUCT = (
+    "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{}"
+)
 
 
 def _wikitext(config_name: str):

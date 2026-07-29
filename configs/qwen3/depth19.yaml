@@ -1,18 +1,15 @@
-# Depth 19, exact ops — the BERT-EQUIVALENT cut. BERT went 12 -> 8, removing 33% of layers;
-# 28 -> 19 removes 32%, so this is the run that answers "does Qwen3 tolerate the same relative
-# reduction BERT did?" (BERT: MRPC test F1 0.873 vs an 0.881 teacher, i.e. -0.9% relative).
+# Depth 19, exact ops — the BERT-EQUIVALENT cut (BERT went 12->8, removing 33%; 28->19 removes 32%)
+# and the best-understood point on the depth curve.
 #
-# Drop-middle map removes teacher layers 9-17, keeping 0-8 and 18-27. Init recall@10 is 0.596
-# (zero-training sweep). Depth 24 recovered 48% of its init deficit (0.805 -> 0.907); if that
-# rate held here it would land ~0.79, but that is a one-point extrapolation and the recovery
-# fraction may well fall as the deficit grows.
+# RESULT: recall@10 0.8626, STS-B 0.8361 (-4.2% relative). Reproduced on separate hardware to within
+# 2 slots of 5000. Answers the headline question "does Qwen3 tolerate BERT's relative cut?" — not as
+# cheaply: BERT paid -0.9% relative F1 for 33%, this pays -4.2% relative STS-B for 32%.
 #
-# Standard recipe: precision tf32 + batch 32 + lr 2e-5 (verified to reproduce fp32/bs8 exactly
-# at depth 24, at 2x the speed). ~27 min on one A6000.
+# The map is the plain middle block, which beat all seven alternatives tested at this depth (init-scan
+# picks, distributed removal, uniform stride, top-drop, bottom-drop). See PROGRESS: quality is an
+# inverted U in the block's centre position, peaking at the middle of the stack.
 #
 #   distill: uv run python main.py distill --config configs/qwen3/depth19.yaml
-#   score:   uv run python scripts/qwen3/embed_eval.py --config configs/qwen3/depth19.yaml \
-#              --student-ckpt outputs/qwen3_depth19/student/pytorch_model.bin
 
 model:
   backend: qwen3
