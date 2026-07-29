@@ -115,19 +115,27 @@ def one_experiment(config: str, device: str, out_dir: str, eval_only: bool) -> d
     return result
 
 
-def report(results: list[dict]) -> None:
+def report(results: list[dict], out_dir: str) -> None:
+    """Print the summary and save it. Terminal scrollback is not storage — a remote batch has to
+    leave a durable artifact, or a closed ssh session loses the only copy of an hour of GPU time."""
     ok = [r for r in results if not r.get("error")]
-    print("\n" + "=" * 78)
-    print("RESULTS — paste into franken/models/qwen3/PROGRESS.md\n")
-    print("| run | depth | ops | recall@10 | embed_dist | STS-B | Δ teacher | relative | min |")
-    print("|---|---|---|---|---|---|---|---|---|")
+    out: list[str] = []
+
+    def emit(line: str = "") -> None:
+        out.append(line)
+        print(line)
+
+    emit("\n" + "=" * 78)
+    emit("RESULTS — paste into franken/models/qwen3/PROGRESS.md\n")
+    emit("| run | depth | ops | recall@10 | embed_dist | STS-B | Δ teacher | relative | min |")
+    emit("|---|---|---|---|---|---|---|---|---|")
     for r in ok:
         mins = f"{r['minutes']:.0f}" if r.get("minutes") else "—"
         delta = r["stsb_student"] - r["stsb_teacher"]
         # Relative to the teacher's own STS-B, which is the reference the claim is about
         # ("preserves the teacher"), not an absolute-quality score.
         rel = 100 * delta / r["stsb_teacher"]
-        print(
+        emit(
             f"| {r['stem']} | {r['depth']} | {r['softmax']}/{r['activation']} "
             f"| {r['recall']:.4f} | {r['embed_dist']:.5f} | {r['stsb_student']:.4f} "
             f"| {delta:+.4f} | {rel:+.1f}% | {mins} |"
@@ -138,22 +146,31 @@ def report(results: list[dict]) -> None:
     for r in results:
         if r.get("error"):
             log = f"  ({r['log']})" if r.get("log") else ""
-            print(f"\nFAILED {r['stem']}: {r['error']}{log}")
+            emit(f"\nFAILED {r['stem']}: {r['error']}{log}")
 
     teachers = {round(r["stsb_teacher"], 4) for r in ok}
     if teachers:
         # One value unless configs differ in max_seq_len — the teacher is deterministic, so a
         # second value means the runs aren't comparable on STS-B and the deltas hide it.
-        print(f"\nteacher STS-B: {', '.join(f'{t:.4f}' for t in sorted(teachers))}")
+        emit(f"\nteacher STS-B: {', '.join(f'{t:.4f}' for t in sorted(teachers))}")
         if len(teachers) > 1:
-            print("  WARNING: teacher differs across runs (max_seq_len?) — deltas not comparable")
+            emit("  WARNING: teacher differs across runs (max_seq_len?) — deltas not comparable")
 
     for r in results:
         if r.get("trace"):
-            print(f"\n{r['stem']} training trace:")
+            emit(f"\n{r['stem']} training trace:")
             for line in r["trace"]:
-                print(f"  {line}")
-    print("=" * 78)
+                emit(f"  {line}")
+    emit("=" * 78)
+
+    # results.md is the printed block verbatim (copy/paste or scp it); results.json is every field
+    # for later re-analysis, including the fields the table has no room for (sim_rho, pool, ckpt).
+    md, js = os.path.join(out_dir, "results.md"), os.path.join(out_dir, "results.json")
+    with open(md, "w") as f:
+        f.write("\n".join(out) + "\n")
+    with open(js, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"\nsaved: {md}\n       {js}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -196,7 +213,7 @@ def main(argv: list[str] | None = None) -> None:
     for t in threads:
         t.join()
 
-    report([results[i] for i in sorted(results)])
+    report([results[i] for i in sorted(results)], out_dir)
     print(f"total wall time: {(time.monotonic() - started) / 60:.0f} min")
 
 
