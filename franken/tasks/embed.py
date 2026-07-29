@@ -21,7 +21,7 @@ from transformers import AutoTokenizer
 from franken.config import Config, DistillConfig
 from franken.data.embed_corpus import load_embed_corpus
 from franken.distill.layer_map import resolve_layer_map
-from franken.distill.loss import masked_mse_loss
+from franken.distill.loss import masked_mse_loss, masked_relative_mse_loss
 from franken.models.base import ModelBackend
 from franken.tasks.base import Task
 
@@ -82,9 +82,16 @@ class EmbeddingDistillLoss(nn.Module):
         layer_map = resolve_layer_map(
             len(teacher_hidden) - 1, len(student_hidden) - 1, self.cfg.hidden_layer_map
         )
+        if self.cfg.hidden_loss == "relative":
+            per_layer = masked_relative_mse_loss
+        elif self.cfg.hidden_loss == "mse":
+            per_layer = masked_mse_loss
+        else:
+            raise ValueError(f"Unknown hidden_loss {self.cfg.hidden_loss!r}; use mse | relative")
+
         hidden = 0.0
         for s_block, t_block in enumerate(layer_map):
-            hidden = hidden + masked_mse_loss(
+            hidden = hidden + per_layer(
                 student_hidden[s_block + 1], teacher_hidden[t_block + 1], attention_mask
             )
         hidden = hidden / len(layer_map)

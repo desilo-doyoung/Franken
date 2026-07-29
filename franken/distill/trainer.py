@@ -90,10 +90,25 @@ class Distiller:
                 if module.training:
                     preacts.append(out)
 
-            hooks = [
-                m.register_forward_hook(_capture)
-                for m in self.backend.ffn_preact_modules(self.student)
-            ]
+            # Hook only the layers being penalized. Constraining a layer costs accuracy, so
+            # the default (all layers) is usually the wrong choice — see range_penalty_layers.
+            mods = self.backend.ffn_preact_modules(self.student)
+            which = self.cfg.distill.range_penalty_layers
+            if which is None:
+                targets = mods
+            else:
+                bad = [i for i in which if not 0 <= i < len(mods)]
+                if bad:
+                    raise ValueError(
+                        f"range_penalty_layers {bad} out of range for a {len(mods)}-layer "
+                        f"student (valid 0..{len(mods) - 1}; STUDENT indices, not teacher's)"
+                    )
+                targets = [mods[i] for i in which]
+                print(
+                    f"range penalty on student layers {sorted(which)} "
+                    f"of {len(mods)}, domain {domain}"
+                )
+            hooks = [m.register_forward_hook(_capture) for m in targets]
 
         metric_name, higher_is_better = self.task.select_metric()
         best = float("-inf") if higher_is_better else float("inf")

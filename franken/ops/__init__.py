@@ -155,11 +155,16 @@ class QuadSiLU(nn.Module):
     dragged into a nearly-linear shape by the tails and gets *worse* in the bulk.
 
     Like ``quad`` this is degree 2 everywhere, so it never explodes outside the domain (a
-    Chebyshev fit would). ``domain`` therefore controls **output dynamic range**, not
-    validity: exposing it lets ``distill.range_penalty`` squash pre-activations into
-    ``[-domain, domain]``, bounding the output to ~``a*domain^2``. The input tails, not the
-    coefficients, dominate that range — unpenalized, real data drives the output to ~9000
-    whichever fit is used — so the penalty is the lever that matters for FHE scale.
+    Chebyshev fit would). ⚠️ **``domain`` is therefore a purely FHE-side requirement — output
+    dynamic range — and can only COST accuracy**, since ``distill.range_penalty`` spends model
+    capacity forcing activations somewhere they do not naturally go. Set it from the ciphertext
+    scale budget, not from anything measured here, and prefer the loosest value the scheme
+    tolerates. Unpenalized, real data drives the output to ~9000 under either fit (the input
+    tails dominate, not the coefficients); the penalty bounds it to ~``a*domain^2``.
+
+    The *fit* domain is a separate concept and is insensitive over the plausible range: bulk
+    RMSE is 0.221 / 0.222 / 0.292 fitting on ``|x| <= 8 / 16 / 32``, so these coefficients do
+    not need refitting if the deployed ``domain`` changes within that band.
     """
 
     def __init__(

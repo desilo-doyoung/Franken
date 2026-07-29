@@ -58,10 +58,22 @@ class DistillConfig:
     temperature: float = 2.0
     # None -> auto uniform-stride map computed from teacher/student depths.
     hidden_layer_map: list[int] | None = None
+    # How the per-layer hidden term is measured: "mse" (raw) | "relative" (divided by the teacher
+    # layer's own mean square). Raw MSE lets large-activation layers own the gradient — measured on
+    # Qwen3, per-layer scale spans 11,085x and the FINAL layer, which produces the embedding, gets
+    # only 2.7% of the weight despite the worst relative error. "relative" equalizes layers and
+    # rescales the term to O(0.1), which is what makes `beta` a meaningful knob.
+    hidden_loss: str = "mse"
     # Squash-penalty weight: keeps FFN pre-activations inside a polynomial
     # activation's valid domain (e.g. cheb_gelu) so the bare poly is FHE-safe at
     # inference. 0 = off; ignored for ops without a bounded domain (e.g. exact).
     range_penalty: float = 0.0
+    # Which STUDENT layers the range penalty applies to. None = all of them.
+    # Constraining a layer costs accuracy, so penalize only the layers that are actually
+    # wide: measured on Qwen3, 27 of 28 layers sit inside +-24 on their own while one
+    # outlier layer reaches ~300, and penalizing all 28 to fix that one cost 8.2 recall
+    # points. Measure with scripts/qwen3/act_range.py before choosing.
+    range_penalty_layers: list[int] | None = None
 
 
 @dataclass
