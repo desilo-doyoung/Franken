@@ -1,0 +1,58 @@
+# MPCFormer's quadratic (0.125x^2 + 0.25x + 0.5) as Qwen3's SwiGLU activation, full depth.
+#
+# The reference point for the op lever, and the activation the BERT path used. ⚠️ It is a fit to *GELU*,
+# and a poor one: quad(0) = 0.5 where SiLU(0) = 0, and quad(-2) = +0.5 where SiLU(-2) = -0.238 (wrong
+# sign). Measured against 38M real gate_proj samples its bulk RMSE is 0.924 vs 0.222 for `quad_silu`.
+# Compare with quad_silu.yaml: identical FHE cost (one ciphertext square, mult-depth 1), so any
+# accuracy difference between them is free.
+#
+# Degree 2 everywhere ⇒ never explodes outside the domain, unlike cheb_gelu. `domain` here bounds the
+# OUTPUT dynamic range via the range penalty rather than protecting validity.
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28 # FULL depth on purpose — isolate the op's cost from the depth lever
+
+  softmax: exact # exact softmax on purpose; cgf comes later, one lever at a time
+  softmax_kwargs: {}
+  activation: quad
+  activation_kwargs: {domain: 16}
+
+distill:
+  # beta 1.0, NOT the 10.0 that BERT's quad needed. That value existed to make hidden alignment
+  # compete with CE/KL; this task has no logits, and Qwen3's massive activations (|h| up to 6207)
+  # already make hidden MSE 26,000x the bounded (1-cos) embed term at init. Raising beta would only
+  # shrink the embed term further and dilute the range penalty tenfold.
+  beta: 1.0
+  hidden_layer_map: null # identity at full depth
+  range_penalty: 1.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 24000
+  output_dir: outputs
+  run_name: qwen3_quad_mpc
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: tf32
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 2.0e-5
+    # 6 epochs, double the standard 3: init recall@10 is 0.034 (cos 0.02, essentially orthogonal to
+    # the teacher), a far bigger perturbation than any depth cut, and quad is documented as slow to
+    # train. The depth-28 control showed extra epochs add no drift, so this cannot flatter the result.
+    epochs: 6
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

@@ -141,12 +141,50 @@ class ExactSiLU(nn.Module):
         return F.silu(x)
 
 
+class QuadSiLU(nn.Module):
+    """``a x^2 + b x + c`` fitted to **SiLU** — same FHE cost as ``quad`` (one ciphertext
+    square, mult-depth 1), but 4.2x lower approximation error, because ``quad`` is
+    MPCFormer's fit to *GELU* and is not even a good one there (``quad(0) = 0.5`` where
+    SiLU(0) = 0). Coefficients are free in FHE, so there is no accuracy/cost tradeoff to
+    make: fitting the right function is a pure win.
+
+    Defaults are a least-squares fit weighted by the **measured** gate_proj distribution of
+    Qwen3-Embedding-0.6B restricted to ``|x| <= 16`` (38M real pre-activation samples;
+    bulk RMSE 0.222 vs 0.924 for ``quad``). Fit only where the mass is AND only inside the
+    domain ``range_penalty`` enforces — a fit over the full observed range (max 319) is
+    dragged into a nearly-linear shape by the tails and gets *worse* in the bulk.
+
+    Like ``quad`` this is degree 2 everywhere, so it never explodes outside the domain (a
+    Chebyshev fit would). ``domain`` therefore controls **output dynamic range**, not
+    validity: exposing it lets ``distill.range_penalty`` squash pre-activations into
+    ``[-domain, domain]``, bounding the output to ~``a*domain^2``. The input tails, not the
+    coefficients, dominate that range — unpenalized, real data drives the output to ~9000
+    whichever fit is used — so the penalty is the lever that matters for FHE scale.
+    """
+
+    def __init__(
+        self,
+        a: float = 0.0752,
+        b: float = 0.4313,
+        c: float = 0.1970,
+        domain: float | None = None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.a, self.b, self.c = float(a), float(b), float(c)
+        self.domain = domain
+
+    def forward(self, x):
+        return (self.a * x + self.b) * x + self.c  # 1 square + 1 mult, Horner form
+
+
 SOFTMAX_OPS = {"exact": ExactSoftmax, "cgf": CGFSoftmax}
 ACTIVATION_OPS = {
     "exact": ExactGELU,
     "cheb_gelu": ChebyshevGELU,
     "quad": QuadGELU,
     "silu": ExactSiLU,
+    "quad_silu": QuadSiLU,
 }
 
 

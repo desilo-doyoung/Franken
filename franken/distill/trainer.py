@@ -109,6 +109,10 @@ class Distiller:
         _apply_precision(self.cfg.train.precision)
 
         for epoch in range(self.cfg.train.distill.epochs):
+            # Mean range penalty over the epoch. Logged because it is the only visible evidence that
+            # the penalty is doing anything: it should fall as pre-activations are squashed into the
+            # op's domain. Verify the end state with scripts/qwen3/act_range.py on the checkpoint.
+            penalties = []
             for batch in loader:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 inputs = self.task.model_inputs(batch)
@@ -128,6 +132,7 @@ class Distiller:
                     penalty = _range_penalty(preacts, domain)
                     if penalty is not None:
                         loss = total + penalty_weight * penalty
+                        penalties.append(penalty.detach())
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -149,6 +154,8 @@ class Distiller:
                     k: v.detach().cpu().clone() for k, v in self.student.state_dict().items()
                 }
             comp_str = " ".join(f"{k}={float(v):.3f}" for k, v in components.items())
+            if penalties:
+                comp_str += f" penalty={torch.stack(penalties).mean().item():.1f}"
             print(f"epoch {epoch}: {metrics} | {comp_str}")
             self.student.train()
 
