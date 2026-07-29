@@ -101,11 +101,11 @@ class TrainConfig:
     max_seq_len: int = 128
     seed: int = 42
     device: str = "cuda"
-    # Arithmetic for the distillation loop only (eval/parity/range scripts stay fp32):
-    # "fp32" | "tf32" (TF32 matmuls; fp32 storage and accumulation) | "bf16" (autocast).
-    # Lower precision degrades the *teacher's targets* too, not just the student's math, so
-    # validate a run against an fp32 reference before trusting the speedup. bf16 additionally
-    # quantizes stored activations (8-bit significand), which bites hardest on models with
+    # Arithmetic for the distillation loop only; evaluation is forced back to fp32.
+    # "fp32" | "tf32" (TF32 matmuls, with fp32 storage and accumulation). TF32 degrades the
+    # *teacher's targets* too, not just the student's math, so validate a run against an fp32
+    # reference before trusting the speedup. bf16 autocast is deliberately unsupported: it
+    # quantizes stored activations (8-bit significand), which is unsafe for models with
     # large-magnitude activation channels — see the per-model notes.
     precision: str = "fp32"
 
