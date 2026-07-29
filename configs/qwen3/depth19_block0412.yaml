@@ -1,0 +1,49 @@
+# Depth 19, remove 4-12 — the "maximize intact late layers" rule pushed to its limit.
+#
+# Keeps 0-3 and 13-27: only 4 early layers, but 15 intact late layers, the most of any map that still
+# keeps the bottom of the stack. If the rule (see depth19_block0614.yaml) holds, this is the best map
+# at depth 19. If quality instead falls off because 4 early layers are too few, this locates the
+# early-layer requirement — which the map scan estimated at "the first ~4" from init data alone.
+#
+# Init recall@10 is 0.2738, less than HALF of 9-17's 0.5964, so this is the sharpest available test of
+# whether init magnitudes mean anything at all.
+model:
+  backend: qwen3
+  num_hidden_layers: 19
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  hidden_layer_map: [0, 1, 2, 3, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 24000 # 750 steps/epoch at batch 32
+  output_dir: outputs
+  run_name: qwen3_depth19_block0412
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: tf32
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 2.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

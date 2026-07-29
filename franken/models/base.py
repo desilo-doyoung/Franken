@@ -41,6 +41,12 @@ class ModelBackend(ABC):
         both the teacher and the student."""
 
     @abstractmethod
+    def layer_modules(self, model: nn.Module) -> list[nn.Module]:
+        """The student's transformer blocks, in order — indexable by *student* layer index
+        (so ``[i]`` is the block seeded from teacher layer ``layer_map[i]``). Used to hold
+        selected layers fixed during distillation (``DistillConfig.freeze_layers``)."""
+
+    @abstractmethod
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:
         """Modules whose *output* is an FFN pre-activation — the tensors the
         range penalty pulls into the activation op's valid domain (hook targets)."""

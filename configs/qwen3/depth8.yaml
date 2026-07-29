@@ -1,0 +1,58 @@
+# Depth 8 — 20 of 28 layers removed (71%). Looking for the floor.
+#
+# The trained depth curve has been linear at ~0.9 recall points per layer from 24 down to 11, and STS-B
+# has not moved outside its noise band since depth 24 (0.8473 at 24, 0.8264 at 11). Both trends must
+# break somewhere; nothing measured so far says where. This run either finds that floor or shows the
+# depth lever runs further than this project assumed — a 3.5x cut in multiplicative depth, which is the
+# dominant FHE cost.
+#
+# Extrapolating the linear trend predicts recall@10 ~0.76. Treat that as a null hypothesis, not a
+# forecast: at some depth the retained layers must run out of capacity to stand in for the removed ones.
+#
+# Map follows the only rule that survived trained testing: protect the ends. Keeps teacher 0-3 and
+# 24-27, removes the entire middle. NB at this depth "protect the first ~4 / last ~5" nearly determines
+# the map by itself — there is no freedom left to place a block.
+#
+#   distill: uv run python main.py distill --config configs/qwen3/depth8.yaml
+
+model:
+  backend: qwen3
+  num_hidden_layers: 8
+
+  softmax: exact # exact ops on purpose — isolate the cost of depth
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  hidden_layer_map: [0, 1, 2, 3, 24, 25, 26, 27]
+  freeze_layers: null
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 24000
+  output_dir: outputs
+  run_name: qwen3_depth8
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: tf32
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 2.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

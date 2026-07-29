@@ -46,6 +46,9 @@ class BertBackend(ModelBackend):
             return {"output": out["logits"], "hidden_states": out["hidden_states"]}
         return {"output": out.logits, "hidden_states": out.hidden_states}
 
+    def layer_modules(self, model: nn.Module) -> list[nn.Module]:
+        return list(model.bert.encoder.layer)
+
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:
         return [ly.intermediate.dense for ly in model.bert.encoder.layer]
 
