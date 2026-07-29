@@ -1,0 +1,58 @@
+# Depth 19, exact ops — the BERT-EQUIVALENT cut. BERT went 12 -> 8, removing 33% of layers;
+# 28 -> 19 removes 32%, so this is the run that answers "does Qwen3 tolerate the same relative
+# reduction BERT did?" (BERT: MRPC test F1 0.873 vs an 0.881 teacher, i.e. -0.9% relative).
+#
+# Drop-middle map removes teacher layers 9-17, keeping 0-8 and 18-27. Init recall@10 is 0.596
+# (zero-training sweep). Depth 24 recovered 48% of its init deficit (0.805 -> 0.907); if that
+# rate held here it would land ~0.79, but that is a one-point extrapolation and the recovery
+# fraction may well fall as the deficit grows.
+#
+# Standard recipe: precision tf32 + batch 32 + lr 2e-5 (verified to reproduce fp32/bs8 exactly
+# at depth 24, at 2x the speed). ~27 min on one A6000.
+#
+#   distill: uv run python main.py distill --config configs/qwen3/depth19.yaml
+#   score:   uv run python scripts/qwen3/embed_eval.py --config configs/qwen3/depth19.yaml \
+#              --student-ckpt outputs/qwen3_depth19/student/pytorch_model.bin
+
+model:
+  backend: qwen3
+  num_hidden_layers: 19
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  # Drop the middle (teacher layers 9-17). At this depth the default uniform stride scores
+  # recall@10 0.077 vs 0.596 for this map. Used for seeding AND hidden-loss alignment.
+  hidden_layer_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 24000 # 750 steps/epoch at batch 32
+  output_dir: outputs
+  run_name: qwen3_depth19
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: tf32 # 2.05x at bs32; fp32 storage+accumulation, zero measured effect on RoPE
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 2.0e-5 # sqrt scaling for 4x batch (bs8 -> bs32)
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

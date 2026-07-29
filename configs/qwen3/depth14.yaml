@@ -1,0 +1,55 @@
+# The headline halving: 28 -> 14 layers, exact ops, same long recipe as the depth-24 runs.
+# Direct analogue of the BERT 12 -> 8 result (though on zero-shot embedding metrics, not a
+# fine-tuned classification F1 where argmax absorbs error).
+#
+# Starting point is far worse than depth 24's: the zero-training sweep gives recall@10 0.457
+# here vs 0.805 at depth 24. So this asks whether distillation can recover a large deficit,
+# not just polish a small one. Depth 24 plateaued at ~0.907 with 3x compute buying <1 point,
+# so if the same ceiling behaviour holds, expect this to land well short of the teacher.
+#
+#   distill: uv run python main.py distill --config configs/qwen3/depth14.yaml
+#   score:   uv run python scripts/qwen3/embed_eval.py --config configs/qwen3/depth14.yaml \
+#              --student-ckpt outputs/qwen3_depth14/student/pytorch_model.bin
+
+model:
+  backend: qwen3
+  num_hidden_layers: 14 # halves every per-layer FHE cost
+
+  softmax: exact # exact ops on purpose — isolate the cost of depth
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  # Drop the middle: keep teacher layers 0-6 and 21-27, delete 7-20. The default uniform
+  # stride scores recall@10 0.075 here vs 0.457 for this map — a 6x difference, because
+  # striding disturbs the early blocks that establish the residual stream's scale.
+  hidden_layer_map: [0, 1, 2, 3, 4, 5, 6, 21, 22, 23, 24, 25, 26, 27]
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 24000
+  output_dir: outputs
+  run_name: qwen3_depth14
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 1.0e-5 # LR made no difference at depth 24 (0.9070 vs 0.9080 at 2e-5); keep the control
+    epochs: 3
+    batch_size: 8
+    warmup_ratio: 0.1
+    weight_decay: 0.01
