@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -93,6 +94,7 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="configs/qwen3/exact.yaml")
     p.add_argument("--student-ckpt", default=None, help="default: identity (seeded from teacher)")
+    p.add_argument("--json", help="also dump the metrics here, for scripted runs (run_experiments)")
     args = p.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
@@ -107,7 +109,10 @@ def main(argv: list[str] | None = None) -> None:
         student.load_state_dict(torch.load(args.student_ckpt, map_location="cpu"))
     student = student.to(device).eval()
     print(f"\nstudent: {args.student_ckpt or 'IDENTITY (seeded from teacher)'}")
-    print(f"depth={cfg.model.num_hidden_layers} softmax={cfg.model.softmax} act={cfg.model.activation}")
+    print(
+        f"depth={cfg.model.num_hidden_layers} "
+        f"softmax={cfg.model.softmax} act={cfg.model.activation}"
+    )
 
     data = task.datasets(tokenizer, cfg)
     ds = data["validation"].with_format("torch", columns=task.torch_columns())
@@ -123,7 +128,33 @@ def main(argv: list[str] | None = None) -> None:
 
     t_sts = _stsb(backend, teacher, task, tokenizer, cfg, device)
     s_sts = _stsb(backend, student, task, tokenizer, cfg, device)
-    print(f"\nSTS-B spearman: teacher {t_sts:.4f}  student {s_sts:.4f}  delta {s_sts - t_sts:+.4f}\n")
+    print(
+        f"\nSTS-B spearman: teacher {t_sts:.4f}  student {s_sts:.4f}  "
+        f"delta {s_sts - t_sts:+.4f}\n"
+    )
+
+    # Same numbers, structurally: run_experiments.py collects these instead of re-parsing the
+    # prose above, so a reworded print can't silently break the summary table.
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(
+                {
+                    "config": args.config,
+                    "student_ckpt": args.student_ckpt,
+                    "depth": cfg.model.num_hidden_layers,
+                    "softmax": cfg.model.softmax,
+                    "activation": cfg.model.activation,
+                    "k": K,
+                    "pool": s_emb.size(0),
+                    "recall": recall,
+                    "embed_dist": dist,
+                    "sim_rho": rho,
+                    "stsb_teacher": t_sts,
+                    "stsb_student": s_sts,
+                },
+                f,
+                indent=2,
+            )
 
 
 if __name__ == "__main__":
