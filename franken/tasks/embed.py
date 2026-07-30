@@ -111,8 +111,15 @@ class EmbedSelfDistillTask(Task):
         # pad count — but RoPE is *relative*, attention depends only on position differences,
         # and a constant shift cancels. Verified: same text alone vs batched with a much
         # longer neighbour gives cosine 1.0 under either side, for teacher and student.
-        # (The model card recommends left; it makes no difference here.)
+        # (The model card recommends left; it makes no difference here.) EXCEPT under
+        # attn_impl "sdpa_causal", which drops the pad mask and needs pads AFTER real tokens.
         tok.padding_side = "right"
+        if getattr(cfg.model, "attn_impl", "manual") == "sdpa_causal":
+            if tok.padding_side != "right":
+                raise ValueError(
+                    "attn_impl 'sdpa_causal' drops the padding mask and requires right "
+                    f"padding, got {tok.padding_side!r}."
+                )
         return tok
 
     def datasets(self, tokenizer: Any, cfg: Config, splits=("train", "validation")) -> dict:

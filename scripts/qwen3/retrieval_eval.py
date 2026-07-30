@@ -167,7 +167,10 @@ def main(argv: list[str] | None = None) -> None:
             f"{s - t:>+9.4f} {rel:>7.1f}%"
         )
         result["tasks"][name] = {
-            "teacher": t, "student": s, "queries": len(q_ids), "docs": len(d_ids),
+            "teacher": t,
+            "student": s,
+            "queries": len(q_ids),
+            "docs": len(d_ids),
         }
 
     ts = [v["teacher"] for v in result["tasks"].values()]

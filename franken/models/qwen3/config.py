@@ -20,3 +20,7 @@ class Qwen3ModelConfig(ModelConfig):
     max_position_embeddings: int = 32768
     attention_bias: bool = False
     tie_word_embeddings: bool = True
+    # "manual" = materialized scores through the injected softmax op (required for approximate
+    # softmaxes). "sdpa_causal" = fused SDPA, the only form reaching flash; exact softmax and
+    # right padding only (see attention.py).
+    attn_impl: str = "manual"

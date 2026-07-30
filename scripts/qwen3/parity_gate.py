@@ -82,15 +82,24 @@ def main() -> int:
         print(f"FAIL: hidden_states {len(sh)} != {len(th)}; the gate needs full teacher depth.")
         return 1
 
-    mses = [torch.mean((a - b) ** 2).item() for a, b in zip(sh, th, strict=True)]
-    dmaxes = [(a - b).abs().max().item() for a, b in zip(sh, th, strict=True)]
-    print(f"hidden ({len(sh)} entries): MSE max={max(mses):.3e} |Δ|max={max(dmaxes):.3e}")
+    # Judge on real tokens only: pad positions are read by nothing (masked in the loss,
+    # excluded by last-token pooling), and attn_impl "sdpa_causal" leaves garbage there by
+    # design. The raw max is still printed so a broken pad mask stays visible.
+    keep = inputs["attention_mask"].bool().unsqueeze(-1)
+    n = keep.sum().item() * sh[0].shape[-1]
+    mses = [(((a - b) * keep) ** 2).sum().item() / n for a, b in zip(sh, th, strict=True)]
+    dmaxes = [((a - b).abs() * keep).max().item() for a, b in zip(sh, th, strict=True)]
+    raw = max((a - b).abs().max().item() for a, b in zip(sh, th, strict=True))
+    print(
+        f"hidden ({len(sh)} entries): MSE max={max(mses):.3e} |Δ|max={max(dmaxes):.3e} "
+        f"on real tokens (raw incl. pad {raw:.3e})"
+    )
 
     # |Δ|max lands on Qwen3's massive-activation channels (|h| in the thousands), where one
     # fp32 ULP is already ~5e-4 absolute. So measure the gap in ULPs of the value it sits on:
     # a few ULPs is accumulated summation-order noise, orders more is a logic bug.
     worst = max(range(len(th)), key=lambda i: dmaxes[i])
-    d = (sh[worst] - th[worst]).abs()
+    d = (sh[worst] - th[worst]).abs() * keep
     at = th[worst].flatten()[d.argmax()].abs().item()
     ulp = math.ldexp(1.0, math.frexp(at)[1] - 24) if at else float("inf")
     print(
