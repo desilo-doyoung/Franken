@@ -63,25 +63,33 @@ def _neighbour_agreement(student, teacher):
 
 
 @torch.no_grad()
-def _stsb(backend, model, task, tokenizer, cfg, device):
+def _embed_texts(backend, model, tokenizer, cfg, texts, device, batch_size: int = 32):
+    """Embed a plain list of strings (tokenize + pool), truncated at `cfg.train.max_seq_len`.
+
+    Distinct from `_embed`, which consumes pre-collated batches from the corpus loader. Shared with
+    `retrieval_eval.py` so the two scripts cannot drift on tokenization or truncation — the same
+    reason `recall_at_k` lives in `franken/tasks/embed.py` rather than here.
+    """
+    out = []
+    for i in range(0, len(texts), batch_size):
+        enc = tokenizer(
+            texts[i : i + batch_size],
+            padding=True,
+            truncation=True,
+            max_length=cfg.train.max_seq_len,
+            return_tensors="pt",
+        ).to(device)
+        inputs = {"input_ids": enc["input_ids"], "attention_mask": enc["attention_mask"]}
+        out.append(backend.forward(model, inputs)["output"].float().cpu())
+    return torch.cat(out)
+
+
+def _stsb(backend, model, tokenizer, cfg, device):
     """Spearman of cosine(s1, s2) against the human similarity labels."""
     ds = datasets.load_dataset("nyu-mll/glue", "stsb", split="validation")
-
-    def embed(texts):
-        out = []
-        for i in range(0, len(texts), 32):
-            enc = tokenizer(
-                texts[i : i + 32],
-                padding=True,
-                truncation=True,
-                max_length=cfg.train.max_seq_len,
-                return_tensors="pt",
-            ).to(device)
-            inputs = {"input_ids": enc["input_ids"], "attention_mask": enc["attention_mask"]}
-            out.append(backend.forward(model, inputs)["output"].float().cpu())
-        return torch.cat(out)
-
-    sims = F.cosine_similarity(embed(ds["sentence1"]), embed(ds["sentence2"]), dim=-1)
+    s1 = _embed_texts(backend, model, tokenizer, cfg, ds["sentence1"], device)
+    s2 = _embed_texts(backend, model, tokenizer, cfg, ds["sentence2"], device)
+    sims = F.cosine_similarity(s1, s2, dim=-1)
     # label range is [0, 5], but Spearman is rank-based so it doesn't matter.
     return spearmanr(sims.numpy(), ds["label"]).statistic
 
@@ -122,8 +130,8 @@ def main(argv: list[str] | None = None) -> None:
     print(f"  recall@{K}     {recall:.4f}     (teacher's top-{K} neighbours also found)")
     print(f"  sim-spearman  {rho:.6f}   (all pairwise similarities)")
 
-    t_sts = _stsb(backend, teacher, task, tokenizer, cfg, device)
-    s_sts = _stsb(backend, student, task, tokenizer, cfg, device)
+    t_sts = _stsb(backend, teacher, tokenizer, cfg, device)
+    s_sts = _stsb(backend, student, tokenizer, cfg, device)
     print(
         f"\nSTS-B spearman: teacher {t_sts:.4f}  student {s_sts:.4f}  delta {s_sts - t_sts:+.4f}\n"
     )
