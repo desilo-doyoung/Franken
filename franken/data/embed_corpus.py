@@ -20,6 +20,7 @@ Sources yield ``list[str]``; ``load_embed_corpus`` tokenizes and wraps them.
 """
 
 import random
+from functools import lru_cache
 from typing import Any
 
 import datasets
@@ -100,25 +101,51 @@ CORPORA = {
 }
 
 
-def load_embed_corpus(
-    tokenizer: Any, name: str, size: int, max_seq_len: int = 128, val_size: int = 500
-) -> dict[str, Any]:
-    """Load and tokenize an embedding corpus preset.
+@lru_cache(maxsize=4)
+def _build_split(name: str, split: str, n: int, max_seq_len: int, tokenizer: Any):
+    """One tokenized split, memoized on everything that determines its content.
 
-    Returns ``train`` / ``validation`` tokenized datasets and a dynamic-padding collator —
-    the same shape ``franken.data.mrpc.load_mrpc`` returns.
+    The sources are HF *streaming* datasets, so a rebuild re-pays the network and parsing —
+    seconds at ``corpus_size`` 24k, minutes at 216k — for a result that is a pure function of
+    these arguments. Cached per split rather than per call so that asking for validation alone
+    reuses what a train+validation call already built.
+
+    ``tokenizer`` keys by object identity (transformers tokenizers define no ``__eq__``), which
+    is what we want: a run builds exactly one. Caching cannot perturb reproducibility because
+    building touches no global RNG — ``_mixed`` shuffles with its own ``random.Random(0)`` — so
+    the DataLoader permutation drawn later is unaffected.
     """
     if name not in CORPORA:
         raise KeyError(f"Unknown corpus {name!r}; available: {sorted(CORPORA)}")
-    build = CORPORA[name]
 
     def tok(batch):
         return tokenizer(batch["text"], truncation=True, max_length=max_seq_len)
 
-    splits = {"train": build("train", size), "validation": build("validation", val_size)}
+    texts = CORPORA[name](split, n)
+    return datasets.Dataset.from_dict({"text": texts}).map(
+        tok, batched=True, remove_columns=["text"]
+    )
+
+
+def load_embed_corpus(
+    tokenizer: Any,
+    name: str,
+    size: int,
+    max_seq_len: int = 128,
+    val_size: int = 500,
+    splits: tuple[str, ...] = ("train", "validation"),
+) -> dict[str, Any]:
+    """Load and tokenize an embedding corpus preset.
+
+    Returns the requested tokenized splits and a dynamic-padding collator — the same shape
+    ``franken.data.mrpc.load_mrpc`` returns. Pass ``splits`` to build only what the caller
+    needs: evaluation scores 500 validation rows and has no use for the training corpus.
+    """
     out = {
-        k: datasets.Dataset.from_dict({"text": v}).map(tok, batched=True, remove_columns=["text"])
-        for k, v in splits.items()
+        split: _build_split(
+            name, split, size if split == "train" else val_size, max_seq_len, tokenizer
+        )
+        for split in splits
     }
     out["collator"] = transformers.DataCollatorWithPadding(tokenizer)
     return out

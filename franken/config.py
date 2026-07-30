@@ -114,12 +114,17 @@ class TrainConfig:
     seed: int = 42
     device: str = "cuda"
     # Arithmetic for the distillation loop only; evaluation is forced back to fp32.
-    # "fp32" | "tf32" (TF32 matmuls, with fp32 storage and accumulation). TF32 degrades the
-    # *teacher's targets* too, not just the student's math, so validate a run against an fp32
-    # reference before trusting the speedup. bf16 autocast is deliberately unsupported: it
-    # quantizes stored activations (8-bit significand), which is unsafe for models with
-    # large-magnitude activation channels — see the per-model notes.
+    # "fp32" | "tf32" (TF32 matmuls, fp32 storage) | "bf16" (tf32 + a bf16 autocast region
+    # around the STUDENT forward and loss only). TF32 degrades the teacher's targets too, so
+    # validate against an fp32 reference. The teacher forward NEVER enters the autocast
+    # region: a bf16 teacher moves targets by 0.0076 recall@10, ~2x the comparison band.
     precision: str = "fp32"
+
+    # torch.compile the student + teacher for training only; eval keeps the eager modules.
+    # Required, not incidental: `allow_tf32` is a Dynamo guard, so eval (which forces tf32
+    # off) would compile a second graph, and a `self.training` branch in the traced region
+    # grows one graph per toggle until the cache limit silently drops back to eager.
+    compile: bool = False
 
     # Per-run optimization blocks (see OptimConfig).
     teacher: OptimConfig = field(default_factory=OptimConfig)

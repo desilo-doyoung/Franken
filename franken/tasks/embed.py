@@ -115,9 +115,13 @@ class EmbedSelfDistillTask(Task):
         tok.padding_side = "right"
         return tok
 
-    def datasets(self, tokenizer: Any, cfg: Config) -> dict:
+    def datasets(self, tokenizer: Any, cfg: Config, splits=("train", "validation")) -> dict:
         return load_embed_corpus(
-            tokenizer, cfg.train.corpus, cfg.train.corpus_size, cfg.train.max_seq_len
+            tokenizer,
+            cfg.train.corpus,
+            cfg.train.corpus_size,
+            cfg.train.max_seq_len,
+            splits=splits,
         )
 
     def torch_columns(self) -> list[str]:
@@ -155,7 +159,9 @@ class EmbedSelfDistillTask(Task):
                 "EmbedSelfDistillTask.evaluate needs `teacher`: the metric is agreement with "
                 "the teacher, so there is nothing to score against without it."
             )
-        data = self.datasets(tokenizer, cfg)
+        # Only the split being scored: the training corpus is irrelevant here, and rebuilding it
+        # once per epoch is pure wall-clock (minutes per call at corpus_size 216k).
+        data = self.datasets(tokenizer, cfg, splits=(split,))
         ds = data[split].with_format("torch", columns=self.torch_columns())
         # The run's batch size, from config — eval needs no separate knob. Dynamic padding does
         # perturb the embeddings across batch compositions, but only at ~5e-7: measured on the

@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
@@ -8,6 +10,8 @@ from franken.config import Config
 from franken.models import build_backend
 from franken.tasks import build_task
 
+PRECISIONS = ("fp32", "tf32", "bf16")
+
 
 def _range_penalty(preacts, domain):
     """Squared distance past +/-domain, meaned over the OUT-OF-RANGE elements only
@@ -16,6 +20,10 @@ def _range_penalty(preacts, domain):
     domain so the deployed bare poly is FHE-safe. Training-only. None if all in range."""
     terms = []
     for x in preacts:
+        # fp32 regardless of training precision: this is an extreme-value statistic over the
+        # out-of-range tail, and in bf16 it lands on the coarse grid up there (measured
+        # 836.32 -> 900.00, +7.6%, where one bf16 ULP at 900 is 8).
+        x = x.float()
         over, under = F.relu(x - domain), F.relu(-domain - x)
         outside = (over > 0) | (under > 0)
         if outside.any():
@@ -26,12 +34,26 @@ def _range_penalty(preacts, domain):
 def _apply_precision(precision: str) -> None:
     """Arithmetic for the training loop; evaluation stays fp32. TF32 lowers the precision of the
     *teacher's targets* too, not just the student's math, so check a run against an fp32 reference
-    before trusting the speedup."""
-    if precision not in ("fp32", "tf32"):
-        raise ValueError(f"Unknown precision {precision!r}; use fp32 | tf32")
-    if precision == "tf32":
+    before trusting the speedup. bf16 additionally opens an autocast region (see _autocast)."""
+    if precision not in PRECISIONS:
+        raise ValueError(f"Unknown precision {precision!r}; use {' | '.join(PRECISIONS)}")
+    if precision in ("tf32", "bf16"):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+
+
+def _autocast(precision: str):
+    """Autocast region for the STUDENT forward + loss. Never wrap the teacher: it produces the
+    targets, so degrading it degrades the definition of "matches the teacher" (measured: a bf16
+    teacher shifts targets 0.0076 recall@10, ~2x the comparison band)."""
+    return torch.autocast("cuda", dtype=torch.bfloat16) if precision == "bf16" else nullcontext()
+
+
+def _maybe_compile(model, cfg: Config):
+    """Compiled callable for the training loop. The caller must keep the eager module too --
+    OptimizedModule.state_dict() prefixes keys with `_orig_mod.`, which would break checkpoint
+    round-tripping, and eval must stay eager to keep the fp32-eval invariant (see evaluate)."""
+    return torch.compile(model) if cfg.train.compile else model
 
 
 class Distiller:
@@ -123,6 +145,11 @@ class Distiller:
         # Training-loop arithmetic (evaluation stays fp32 whatever this is).
         _apply_precision(self.cfg.train.precision)
 
+        # Compiled callables for training only. self.student / self.teacher stay eager and are
+        # what evaluate() and the checkpoint save use; both views share parameters.
+        student = _maybe_compile(self.student, self.cfg)
+        teacher = _maybe_compile(self.teacher, self.cfg)
+
         for epoch in range(self.cfg.train.distill.epochs):
             # Mean range penalty over the epoch. Logged because it is the only visible evidence that
             # the penalty is doing anything: it should fall as pre-activations are squashed into the
@@ -132,15 +159,17 @@ class Distiller:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 inputs = self.task.model_inputs(batch)
 
+                # Teacher stays outside the autocast region: it produces the targets, so
+                # lowering its precision lowers the definition of "matches the teacher".
                 with torch.no_grad():
-                    teacher_outputs = self.backend.forward(self.teacher, inputs)
+                    teacher_outputs = self.backend.forward(teacher, inputs)
 
                 preacts.clear()
-                student_outputs = self.backend.forward(self.student, inputs)
-
-                total, components = self.task.compute_loss(
-                    student_outputs, teacher_outputs, batch, self.cfg
-                )
+                with _autocast(self.cfg.train.precision):
+                    student_outputs = self.backend.forward(student, inputs)
+                    total, components = self.task.compute_loss(
+                        student_outputs, teacher_outputs, batch, self.cfg
+                    )
 
                 loss = total
                 if domain is not None:
@@ -177,6 +206,14 @@ class Distiller:
         for h in hooks:
             h.remove()
 
+        # One graph for the student, plus a few from transformers internals in the teacher. A
+        # climbing count means something in the traced region is guarded on state that changes
+        # per epoch, which ends with Dynamo hitting cache_size_limit and silently reverting to
+        # eager for the rest of the run.
+        if self.cfg.train.compile:
+            graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
+            print(f"dynamo unique_graphs: {graphs}")
+
         if best_state is not None:
             self.student.load_state_dict(best_state)
 
@@ -186,11 +223,14 @@ class Distiller:
         # without this the per-epoch metrics would inherit it while the `init:` baseline —
         # measured before it is set — would not, leaving them incomparable and making
         # checkpoint selection precision-dependent.
-        tf32 = torch.backends.cuda.matmul.allow_tf32
+        tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
         torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
         try:
+            # Eager modules on purpose: a compiled callable here would compile a second graph
+            # for the tf32-off state and one more per train/eval toggle.
             return self.task.evaluate(
                 self.backend, self.student, self.tokenizer, self.cfg, teacher=self.teacher
             )
         finally:
-            torch.backends.cuda.matmul.allow_tf32 = tf32
+            torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
