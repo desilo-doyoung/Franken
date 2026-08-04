@@ -9,6 +9,7 @@ from transformers import get_linear_schedule_with_warmup, set_seed
 
 from franken.config import Config
 from franken.distill.dist import barrier, init_distributed, per_rank_batch
+from franken.distill.progress import ProgressLogger
 from franken.models import build_backend
 from franken.tasks import build_task
 
@@ -69,9 +70,12 @@ class Distiller:
         self.tokenizer = None
 
     def log(self, *args):
-        """Rank 0 only: run_experiments.py parses these lines, so N ranks would emit N rows."""
+        """Rank 0 only: run_experiments.py parses these lines, so N ranks would emit N rows.
+
+        Flushed: stdout is block-buffered when redirected to a log file, so an unflushed
+        print leaves `tail -f` empty for the whole run."""
         if self.dist.is_main:
-            print(*args)
+            print(*args, flush=True)
 
     def setup(self):
         self.teacher = self.backend.load_teacher(self.cfg).to(self.device)
@@ -198,6 +202,10 @@ class Distiller:
         student = _maybe_compile(student, self.cfg)
         teacher = _maybe_compile(self.teacher, self.cfg)
 
+        progress = ProgressLogger(
+            total_steps, self.dist.world_size, self.device, self.log, self.dist.is_main
+        )
+
         for epoch in range(self.cfg.train.distill.epochs):
             if sampler is not None:
                 sampler.set_epoch(epoch)
@@ -232,6 +240,7 @@ class Distiller:
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
+                progress.step(loss, batch)
 
             # Rank 0 scores and tracks the checkpoint; the others wait. Replicas are identical
             # after DDP's allreduce, so scoring on every rank would compute the same numbers.
