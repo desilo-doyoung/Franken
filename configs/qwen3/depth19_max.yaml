@@ -1,0 +1,60 @@
+# Depth 19 at max data — Strategy step 1. Depth 19 costs -3.8% nDCG at base compute and has never been
+# scaled; scaling the better architecture beats rescuing a worse one (depth 14 at 3x compute still lost).
+# A 32% layer cut at ~-2% quality would be the best FHE trade measured.
+#
+# Score this on nDCG@10 (`retrieval_eval.py`), NOT recall: `depth14_max` proved compute buys fidelity
+# without quality, and `depth28_control_max` proved recall keeps moving after nDCG has saturated.
+#
+# Pairs with `depth28_control_max` (0.9790): same corpus, epochs and LR schedule shape, and sqrt-batch
+# scaling holds lr*sqrt(steps) = 7.69e-3 identical across the two, so drift is matched and the gap is depth.
+#
+#   uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
+#       configs/qwen3/depth19_max.yaml
+#   uv run python scripts/qwen3/retrieval_eval.py --config configs/qwen3/depth19_max.yaml \
+#       --student-ckpt outputs/qwen3_depth19_max/student/pytorch_model.bin
+
+model:
+  backend: qwen3
+  num_hidden_layers: 19
+
+  softmax: exact # exact ops on purpose — isolate the cost of depth
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  # Drop the middle (teacher layers 9-17) — beat all seven alternatives at this depth. Quality is an
+  # inverted U in the removed block's centre. Used for seeding AND hidden-loss alignment.
+  hidden_layer_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 2100000 # saturates the corpus at 1,575,039 texts; cached under outputs/corpus_cache
+  output_dir: outputs
+  run_name: qwen3_depth19_max
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: bf16
+  compile: true
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    # 384 global = 96/rank on 4 cards, the measured throughput peak on an A6000 (re-measure on H100 —
+    # 96/rank fitted in 35.8 GB there, so the peak is likely higher on 80 GB).
+    lr: 6.93e-5 # 2e-5 * sqrt(384/32)
+    epochs: 3
+    batch_size: 384
+    warmup_ratio: 0.1
+    weight_decay: 0.01
