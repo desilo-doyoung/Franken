@@ -1,11 +1,12 @@
 """Run a batch of distillation experiments across the available GPUs and print one table.
 
 The remote workflow this exists for: pull, run this with the configs you want, copy the
-final block back. Each config is distilled and then scored by `embed_eval.py`, one config
-per GPU at a time, and everything a decision needs ends up in a single markdown table that
-pastes straight into `franken/models/qwen3/PROGRESS.md`.
+final block back. Each config is distilled and then scored by `embed_eval.py` (recall@10,
+STS-B) and `retrieval_eval.py` (nDCG@10 — the absolute number to quote), one config per GPU
+at a time, and everything a decision needs ends up in a single markdown table that pastes
+straight into `franken/models/qwen3/PROGRESS.md`.
 
-Why a runner rather than a shell loop: results are collected from `embed_eval --json`, not
+Why a runner rather than a shell loop: results are collected from `--json`, not
 scraped from prose, so a reworded print can't corrupt the table; a crashed run degrades to
 one FAILED row with its log tail instead of losing the whole batch; and the GPU assignment
 is a work queue, so N configs over 2 devices finish in ceil(N/2) slots even when runs differ
@@ -137,6 +138,33 @@ def one_experiment(
     with open(metrics_path) as f:
         result |= json.load(f)
     _say(f"{tag}: recall@{result['k']} {result['recall']:.4f}  STS-B {result['stsb_student']:.4f}")
+
+    log = os.path.join(out_dir, f"{stem}.ndcg.log")
+    ndcg_path = os.path.join(out_dir, f"{stem}.ndcg.json")
+    _say(f"{tag}: ndcg -> {log}")
+    code = _run(
+        [
+            sys.executable,
+            os.path.join("scripts", "qwen3", "retrieval_eval.py"),
+            "--config",
+            config,
+            "--student-ckpt",
+            ckpt,
+            "--json",
+            ndcg_path,
+        ],
+        device.split(",")[0],
+        log,
+    )
+    if code != 0 or not os.path.exists(ndcg_path):
+        _say(f"{tag}: NDCG FAILED (exit {code})\n{_tail(log)}")
+        return result | {"error": f"ndcg exit {code}", "log": log}
+
+    with open(ndcg_path) as f:
+        nd = json.load(f)
+    # By name, not `|=`: both payloads carry `k` and `config`.
+    result |= {"ndcg": nd["student_avg"], "ndcg_teacher": nd["teacher_avg"]}
+    _say(f"{tag}: nDCG@10 {result['ndcg']:.4f} (teacher {result['ndcg_teacher']:.4f})")
     return result
 
 
@@ -152,17 +180,26 @@ def report(results: list[dict], out_dir: str) -> None:
 
     emit("\n" + "=" * 78)
     emit("RESULTS — paste into franken/models/qwen3/PROGRESS.md\n")
-    emit("| run | depth | ops | recall@10 | embed_dist | STS-B | Δ teacher | relative | min |")
-    emit("|---|---|---|---|---|---|---|---|---|")
+    emit(
+        "| run | depth | ops | recall@10 | vs teacher | nDCG@10 | vs teacher | ratio¹ "
+        "| embed_dist | STS-B | Δ teacher | relative | min |"
+    )
+    emit("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in ok:
         mins = f"{r['minutes']:.0f}" if r.get("minutes") else "—"
         delta = r["stsb_student"] - r["stsb_teacher"]
         # Relative to the teacher's own STS-B, which is the reference the claim is about
         # ("preserves the teacher"), not an absolute-quality score.
         rel = 100 * delta / r["stsb_teacher"]
+        # recall@10 is ALREADY teacher-relative (1.0 is the ceiling), so its deficit is 1 - recall.
+        recall_def = 1.0 - r["recall"]
+        ndcg_def = (r["ndcg_teacher"] - r["ndcg"]) / r["ndcg_teacher"]
+        ratio = f"{ndcg_def / recall_def:.2f}" if recall_def > 1e-9 else "—"
         emit(
             f"| {r['stem']} | {r['depth']} | {r['softmax']}/{r['activation']} "
-            f"| {r['recall']:.4f} | {r['embed_dist']:.5f} | {r['stsb_student']:.4f} "
+            f"| {r['recall']:.4f} | {-100 * recall_def:+.1f}% "
+            f"| {r['ndcg']:.4f} | {-100 * ndcg_def:+.1f}% | {ratio} "
+            f"| {r['embed_dist']:.5f} | {r['stsb_student']:.4f} "
             f"| {delta:+.4f} | {rel:+.1f}% | {mins} |"
         )
 
@@ -172,6 +209,14 @@ def report(results: list[dict], out_dir: str) -> None:
         if r.get("error"):
             log = f"  ({r['log']})" if r.get("log") else ""
             emit(f"\nFAILED {r['stem']}: {r['error']}{log}")
+
+    emit(
+        "\n¹ nDCG deficit ÷ recall deficit — the ratio column in PROGRESS. Low means the divergence "
+        "recall@10 reports is not costing real quality."
+    )
+    ndcg_teachers = {round(r["ndcg_teacher"], 4) for r in ok}
+    if ndcg_teachers:
+        emit(f"teacher nDCG@10: {', '.join(f'{t:.4f}' for t in sorted(ndcg_teachers))}")
 
     teachers = {round(r["stsb_teacher"], 4) for r in ok}
     if teachers:
