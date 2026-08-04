@@ -1,0 +1,56 @@
+# [4/5] Same degree-2 activation as [3], now bounded to |pre-act| <= 32. [4] minus [3] is the PRICE OF
+# THE RANGE PENALTY, which at 24k was the single most expensive decision measured (-8.2 recall / -5.7
+# nDCG at domain 16) and was ~96% wasted: 27 of 28 layers already sit inside +-24 on their own, and
+# penalizing all of them to bound the one outlier (layer 27, max ~300, p99.9 only 14.3) is where the
+# cost went.
+#
+# domain 32, not 16, for that reason: the loosest bound worth testing, chosen from the range table
+# rather than from anything the fit needs (bulk RMSE is flat at 0.221/0.222/0.292 over |x|<=8/16/32).
+# The real setter is the ciphertext scale budget — still an open question on the FHE side.
+#
+# Batch recipe shared with [1], EXCEPT compile: the pre-activation hook branches on module.training,
+# which Dynamo cannot handle, so the trainer refuses the combination. Costs ~27% wall clock; compile is
+# result-neutral (0.9638 vs 0.9648), so this is not a confound.
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: quad_silu
+  activation_kwargs: { domain: 32 }
+
+distill:
+  beta: 1.0
+  hidden_layer_map: null
+  range_penalty: 1.0
+  range_penalty_layers: null # all 28 — the ~96%-wasted setting, measured on purpose as the baseline
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 2100000
+  output_dir: outputs
+  run_name: qwen3_quad_silu_d32_max
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: bf16
+  compile: false # required: range_penalty > 0 raises under compile
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 6.93e-5
+    epochs: 3
+    batch_size: 384
+    warmup_ratio: 0.1
+    weight_decay: 0.01
