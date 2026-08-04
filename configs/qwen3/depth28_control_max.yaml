@@ -1,0 +1,63 @@
+# The depth-28 control, pushed as far as data + compute go. Goal: the highest recall@10 this
+# architecture reaches, NOT a controlled comparison — batch and LR both move, so this is not a
+# like-for-like replacement for depth28_control's 0.9648.
+#
+# Premise: the control has nothing to learn (full depth, exact ops), so its 3.5% recall gap is pure
+# optimizer drift, and drift damage is front-loaded then partially restored by the loss
+# (0 -> 0.0053 -> 0.0034 -> 0.0019 per epoch). More data/steps should therefore RECOVER recall.
+#
+# Sizing. Measured source yields under the builder's own filters: 82,326 MS MARCO queries, 676,193
+# passages, 816,520 wikitext-103 paragraphs = 1,575,039 texts, a few % of them duplicate passages.
+#
+# corpus_size is a TARGET, not a guarantee: `_mixed` asks each source for its weighted share of n
+# independently and never backfills an exhausted one, so above n=411,630 (where 0.2n hits the query
+# cap) the request falls short and the mix skews. 2,100,000 is therefore "take everything" —
+# it yields 1,575,039 texts at roughly 5/43/52 queries/passages/wikitext instead of 20/40/40.
+#
+#   uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
+#       configs/qwen3/depth28_control_max.yaml
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28 # full depth: the control
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  hidden_layer_map: null # identity at full depth
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 2100000 # saturates the corpus: 1,575,039 texts (see header)
+  output_dir: outputs
+  run_name: qwen3_depth28_control_max
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: bf16 # gate-passed on this config (0.9652 vs tf32 0.9648)
+  compile: true # warmup is ~6+ min under DDP (CPU-bound, all ranks) — amortized over a run this long
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    # batch_size is GLOBAL and split across ranks: 128 = 32/rank on 4 cards, the per-rank batch every
+    # throughput number was measured at. On a different card count, keep 32/rank and re-scale LR by
+    # sqrt(batch) off the 2e-5@32 baseline: 8 cards -> batch 256, lr 5.7e-5.
+    lr: 4.0e-5 # 2e-5 * sqrt(128/32)
+    epochs: 3
+    batch_size: 128
+    warmup_ratio: 0.1
+    weight_decay: 0.01

@@ -15,10 +15,18 @@ Devices are passed as CUDA indices and exported per-subprocess as CUDA_VISIBLE_D
 `train.device: cuda` in the config always resolves to the intended card. Pass only cards you
 actually own — a co-tenant's idle GPU is not free capacity.
 
+`--ddp` switches the other way: configs run one at a time, each spread over ALL the devices via
+torchrun. The queue maximizes throughput (N configs in ceil(N/devices) slots, zero communication);
+DDP maximizes the compute a SINGLE run can absorb, which is what a "push one config as far as it
+goes" experiment needs. `train.distill.batch_size` stays the global batch and is split across ranks,
+so raising it to keep the per-rank batch fixed also means raising LR by sqrt(batch) in the config.
+
 Usage:
     uv run python scripts/qwen3/run_experiments.py --devices 0,1 \
         configs/qwen3/depth19.yaml configs/qwen3/depth14.yaml
     uv run python scripts/qwen3/run_experiments.py --devices 2,3 --eval-only configs/qwen3/*.yaml
+    uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
+        configs/qwen3/depth28_control_max.yaml
 """
 
 from __future__ import annotations
@@ -66,17 +74,32 @@ def _trace(path: str) -> list[str]:
         return [ln.rstrip() for ln in f if ln.startswith(("init:", "epoch "))]
 
 
-def one_experiment(config: str, device: str, out_dir: str, eval_only: bool) -> dict:
+def _distill_cmd(config: str, nproc: int) -> list[str]:
+    """`main.py distill` directly, or under torchrun for DDP.
+
+    Launched as `-m torch.distributed.run` rather than the `torchrun` console script so the
+    ranks inherit exactly this interpreter — on a remote box the bare `torchrun` on PATH is
+    often a different venv's."""
+    argv = ["main.py", "distill", "--config", config]
+    if nproc > 1:
+        return [sys.executable, "-m", "torch.distributed.run", f"--nproc_per_node={nproc}", *argv]
+    return [sys.executable, *argv]
+
+
+def one_experiment(config: str, device: str, out_dir: str, eval_only: bool, ddp: bool = False) -> dict:
     stem = os.path.splitext(os.path.basename(config))[0]
     tag = f"[gpu{device}] {stem}"
     ckpt = RunPaths(Config.from_yaml(config)).student_bin()
+    nproc = len(device.split(",")) if ddp else 1
     result = {"stem": stem, "config": config, "device": device, "minutes": None, "trace": []}
+    if nproc > 1:
+        result["world_size"] = nproc
 
     if not eval_only:
         log = os.path.join(out_dir, f"{stem}.distill.log")
-        _say(f"{tag}: distill -> {log}")
+        _say(f"{tag}: distill ({nproc} rank(s)) -> {log}")
         start = time.monotonic()
-        code = _run([sys.executable, "main.py", "distill", "--config", config], device, log)
+        code = _run(_distill_cmd(config, nproc), device, log)
         result["minutes"] = (time.monotonic() - start) / 60
         result["trace"] = _trace(log)
         if code != 0:
@@ -102,7 +125,7 @@ def one_experiment(config: str, device: str, out_dir: str, eval_only: bool) -> d
             "--json",
             metrics_path,
         ],
-        device,
+        device.split(",")[0],  # scoring is single-process; don't hand it the whole DDP card set
         log,
     )
     if code != 0 or not os.path.exists(metrics_path):
@@ -180,6 +203,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("configs", nargs="+", help="config YAMLs to run, in reporting order")
     p.add_argument("--devices", default="0,1", help="CUDA indices to use, comma-separated")
     p.add_argument("--eval-only", action="store_true", help="score checkpoints, no training")
+    p.add_argument(
+        "--ddp",
+        action="store_true",
+        help="run configs one at a time, each across ALL --devices (torchrun), "
+        "instead of one config per device",
+    )
     p.add_argument("--out", default="outputs/experiments", help="logs + per-run metrics JSON")
     args = p.parse_args(argv)
 
@@ -200,14 +229,19 @@ def main(argv: list[str] | None = None) -> None:
             except queue.Empty:
                 return
             try:
-                results[i] = one_experiment(config, device, out_dir, args.eval_only)
+                results[i] = one_experiment(config, device, out_dir, args.eval_only, args.ddp)
             except Exception as exc:  # keep the other runs alive; report it as a row
                 results[i] = {"stem": os.path.basename(config), "error": repr(exc)}
 
-    print(f"{len(args.configs)} experiment(s) over {len(devices)} device(s): {', '.join(devices)}")
+    mode = f"DDP across {len(devices)}" if args.ddp else f"queued over {len(devices)}"
+    print(f"{len(args.configs)} experiment(s), {mode} device(s): {', '.join(devices)}")
     print(f"logs: {out_dir}")
     started = time.monotonic()
-    threads = [threading.Thread(target=worker, args=(d,)) for d in devices]
+    # DDP already owns every card, so the queue collapses to one worker holding the whole set.
+    threads = [
+        threading.Thread(target=worker, args=(d,))
+        for d in ([",".join(devices)] if args.ddp else devices)
+    ]
     for t in threads:
         t.start()
     for t in threads:

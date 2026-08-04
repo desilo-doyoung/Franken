@@ -85,11 +85,19 @@ prose), and prints one markdown table that pastes into `PROGRESS.md` plus every 
 
 ## Multi-GPU for a single run
 
-Not a script here — `main.py distill` reads torchrun's environment (`franken/distill/dist.py`):
+`main.py distill` reads torchrun's environment (`franken/distill/dist.py`), either directly or
+through the runner's `--ddp`, which wraps the same launch and still writes the table:
 
 ```
 CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 main.py distill --config X
+uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp configs/qwen3/X.yaml
 ```
+
+Pick by what is scarce: the default queue maximizes **throughput** (a batch of configs, zero
+communication), `--ddp` maximizes the compute **one** run can absorb. ⚠️ `compile: true` costs a
+~6-minute CPU-bound warmup on every rank before the first epoch line appears — GPUs sit at 0%
+util with memory resident, which reads exactly like a collective deadlock. Check `%CPU` first:
+~90% and state `R` on every rank is Dynamo compiling, not a hang.
 
 `train.distill.batch_size` is the **global** batch, split across ranks, so steps/epoch and the LR schedule
 are preserved — per-rank batch therefore shrinks as cards are added. For 4 cards set `batch_size: 128`
