@@ -211,8 +211,8 @@ def report(results: list[dict], out_dir: str) -> None:
             emit(f"\nFAILED {r['stem']}: {r['error']}{log}")
 
     emit(
-        "\n¹ nDCG deficit ÷ recall deficit — the ratio column in PROGRESS. Low means the divergence "
-        "recall@10 reports is not costing real quality."
+        "\n¹ nDCG deficit ÷ recall deficit — the ratio column in PROGRESS. Low means the "
+        "divergence recall@10 reports is not costing real quality."
     )
     ndcg_teachers = {round(r["ndcg_teacher"], 4) for r in ok}
     if ndcg_teachers:
