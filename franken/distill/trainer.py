@@ -2,11 +2,13 @@ from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, DistributedSampler
 from transformers import get_linear_schedule_with_warmup, set_seed
 
 from franken.config import Config
+from franken.distill.dist import barrier, init_distributed, per_rank_batch
 from franken.models import build_backend
 from franken.tasks import build_task
 
@@ -20,9 +22,7 @@ def _range_penalty(preacts, domain):
     domain so the deployed bare poly is FHE-safe. Training-only. None if all in range."""
     terms = []
     for x in preacts:
-        # fp32 regardless of training precision: this is an extreme-value statistic over the
-        # out-of-range tail, and in bf16 it lands on the coarse grid up there (measured
-        # 836.32 -> 900.00, +7.6%, where one bf16 ULP at 900 is 8).
+        # fp32 always: a tail statistic, and bf16's coarse grid up there shifts it +7.6%.
         x = x.float()
         over, under = F.relu(x - domain), F.relu(-domain - x)
         outside = (over > 0) | (under > 0)
@@ -43,28 +43,35 @@ def _apply_precision(precision: str) -> None:
 
 
 def _autocast(precision: str):
-    """Autocast region for the STUDENT forward + loss. Never wrap the teacher: it produces the
-    targets, so degrading it degrades the definition of "matches the teacher" (measured: a bf16
-    teacher shifts targets 0.0076 recall@10, ~2x the comparison band)."""
+    """Autocast region for the STUDENT forward + loss only. Never the teacher: it makes the
+    targets, and a bf16 teacher shifts them 0.0076 recall@10, ~2x the comparison band."""
     return torch.autocast("cuda", dtype=torch.bfloat16) if precision == "bf16" else nullcontext()
 
 
 def _maybe_compile(model, cfg: Config):
-    """Compiled callable for the training loop. The caller must keep the eager module too --
-    OptimizedModule.state_dict() prefixes keys with `_orig_mod.`, which would break checkpoint
-    round-tripping, and eval must stay eager to keep the fp32-eval invariant (see evaluate)."""
+    """Compiled callable for training. Callers keep the eager module too: its state_dict has no
+    `_orig_mod.` prefix, and eval must stay eager (see evaluate)."""
     return torch.compile(model) if cfg.train.compile else model
 
 
 class Distiller:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+        self.dist = init_distributed()
+        if self.dist.enabled:
+            self.device = torch.device(f"cuda:{self.dist.local_rank}")
+        else:
+            self.device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
         self.backend = build_backend(cfg.model.backend)
         self.task = build_task(cfg.train.task)
         self.teacher = None
         self.student = None
         self.tokenizer = None
+
+    def log(self, *args):
+        """Rank 0 only: run_experiments.py parses these lines, so N ranks would emit N rows."""
+        if self.dist.is_main:
+            print(*args)
 
     def setup(self):
         self.teacher = self.backend.load_teacher(self.cfg).to(self.device)
@@ -79,12 +86,36 @@ class Distiller:
         set_seed(self.cfg.train.seed)
         data = self.task.datasets(self.tokenizer, self.cfg)
         train_data = data["train"].with_format("torch", columns=self.task.torch_columns())
+        # Single-process keeps the literal shuffle=True path: DistributedSampler draws a
+        # different permutation even at world_size 1, and batch composition is worth ~0.004
+        # recall -- the width of the comparison band itself.
+        sampler = None
+        if self.dist.enabled:
+            sampler = DistributedSampler(
+                train_data,
+                num_replicas=self.dist.world_size,
+                rank=self.dist.rank,
+                shuffle=True,
+                seed=self.cfg.train.seed,
+            )
         loader = DataLoader(
             train_data,
-            batch_size=self.cfg.train.distill.batch_size,
-            shuffle=True,
+            batch_size=per_rank_batch(self.cfg.train.distill.batch_size, self.dist),
+            shuffle=sampler is None,
+            sampler=sampler,
             collate_fn=data["collator"],
         )
+
+        # DistributedSampler pads the index list to divide evenly, so steps-per-epoch happens to
+        # match single-process arithmetic rather than being guaranteed to. Assert it: a mismatch
+        # silently rescales the LR schedule and invalidates every comparison.
+        if self.dist.enabled:
+            expected = -(-len(train_data) // self.cfg.train.distill.batch_size)
+            if len(loader) != expected:
+                raise RuntimeError(
+                    f"steps/epoch {len(loader)} != single-process {expected}; the LR schedule "
+                    "and recorded results would not be comparable."
+                )
 
         optimizer = AdamW(
             self.student.parameters(),
@@ -107,6 +138,16 @@ class Distiller:
         domain = getattr(first_act, "domain", None) if (penalty_weight > 0 and first_act) else None
         preacts, hooks = [], []
         if domain is not None:
+            # `module.training` is a Dynamo guard, and toggling it per epoch grows one graph per
+            # toggle until cache_size_limit silently reverts the run to eager. The branch has to
+            # stay (without it, eval accumulates 28 pre-activations per batch across the whole
+            # pool), so refuse the combination rather than quietly losing the speedup.
+            if self.cfg.train.compile:
+                raise ValueError(
+                    "train.compile with distill.range_penalty > 0 is not supported: the "
+                    "pre-activation hook branches on module.training, which makes Dynamo "
+                    "recompile every epoch and then fall back to eager silently."
+                )
 
             def _capture(module, _inp, out):
                 if module.training:
@@ -126,7 +167,7 @@ class Distiller:
                         f"student (valid 0..{len(mods) - 1}; STUDENT indices, not teacher's)"
                     )
                 targets = [mods[i] for i in which]
-                print(
+                self.log(
                     f"range penalty on student layers {sorted(which)} "
                     f"of {len(mods)}, domain {domain}"
                 )
@@ -138,19 +179,28 @@ class Distiller:
 
         # Baseline before any update: the student starts from teacher weights, so "did
         # training help?" is only answerable against it. Not a checkpoint candidate.
-        print(f"init: {self.evaluate()}")
+        self.log(f"init: {self.evaluate()}")
 
         self.student.train()
 
         # Training-loop arithmetic (evaluation stays fp32 whatever this is).
         _apply_precision(self.cfg.train.precision)
 
-        # Compiled callables for training only. self.student / self.teacher stay eager and are
-        # what evaluate() and the checkpoint save use; both views share parameters.
-        student = _maybe_compile(self.student, self.cfg)
+        # Training only; self.student/self.teacher stay eager for evaluate() and the save.
+        # DDP wraps first: compiling the wrapper lets Dynamo's DDPOptimizer split the graph so
+        # gradient allreduce overlaps backward. The other order emits one fused graph whose
+        # grads all become ready at once, exposing the full ~2.4 GB of comms.
+        student = self.student
+        if self.dist.enabled:
+            student = DistributedDataParallel(
+                student, device_ids=[self.dist.local_rank], gradient_as_bucket_view=True
+            )
+        student = _maybe_compile(student, self.cfg)
         teacher = _maybe_compile(self.teacher, self.cfg)
 
         for epoch in range(self.cfg.train.distill.epochs):
+            if sampler is not None:
+                sampler.set_epoch(epoch)
             # Mean range penalty over the epoch. Logged because it is the only visible evidence that
             # the penalty is doing anything: it should fall as pre-activations are squashed into the
             # op's domain. Verify the end state with scripts/qwen3/act_range.py on the checkpoint.
@@ -159,8 +209,7 @@ class Distiller:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 inputs = self.task.model_inputs(batch)
 
-                # Teacher stays outside the autocast region: it produces the targets, so
-                # lowering its precision lowers the definition of "matches the teacher".
+                # Outside the autocast region: see _autocast.
                 with torch.no_grad():
                     teacher_outputs = self.backend.forward(teacher, inputs)
 
@@ -184,36 +233,41 @@ class Distiller:
                 optimizer.step()
                 scheduler.step()
 
-            metrics = self.evaluate()
-            # Select on the task's headline metric (max F1 for MRPC; min distance for
-            # embedding self-distill). The student is deterministic, so the argmax/argmin
-            # is stable run-to-run.
-            value = metrics[metric_name]
-            improved = value > best if higher_is_better else value < best
-            if improved:
-                best = value
-                # Clone off-device: state_dict() returns live references that the
-                # next optimizer.step() would mutate in place.
-                best_state = {
-                    k: v.detach().cpu().clone() for k, v in self.student.state_dict().items()
-                }
-            comp_str = " ".join(f"{k}={float(v):.3f}" for k, v in components.items())
-            if penalties:
-                comp_str += f" penalty={torch.stack(penalties).mean().item():.1f}"
-            print(f"epoch {epoch}: {metrics} | {comp_str}")
+            # Rank 0 scores and tracks the checkpoint; the others wait. Replicas are identical
+            # after DDP's allreduce, so scoring on every rank would compute the same numbers.
+            if self.dist.is_main:
+                metrics = self.evaluate()
+                # Select on the task's headline metric (max F1 for MRPC; min distance for
+                # embedding self-distill). The student is deterministic, so the argmax/argmin
+                # is stable run-to-run.
+                value = metrics[metric_name]
+                improved = value > best if higher_is_better else value < best
+                if improved:
+                    best = value
+                    # Clone off-device: state_dict() returns live references that the
+                    # next optimizer.step() would mutate in place.
+                    best_state = {
+                        k: v.detach().cpu().clone() for k, v in self.student.state_dict().items()
+                    }
+                comp_str = " ".join(f"{k}={float(v):.3f}" for k, v in components.items())
+                if penalties:
+                    comp_str += f" penalty={torch.stack(penalties).mean().item():.1f}"
+                self.log(f"epoch {epoch}: {metrics} | {comp_str}")
+            barrier(self.dist)
             self.student.train()
 
         for h in hooks:
             h.remove()
 
-        # One graph for the student, plus a few from transformers internals in the teacher. A
-        # climbing count means something in the traced region is guarded on state that changes
-        # per epoch, which ends with Dynamo hitting cache_size_limit and silently reverting to
-        # eager for the rest of the run.
+        # Should stay ~2. A count climbing per epoch means Dynamo will hit cache_size_limit and
+        # silently revert to eager mid-run.
         if self.cfg.train.compile:
             graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
-            print(f"dynamo unique_graphs: {graphs}")
+            self.log(f"dynamo unique_graphs: {graphs}")
 
+        # Only rank 0 tracked `best`, so only rank 0's student is the selected checkpoint --
+        # and only rank 0 saves it. Teardown happens in cli.cmd_distill, after that save:
+        # destroy_process_group is itself collective, so tearing down here would race the save.
         if best_state is not None:
             self.student.load_state_dict(best_state)
 
@@ -227,8 +281,8 @@ class Distiller:
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         try:
-            # Eager modules on purpose: a compiled callable here would compile a second graph
-            # for the tf32-off state and one more per train/eval toggle.
+            # Eager on purpose: a compiled callable would add a graph per precision state and
+            # per train/eval toggle.
             return self.task.evaluate(
                 self.backend, self.student, self.tokenizer, self.cfg, teacher=self.teacher
             )

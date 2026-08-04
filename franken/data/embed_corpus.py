@@ -103,17 +103,12 @@ CORPORA = {
 
 @lru_cache(maxsize=4)
 def _build_split(name: str, split: str, n: int, max_seq_len: int, tokenizer: Any):
-    """One tokenized split, memoized on everything that determines its content.
+    """One tokenized split, memoized on what determines its content.
 
-    The sources are HF *streaming* datasets, so a rebuild re-pays the network and parsing —
-    seconds at ``corpus_size`` 24k, minutes at 216k — for a result that is a pure function of
-    these arguments. Cached per split rather than per call so that asking for validation alone
-    reuses what a train+validation call already built.
-
-    ``tokenizer`` keys by object identity (transformers tokenizers define no ``__eq__``), which
-    is what we want: a run builds exactly one. Caching cannot perturb reproducibility because
-    building touches no global RNG — ``_mixed`` shuffles with its own ``random.Random(0)`` — so
-    the DataLoader permutation drawn later is unaffected.
+    Sources are HF *streaming* datasets, so a rebuild re-pays network and parsing: 21s at
+    ``corpus_size`` 24k, minutes at 216k. Cached per split, not per call, so a validation-only
+    request reuses what a train+validation call built. Reproducibility-neutral: building
+    consumes no global RNG, so the DataLoader permutation is unaffected.
     """
     if name not in CORPORA:
         raise KeyError(f"Unknown corpus {name!r}; available: {sorted(CORPORA)}")

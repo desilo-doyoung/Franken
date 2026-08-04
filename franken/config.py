@@ -113,17 +113,12 @@ class TrainConfig:
     max_seq_len: int = 128
     seed: int = 42
     device: str = "cuda"
-    # Arithmetic for the distillation loop only; evaluation is forced back to fp32.
-    # "fp32" | "tf32" (TF32 matmuls, fp32 storage) | "bf16" (tf32 + a bf16 autocast region
-    # around the STUDENT forward and loss only). TF32 degrades the teacher's targets too, so
-    # validate against an fp32 reference. The teacher forward NEVER enters the autocast
-    # region: a bf16 teacher moves targets by 0.0076 recall@10, ~2x the comparison band.
+    # Distillation loop only; evaluation is forced back to fp32. "fp32" | "tf32" (TF32 matmuls,
+    # fp32 storage) | "bf16" (tf32 plus autocast around the student forward and loss). The
+    # teacher never enters the autocast region -- see franken.distill.trainer._autocast.
     precision: str = "fp32"
 
-    # torch.compile the student + teacher for training only; eval keeps the eager modules.
-    # Required, not incidental: `allow_tf32` is a Dynamo guard, so eval (which forces tf32
-    # off) would compile a second graph, and a `self.training` branch in the traced region
-    # grows one graph per toggle until the cache limit silently drops back to eager.
+    # torch.compile student + teacher for training; eval stays eager (see trainer.evaluate).
     compile: bool = False
 
     # Per-run optimization blocks (see OptimConfig).

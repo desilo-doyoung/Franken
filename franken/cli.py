@@ -42,11 +42,20 @@ def cmd_distill(args: argparse.Namespace) -> None:
     d.setup()
     d.train()
 
-    # Save the student checkpoint
-    paths = RunPaths(cfg)
-    os.makedirs(paths.student, exist_ok=True)
-    torch.save(d.student.state_dict(), paths.student_bin())
-    print(f"Student saved to {paths.student}")
+    from franken.distill.dist import barrier, shutdown
+
+    # Rank 0 only: every rank would otherwise race on the same path, and only rank 0 holds the
+    # selected checkpoint.
+    if d.dist.is_main:
+        paths = RunPaths(cfg)
+        os.makedirs(paths.student, exist_ok=True)
+        torch.save(d.student.state_dict(), paths.student_bin())
+        print(f"Student saved to {paths.student}")
+
+    # Every rank reaches teardown together: destroy_process_group is collective, so letting one
+    # rank tear down while another is still saving hangs the job.
+    barrier(d.dist)
+    shutdown(d.dist)
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
