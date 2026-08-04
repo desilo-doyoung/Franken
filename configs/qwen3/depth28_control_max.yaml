@@ -53,11 +53,14 @@ train:
     weight_decay: 0.01
 
   distill:
-    # batch_size is GLOBAL and split across ranks: 128 = 32/rank on 4 cards, the per-rank batch every
-    # throughput number was measured at. On a different card count, keep 32/rank and re-scale LR by
-    # sqrt(batch) off the 2e-5@32 baseline: 8 cards -> batch 256, lr 5.7e-5.
-    lr: 4.0e-5 # 2e-5 * sqrt(128/32)
+    # batch_size is GLOBAL and split across ranks: 384 = 96/rank on 4 cards. Measured per-rank on an
+    # A6000 (bf16+compile, depth 28): 32 -> 403 ms / 6558 tok/s / 19.9 GB, 64 -> 670 / 7889 / 27.8,
+    # 96 -> 929 / 8637 / 35.8, 128 -> 1460 / 7445 / 43.7. 96 is peak; 128 regresses on a 46 GB card.
+    # Big batch also cuts the step count, and each step pays one fixed ~2.4 GB gradient allreduce
+    # over PCIe (no NVLink here), so the communication saving compounds with the compute gain.
+    # On a different card count, hold 96/rank and re-scale LR by sqrt(batch) off 2e-5@32.
+    lr: 6.93e-5 # 2e-5 * sqrt(384/32); sqrt-scaling holds lr*sqrt(steps) — i.e. drift — invariant
     epochs: 3
-    batch_size: 128
+    batch_size: 384
     warmup_ratio: 0.1
     weight_decay: 0.01
