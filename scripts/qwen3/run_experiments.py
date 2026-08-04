@@ -86,7 +86,9 @@ def _distill_cmd(config: str, nproc: int) -> list[str]:
     return [sys.executable, *argv]
 
 
-def one_experiment(config: str, device: str, out_dir: str, eval_only: bool, ddp: bool = False) -> dict:
+def one_experiment(
+    config: str, device: str, out_dir: str, eval_only: bool, ddp: bool = False
+) -> dict:
     stem = os.path.splitext(os.path.basename(config))[0]
     tag = f"[gpu{device}] {stem}"
     ckpt = RunPaths(Config.from_yaml(config)).student_bin()

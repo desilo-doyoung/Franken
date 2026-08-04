@@ -19,12 +19,20 @@ softmax behaves differently (it normalizes by the visible-token count).
 Sources yield ``list[str]``; ``load_embed_corpus`` tokenizes and wraps them.
 """
 
+import os
 import random
+import re
+import shutil
 from functools import lru_cache
 from typing import Any
 
 import datasets
 import transformers
+
+# Tokenized splits are cached here across runs. Bump _CACHE_VERSION when a source or a mix weight
+# changes — the key covers the request, not the recipe that answered it.
+_CACHE_DIR = "outputs/corpus_cache"
+_CACHE_VERSION = 1
 
 # Task-specific by design (the model card recommends tailoring it, worth 1-5%). MS MARCO is
 # web search, so this is its matching instruction.
@@ -101,25 +109,45 @@ CORPORA = {
 }
 
 
+def _cache_path(name: str, split: str, n: int, max_seq_len: int, tokenizer: Any) -> str:
+    tok_id = re.sub(r"[^\w.-]", "_", str(getattr(tokenizer, "name_or_path", "tokenizer")))
+    return os.path.join(_CACHE_DIR, f"v{_CACHE_VERSION}-{name}-{split}-{n}-{max_seq_len}-{tok_id}")
+
+
+def _save_atomic(ds, path: str) -> None:
+    # Under torchrun every rank builds this concurrently, so publish by rename rather than let N
+    # ranks interleave writes into one directory; losers (rename onto a non-empty dir) discard.
+    tmp = f"{path}.tmp{os.getpid()}"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    ds.save_to_disk(tmp)
+    try:
+        os.rename(tmp, path)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @lru_cache(maxsize=4)
 def _build_split(name: str, split: str, n: int, max_seq_len: int, tokenizer: Any):
-    """One tokenized split, memoized on what determines its content.
+    """One tokenized split, memoized in-process and on disk.
 
     Sources are HF *streaming* datasets, so a rebuild re-pays network and parsing: 21s at
-    ``corpus_size`` 24k, minutes at 216k. Cached per split, not per call, so a validation-only
-    request reuses what a train+validation call built. Reproducibility-neutral: building
-    consumes no global RNG, so the DataLoader permutation is unaffected.
+    ``corpus_size`` 24k, minutes at 216k, and every rank pays it independently. Reproducibility-
+    neutral: building consumes no global RNG, and a cache hit returns identical content.
     """
     if name not in CORPORA:
         raise KeyError(f"Unknown corpus {name!r}; available: {sorted(CORPORA)}")
+
+    cached = _cache_path(name, split, n, max_seq_len, tokenizer)
+    if os.path.isdir(cached):
+        return datasets.load_from_disk(cached)
 
     def tok(batch):
         return tokenizer(batch["text"], truncation=True, max_length=max_seq_len)
 
     texts = CORPORA[name](split, n)
-    return datasets.Dataset.from_dict({"text": texts}).map(
-        tok, batched=True, remove_columns=["text"]
-    )
+    ds = datasets.Dataset.from_dict({"text": texts}).map(tok, batched=True, remove_columns=["text"])
+    _save_atomic(ds, cached)
+    return ds
 
 
 def load_embed_corpus(
