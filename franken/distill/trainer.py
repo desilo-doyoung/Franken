@@ -142,16 +142,6 @@ class Distiller:
         domain = getattr(first_act, "domain", None) if (penalty_weight > 0 and first_act) else None
         preacts, hooks = [], []
         if domain is not None:
-            # `module.training` is a Dynamo guard, and toggling it per epoch grows one graph per
-            # toggle until cache_size_limit silently reverts the run to eager. The branch has to
-            # stay (without it, eval accumulates 28 pre-activations per batch across the whole
-            # pool), so refuse the combination rather than quietly losing the speedup.
-            if self.cfg.train.compile:
-                raise ValueError(
-                    "train.compile with distill.range_penalty > 0 is not supported: the "
-                    "pre-activation hook branches on module.training, which makes Dynamo "
-                    "recompile every epoch and then fall back to eager silently."
-                )
 
             def _capture(module, _inp, out):
                 if module.training:

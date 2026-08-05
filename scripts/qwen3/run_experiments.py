@@ -24,10 +24,10 @@ so raising it to keep the per-rank batch fixed also means raising LR by sqrt(bat
 
 Usage:
     uv run python scripts/qwen3/run_experiments.py --devices 0,1 \
-        configs/qwen3/depth19.yaml configs/qwen3/depth14.yaml
+        configs/qwen3/depth19.yaml configs/qwen3/quad_silu_nopen.yaml
     uv run python scripts/qwen3/run_experiments.py --devices 2,3 --eval-only configs/qwen3/*.yaml
     uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
-        configs/qwen3/depth28_control_max.yaml
+        configs/qwen3/depth28_exact.yaml
 """
 
 from __future__ import annotations

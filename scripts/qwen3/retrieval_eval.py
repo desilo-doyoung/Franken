@@ -7,8 +7,8 @@ STS-B is absolute but too coarse for top-of-list damage. This fills the remainin
 condition) vs MTEB's 512, one generic instruction. Valid teacher-vs-student only. With no
 --student-ckpt the student IS the teacher, so every delta must be ~0 — the self-test.
 
-    uv run python scripts/qwen3/retrieval_eval.py --config configs/qwen3/depth19_max.yaml \
-        --student-ckpt outputs/qwen3_depth19_max/student/pytorch_model.bin
+    uv run python scripts/qwen3/retrieval_eval.py --config configs/qwen3/depth19.yaml \
+        --student-ckpt outputs/qwen3_depth19/student/pytorch_model.bin
 """
 
 from __future__ import annotations

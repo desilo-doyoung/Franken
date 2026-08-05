@@ -15,7 +15,7 @@ source of truth. Training itself is `main.py distill`, not here.
 
 ```
 uv run python scripts/qwen3/parity_gate.py     --config configs/qwen3/exact.yaml
-uv run python scripts/qwen3/precision_gate.py  --config configs/qwen3/depth28_control.yaml
+uv run python scripts/qwen3/precision_gate.py  --config configs/qwen3/depth28_exact.yaml
 uv run python scripts/qwen3/bench_step.py      --config ... [--precision bf16] [--compile]
 uv run python scripts/qwen3/act_range.py       --config ... [--student-ckpt ...]
 uv run python scripts/qwen3/embed_eval.py      --student-ckpt outputs/qwen3/student/pytorch_model.bin
@@ -100,5 +100,6 @@ util with memory resident, which reads exactly like a collective deadlock. Check
 ~90% and state `R` on every rank is Dynamo compiling, not a hang.
 
 `train.distill.batch_size` is the **global** batch, split across ranks, so steps/epoch and the LR schedule
-are preserved — per-rank batch therefore shrinks as cards are added. For 4 cards set `batch_size: 128`
-(32/rank) and scale LR by **√batch**, not linearly.
+are preserved — per-rank batch therefore shrinks as cards are added. The standard recipe is `batch_size: 512`
+(128/rank on 4 cards, the measured H100 throughput peak) with LR scaled by **√batch**, not linearly.
+⚠️ 192/rank does not OOM — it runs ~32× slower on allocator thrashing.

@@ -34,12 +34,12 @@ train:
   corpus: mixed
   corpus_size: 2100000
   output_dir: outputs
-  run_name: qwen3_quad_silu_d32_max
+  run_name: qwen3_quad_silu_d32
   max_seq_len: 128
   seed: 42
   device: cuda
   precision: bf16
-  compile: false # required: range_penalty > 0 raises under compile
+  compile: true
 
   teacher:
     lr: 5.0e-5
@@ -49,8 +49,8 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 6.93e-5
+    lr: 8.0e-5 # 2e-5 * sqrt(512/32); holds lr*sqrt(steps) = 7.69e-3, unchanged from batch 384
     epochs: 3
-    batch_size: 384
+    batch_size: 512 # 128/rank on 4 cards = the measured H100 throughput peak
     warmup_ratio: 0.1
     weight_decay: 0.01

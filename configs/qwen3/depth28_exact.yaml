@@ -2,9 +2,10 @@
 # config with one lever changed, so its cost is read against this row, not against the teacher alone.
 #
 # Distinct from depth28_control_max, which recorded 0.9790 at batch 128 — kept as-is so that number stays
-# reproducible. This one carries the batch's shared recipe (batch 384).
+# reproducible. This one carries the shared recipe and is the re-anchor for the batch-512 era.
 #
-# Batch recipe, identical across all five: 1,575,039 texts x 3ep, batch 384 (96/rank), lr 6.93e-5, bf16.
+# Shared recipe: 1,575,039 texts x 3ep, batch 512 (128/rank), lr 8.0e-5, bf16.
+# NB the recorded [1]-[6] results were produced at batch 384 / lr 6.93e-5 — see PROGRESS.
 #   [1] depth28_exact_max  [2] depth19_max  [3] quad_silu_nopen_max
 #   [4] quad_silu_d32_max  [5] depth19_quad_silu_d32_max
 
@@ -29,7 +30,7 @@ train:
   corpus: mixed
   corpus_size: 2100000 # saturates the corpus: 1,575,039 texts, cached
   output_dir: outputs
-  run_name: qwen3_depth28_exact_max
+  run_name: qwen3_depth28_exact
   max_seq_len: 128
   seed: 42
   device: cuda
@@ -44,8 +45,8 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 6.93e-5 # 2e-5 * sqrt(384/32); holds lr*sqrt(steps) = 7.69e-3, so drift matches the batch
+    lr: 8.0e-5 # 2e-5 * sqrt(512/32); holds lr*sqrt(steps) = 7.69e-3, unchanged from batch 384
     epochs: 3
-    batch_size: 384
+    batch_size: 512 # 128/rank on 4 cards = the measured H100 throughput peak
     warmup_ratio: 0.1
     weight_decay: 0.01

@@ -1,6 +1,6 @@
 """Time one distillation step, so speed claims are measured rather than assumed.
 
-    uv run python scripts/qwen3/bench_step.py --config configs/qwen3/depth28_control.yaml
+    uv run python scripts/qwen3/bench_step.py --config configs/qwen3/depth28_exact.yaml
     uv run python scripts/qwen3/bench_step.py --config ... --precision bf16 --compile
 
 `tok/s` counts REAL (non-pad) tokens, matching the recipe table in PROGRESS.md. Does not
@@ -29,7 +29,7 @@ from franken.distill.trainer import (  # noqa: E402
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="configs/qwen3/depth28_control.yaml")
+    p.add_argument("--config", default="configs/qwen3/depth28_exact.yaml")
     p.add_argument("--steps", type=int, default=20, help="timed steps")
     p.add_argument("--warmup", type=int, default=5, help="untimed steps (compile, autotune)")
     p.add_argument("--precision", choices=("fp32", "tf32", "bf16"), help="override config")
