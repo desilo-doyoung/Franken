@@ -58,3 +58,6 @@ class Qwen3Backend(ModelBackend):
 
     def activation_ops(self, model: nn.Module) -> list[nn.Module]:
         raise NotImplementedError(_TODO.format("activation_ops"))
+
+    def softmax_ops(self, model: nn.Module) -> list[nn.Module]:
+        raise NotImplementedError(_TODO.format("softmax_ops"))

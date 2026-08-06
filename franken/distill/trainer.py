@@ -68,10 +68,19 @@ class Distiller:
         # inputs. Engages only for ops that expose `domain` (e.g. cheb_gelu); each
         # FFN pre-activation is read off via a forward hook. Module paths come from
         # the backend so this is model-agnostic.
-        penalty_weight = self.cfg.distill.range_penalty
+        range_penalty = self.cfg.distill.range_penalty
         acts = self.backend.activation_ops(self.student)
         first_act = acts[0] if acts else None
-        domain = getattr(first_act, "domain", None) if (penalty_weight > 0 and first_act) else None
+        domain = getattr(first_act, "domain", None) if (range_penalty > 0 and first_act) else None
+
+        # Softmax range penalty (FHE): the op computes its own term, because the constrained
+        # quantity (cgf's per-row log-sum) is internal to it -- no module boundary to hook.
+        softmax_range_penalty = self.cfg.distill.softmax_range_penalty
+        ranged_softmax_ops = (
+            [op for op in self.backend.softmax_ops(self.student) if hasattr(op, "range_loss")]
+            if softmax_range_penalty > 0
+            else []
+        )
         preacts, hooks = [], []
         if domain is not None:
 
@@ -107,15 +116,24 @@ class Distiller:
 
                 loss = total
                 if domain is not None:
-                    penalty = _range_penalty(preacts, domain)
-                    if penalty is not None:
-                        loss = total + penalty_weight * penalty
+                    pen_act = _range_penalty(preacts, domain)
+                    if pen_act is not None:
+                        loss = loss + range_penalty * pen_act
+                        components["pen_act"] = pen_act.detach()
+                # None when an op has no band configured, so the weight alone cannot enable it.
+                terms = [op.range_loss for op in ranged_softmax_ops if op.range_loss is not None]
+                if terms:
+                    pen_sftmx = torch.stack(terms).mean()
+                    loss = loss + softmax_range_penalty * pen_sftmx
+                    components["pen_sftmx"] = pen_sftmx.detach()
 
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
+                for op in ranged_softmax_ops:
+                    op.range_loss = None  # else the step's graph stays alive through evaluate()
 
             metrics = self.evaluate()
             # Select on the task's headline metric (max F1 for MRPC; min distance for

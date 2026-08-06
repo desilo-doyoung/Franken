@@ -2,8 +2,8 @@ import torch
 from torch import nn
 
 from franken.models.qwen3.config import Qwen3ModelConfig
-from franken.models.qwen3.rope import Qwen3RotaryEmbedding
 from franken.models.qwen3.layer import Qwen3DecoderLayer
+from franken.models.qwen3.rope import Qwen3RotaryEmbedding
 
 
 class Qwen3Model(nn.Module):
@@ -20,11 +20,7 @@ class Qwen3Model(nn.Module):
     def forward(self, input_ids, attention_mask=None) -> dict:
         hidden_states = self.embed_tokens(input_ids)
         B, S, _ = hidden_states.shape
-        position_ids = (
-            torch.arange(S, device=hidden_states.device)
-            .unsqueeze(0)
-            .expand(B, S)
-        )
+        position_ids = torch.arange(S, device=hidden_states.device).unsqueeze(0).expand(B, S)
         cos, sin = self.rotary_emb(hidden_states, position_ids)
         mask = self._causal_mask(attention_mask, S, hidden_states)
 
@@ -46,7 +42,7 @@ class Qwen3Model(nn.Module):
         device = hidden_states.device
         min_val = torch.finfo(dtype).min
 
-        mask  = torch.full((S, S), min_val, device=device, dtype=dtype).triu(diagonal=1)[None, None]
+        mask = torch.full((S, S), min_val, device=device, dtype=dtype).triu(diagonal=1)[None, None]
         if attention_mask is not None:
             pad = (1 - attention_mask[:, None, None, :].to(dtype=dtype)) * min_val
             mask = mask + pad

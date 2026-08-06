@@ -62,6 +62,9 @@ class DistillConfig:
     # activation's valid domain (e.g. cheb_gelu) so the bare poly is FHE-safe at
     # inference. 0 = off; ignored for ops without a bounded domain (e.g. exact).
     range_penalty: float = 0.0
+    # Same idea for the softmax op's own range term (cgf: pin row-sums to 1). Separate weight
+    # because the units differ by orders of magnitude: this one is squared log-space distance.
+    softmax_range_penalty: float = 0.0
 
 
 @dataclass

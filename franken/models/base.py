@@ -48,3 +48,8 @@ class ModelBackend(ABC):
     @abstractmethod
     def activation_ops(self, model: nn.Module) -> list[nn.Module]:
         """The per-layer activation op modules (some expose a ``.domain``)."""
+
+    @abstractmethod
+    def softmax_ops(self, model: nn.Module) -> list[nn.Module]:
+        """The per-layer softmax op modules (some expose a ``.range_loss``, computed inside the
+        op because the constrained quantity has no module boundary to hook)."""

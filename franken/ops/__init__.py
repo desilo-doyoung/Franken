@@ -35,11 +35,26 @@ class CGFSoftmax(nn.Module):
     over visible positions (binary mask). Only masked multiply/add/square/exp —
     no ciphertext division or max-subtraction. Unnormalized by design;
     distillation adapts to it.
+
+    ``rowsum_penalty_band`` (optional) exposes ``range_loss`` for the trainer: a squared hinge
+    pulling each row's ``log(row sum)`` into ``[-band, band]``, i.e. **row-sums toward 1**. Left
+    unnormalized the row sum is input-dependent and unbounded (16..70 on MRPC, 5e4 on peaked
+    synthetic scores), which inflates the downstream LayerNorm-input variance past *any* fixed FHE
+    domain; pinning it makes those magnitudes input-independent by construction. Training-only, so
+    a penalized checkpoint needs no FHE-side change. See thor/EXECUTION_NOTES.md 8.3.
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, rowsum_penalty_band: float | None = None, **kwargs):
         super().__init__()
-        self.kwargs = kwargs
+        self.rowsum_penalty_band = rowsum_penalty_band
+        self.range_loss = None
+
+    def _rowsum_penalty(self, rowsum):
+        # Reduce by each head's WORST row, not a mean: the FHE domains are set by the max, and a
+        # mean over ~19k rows/batch dilutes the tail ~200x (measured bulk 1.3 while the max hit 83).
+        over = F.relu(rowsum.log().abs() - self.rowsum_penalty_band)
+        worst = over.flatten(0, -2).amax(dim=-1)  # (B*H,): each head's worst row
+        return (worst**2).sum() / (worst > 0).sum().clamp(min=1)
 
     def forward(self, scores, mask=None, dim=-1):
         m = (mask == 0).to(scores.dtype) if mask is not None else torch.ones_like(scores)
@@ -47,8 +62,12 @@ class CGFSoftmax(nn.Module):
         x_vis = scores * m  # zero out masked positions before taking statistics
         mu = x_vis.sum(dim=dim, keepdim=True) / n_vis
         var = (x_vis**2).sum(dim=dim, keepdim=True) / n_vis - mu**2
-        logits = scores - mu - 0.5 * var - torch.log(n_vis)
-        return torch.exp(logits) * m
+        out = torch.exp(scores - mu - 0.5 * var - torch.log(n_vis)) * m
+        if self.training and self.rowsum_penalty_band is not None:
+            # Every query row, pad included: pad rows are dropped downstream, but the FHE LayerNorm
+            # runs over all token slots, so an unpinned pad row detonates he_invsqrt (8.3).
+            self.range_loss = self._rowsum_penalty(out.sum(dim=dim))
+        return out
 
 
 # --- activation ops: forward(x) -> x ---

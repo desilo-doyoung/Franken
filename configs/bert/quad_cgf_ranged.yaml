@@ -1,0 +1,57 @@
+# Full FHE student, both ops range-bounded: 8 layers + quad GELU (domain 32) + CGF softmax with
+# row-sums pinned to 1. Unpinned, CGF's row-sum is input-dependent and unbounded, which inflates the
+# LayerNorm-input variance past any fixed he_layernorm variant; pinning it makes the FHE magnitudes
+# input-independent by construction. Deployed under THOR -- see thor/EXECUTION_NOTES.md 8.
+#
+#   CUDA_VISIBLE_DEVICES=2 uv run python scripts/stage_distill.py \
+#     --config-a configs/bert/quad_fhe.yaml --config-b configs/bert/quad_cgf_ranged.yaml \
+#     --skip-stagea --stagea-dir outputs/bert/stageA_quad \
+#     --stageb-dir outputs/bert/stageB_quad_cgf_allrows --stageb-epochs 16
+
+model:
+  num_hidden_layers: 8
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: cgf
+  # Squared hinge on |log(row-sum)|: 0.7 leaves row-sums in [0.5, 2] unpenalized. Deliberate slack,
+  # not a pin at 1 -- the FHE domains are set by the MAX row-sum, so a row at 1.9 is already safe and
+  # pushing it to 1 only spends capacity. NB band=0 has only been tried under the old mean-over-rows
+  # reduction (where it failed); it is untested against the current per-head-max one.
+  softmax_kwargs: {rowsum_penalty_band: 0.7}
+  activation: quad
+  activation_kwargs: {domain: 32} # range penalty squashes pre-acts into [-32, 32]
+
+distill:
+  alpha: 0.5
+  beta: 10.0 # heavy hidden alignment -- needed to train the aggressive quad
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 1.0 # bounds the quad output to ~0.125*32^2
+  softmax_range_penalty: 1.0 # a real band only sees the tail, so it needs more weight than band=0
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/bert/teacher
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    # stage_distill.py overrides both unconditionally (--stageb-lr/--stageb-epochs, default 3e-5/8).
+    # Pass --stageb-epochs 16: at 8 it is undertrained and both F1 and the ranges suffer.
+    epochs: 16
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
