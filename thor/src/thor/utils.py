@@ -2,9 +2,12 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
 from safetensors.torch import load_file as load_safetensors
 from torch import nn
 from transformers import BertConfig, BertForSequenceClassification
+from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 
 def load_bert_config(model_dir: Path) -> BertConfig:
@@ -29,6 +32,40 @@ def load_bert_config(model_dir: Path) -> BertConfig:
     )
 
 
+def cgf_attention_forward(module, query, key, value, attention_mask, scaling=None, dropout=0.0, **kwargs):
+    """CGF (cumulant) softmax attention: the plaintext twin of ``he.he_softmax_cgf``
+    (``exp(x - mu - var/2 - log n_vis) * m``, UNNORMALIZED, mu/var over visible keys). Same shape
+    contract as ``modeling_bert.eager_attention_forward``.
+
+    Registered as an HF attention interface so the reference model runs the op the HE pass does.
+    Without it the reference is a stock-softmax forward of a CGF-trained model, and since
+    ``forward.get_nonlinear_reference`` seeds layer k from ``hidden_states[k]``, every per-stage
+    reference from layer 1 on comes off a chain that already diverged.
+    """
+    if scaling is None:
+        scaling = query.size(-1) ** -0.5
+    scores = torch.matmul(query, key.transpose(2, 3)) * scaling
+    if attention_mask is None:
+        m = torch.ones_like(scores)
+    elif attention_mask.dtype == torch.bool:
+        m = attention_mask.to(scores.dtype).expand_as(scores)
+    else:  # additive mask: 0 where visible, large negative where masked
+        m = (attention_mask == 0).to(scores.dtype).expand_as(scores)
+    n_vis = m.sum(dim=-1, keepdim=True)
+    x_vis = scores * m
+    mu = x_vis.sum(dim=-1, keepdim=True) / n_vis
+    var = (x_vis**2).sum(dim=-1, keepdim=True) / n_vis - mu**2
+    probs = torch.exp(scores - mu - 0.5 * var - torch.log(n_vis)) * m
+    attn_output = torch.matmul(probs, value).transpose(1, 2).contiguous()
+    return attn_output, probs
+
+
+ALL_ATTENTION_FUNCTIONS.register("cgf", cgf_attention_forward)
+# A custom attention name also needs a mask builder, or masking_utils._preprocess_mask_arguments
+# short-circuits to attention_mask=None and the padding silently goes unmasked (val F1 0.892 -> 0.689).
+ALL_MASK_ATTENTION_FUNCTIONS.register("cgf", ALL_MASK_ATTENTION_FUNCTIONS["eager"])
+
+
 class _QuadGELU(nn.Module):
     """MPCFormer quadratic GELU replacement: 0.125 x^2 + 0.25 x + 0.5. An nn.Module
     because HF's BertIntermediate stores intermediate_act_fn as a child module."""
@@ -44,21 +81,30 @@ def load_model(data_type: str, model_path: str, type: str = "default"):
     config.json is read from the same directory. The distilled state dict is
     HF-name-matched and complete, so it loads with no missing/unexpected keys.
 
-    If config.json declares ``"activation": "quad"``, each layer's FFN activation
-    is swapped for the quadratic GELU so this plaintext reference matches what the
-    HE forward computes (he.stage_13_gelu). Any other value keeps HF's GELU.
+    Both nonlinearities are swapped to match what the HE forward computes, driven by
+    config.json: ``"activation": "quad"`` replaces each FFN activation with the quadratic GELU
+    (he.stage_13_gelu), and ``"softmax": "cgf"`` routes attention through
+    ``cgf_attention_forward`` (he.he_softmax_cgf). Anything else keeps HF's GELU / softmax.
     """
     model_path = Path(model_path)
     config = load_bert_config(model_path.parent)
+    raw = json.loads((model_path.parent / "config.json").read_text())
+
+    softmax = raw.get("softmax", "exact")
+    if softmax == "cgf":
+        config._attn_implementation = "cgf"
+
     model = BertForSequenceClassification(config)
     model.load_state_dict(load_safetensors(str(model_path)))
     model.eval()
 
-    activation = json.loads((model_path.parent / "config.json").read_text()).get("activation", "exact")
+    activation = raw.get("activation", "exact")
     if activation == "quad":
         for layer in model.bert.encoder.layer:
             layer.intermediate.intermediate_act_fn = _QuadGELU()
-    print(f"Model loaded for {data_type} ({config.num_hidden_layers} layers, activation={activation})")
+    print(
+        f"Model loaded for {data_type} ({config.num_hidden_layers} layers, activation={activation}, softmax={softmax})"
+    )
     return model
 
 
