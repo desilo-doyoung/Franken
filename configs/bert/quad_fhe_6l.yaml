@@ -1,0 +1,52 @@
+# quad_fhe.yaml at depth 6 instead of 8: same FHE-safe depth-1 GELU (MPCFormer
+# quad, range-penalized to domain 32), exact softmax, one fewer third of the depth.
+# Depth 6 sits on the *slope* of the depth sweep (exact ops: 0.869 F1 vs 0.878 at 8),
+# so expect ~1pt under the 8L quad student (0.8733 test) before FHE effects.
+#
+# domain 32 is inherited, NOT verified at this depth — 6 layers carry the same
+# residual stream through fewer FFNs, so pre-acts can run wider. Check with
+# scripts/bert/act_range.py (pre-acts <= 32, quad out <= ~128) before deploying;
+# LN2 variance scales as domain^4, and he_layernorm3's ceiling is var 2500.
+#   distill: uv run python main.py distill --config configs/bert/quad_fhe_6l.yaml
+
+model:
+  num_hidden_layers: 6 # layer reduction: 12 (teacher) -> 6 (student)
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: exact # THOR supplies its own polynomial softmax for exact-softmax students
+  softmax_kwargs: {}
+  activation: quad # MPCFormer quadratic GELU (degree 2, FHE mult-depth 1)
+  activation_kwargs: {domain: 32} # exposes domain -> range penalty squashes pre-acts into [-32, 32]
+
+distill:
+  alpha: 0.5
+  beta: 10.0 # heavy hidden alignment — needed to train the aggressive quad
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 1.0 # squash pre-acts into [-domain, domain] -> bounds the quad output (~0.125*32^2 = ~128)
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/bert/teacher # same fine-tuned MRPC teacher as the 8L runs
+  run_name: bert_quad6l # own subtree — outputs/bert/student is the deployed 8L quad student
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 12 # quad trains slowly; needs a longer schedule than the 6ep default
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
