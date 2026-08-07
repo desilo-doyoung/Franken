@@ -1,0 +1,52 @@
+# [1/5] Baseline of the matched FHE batch: full depth, exact ops. Everything else in the batch is this
+# config with one lever changed, so its cost is read against this row, not against the teacher alone.
+#
+# Distinct from depth28_control_max, which recorded 0.9790 at batch 128 — kept as-is so that number stays
+# reproducible. This one carries the shared recipe and is the re-anchor for the batch-512 era.
+#
+# Shared recipe: 1,575,039 texts x 3ep, batch 512 (128/rank), lr 8.0e-5, bf16.
+# NB the recorded [1]-[6] results were produced at batch 384 / lr 6.93e-5 — see PROGRESS.
+#   [1] depth28_exact_max  [2] depth19_max  [3] quad_silu_nopen_max
+#   [4] quad_silu_d32_max  [5] depth19_quad_silu_d32_max
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  hidden_layer_map: null # identity at full depth
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 2100000 # saturates the corpus: 1,575,039 texts, cached
+  output_dir: outputs
+  run_name: qwen3_depth28_exact
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: bf16
+  compile: true
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 8.0e-5 # 2e-5 * sqrt(512/32); holds lr*sqrt(steps) = 7.69e-3, unchanged from batch 384
+    epochs: 3
+    batch_size: 512 # 128/rank on 4 cards = the measured H100 throughput peak
+    warmup_ratio: 0.1
+    weight_decay: 0.01

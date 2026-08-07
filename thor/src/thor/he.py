@@ -1028,7 +1028,6 @@ class HE:
             exp_scale=16.0,
         )
 
-
     def he_softmax_cgf(self, u, attention_mask, n_vis):
         """CGF (cumulant) softmax under FHE -- the op the distilled quad+cgf student was
         trained with (franken/ops::CGFSoftmax): softmax_i ~= exp(x_i - mu - var/2 - log n_vis) * m,

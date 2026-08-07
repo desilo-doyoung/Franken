@@ -52,9 +52,14 @@ class Task(ABC):
         tokenizer: Any,
         cfg: Config,
         split: str = "validation",
+        teacher: nn.Module | None = None,
     ) -> dict:
         """Evaluate ``model`` on ``split``; return a metrics dict containing the
-        key returned by ``select_metric``."""
+        key returned by ``select_metric``.
+
+        ``teacher`` is supplied by callers that have one (``Distiller`` holds both
+        models). Tasks scored against labels ignore it; label-free tasks whose metric
+        *is* teacher agreement (embedding self-distillation) require it."""
 
     def train_teacher(self, cfg: Config) -> str | None:
         """Fine-tune and save a teacher if the task needs one; return its path.

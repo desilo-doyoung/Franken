@@ -1,10 +1,13 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from franken.models.qwen3.config import Qwen3ModelConfig
 from franken.ops import build_softmax
 
 from .rope import apply_rotary_pos_emb
+
+ATTN_IMPLS = ("manual", "sdpa_causal")
 
 
 def repeat_kv(x, repeat):
@@ -34,6 +37,15 @@ class Qwen3Attention(nn.Module):
         self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.softmax = build_softmax(config.softmax, **config.softmax_kwargs)
 
+        self.attn_impl = config.attn_impl
+        if self.attn_impl not in ATTN_IMPLS:
+            raise ValueError(f"Unknown attn_impl {self.attn_impl!r}; use {' | '.join(ATTN_IMPLS)}")
+        if self.attn_impl == "sdpa_causal" and config.softmax != "exact":
+            raise ValueError(
+                f"attn_impl 'sdpa_causal' fuses the softmax into the kernel, so it cannot run "
+                f"softmax={config.softmax!r}. Approximate softmaxes need attn_impl 'manual'."
+            )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -54,12 +66,18 @@ class Qwen3Attention(nn.Module):
         (cos, sin) = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        k = repeat_kv(k, self.num_heads // self.num_kv_heads)
-        v = repeat_kv(v, self.num_heads // self.num_kv_heads)
+        if self.attn_impl == "sdpa_causal":
+            # No attn_mask: a float mask is what disqualifies the flash backend, and under right
+            # padding causal masking already hides pads from every real row. Pad rows compute
+            # garbage that nothing reads (masked in the loss, excluded by last-token pooling).
+            context = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+        else:
+            k = repeat_kv(k, self.num_heads // self.num_kv_heads)
+            v = repeat_kv(v, self.num_heads // self.num_kv_heads)
 
-        scores = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim**0.5)
-        probs = self.softmax(scores, attention_mask, dim=-1)
-        context = torch.matmul(probs, v)
+            scores = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim**0.5)
+            probs = self.softmax(scores, attention_mask, dim=-1)
+            context = torch.matmul(probs, v)
         context = context.transpose(1, 2).contiguous().view(B, S, self.num_heads * self.head_dim)
 
         # TODO: return probs for distillation purposes

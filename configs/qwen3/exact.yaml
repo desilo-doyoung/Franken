@@ -1,0 +1,56 @@
+# Qwen3-Embedding-0.6B exact-op baseline: the reference point every FHE config is
+# measured against. Full teacher depth (28) + exact softmax + exact SiLU, so the
+# student is mathematically the teacher — used by scripts/qwen3/parity_gate.py to
+# prove the from-scratch modules are correct before any op is approximated, and
+# then as the exact-op distillation smoke test.
+#
+# Only depth + ops live here: every architecture dim is a Qwen3ModelConfig default
+# matching the checkpoint (hidden 1024, 16 q / 8 kv heads, head_dim 128,
+# intermediate 3072, rope_theta 1e6, vocab 151669), so a wrong dim fails loudly at
+# weight-load rather than silently training a mismatched skeleton.
+#
+#   parity: uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/exact.yaml
+#   distill: uv run python main.py distill --config configs/qwen3/exact.yaml
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28 # full teacher depth — no reduction in the baseline
+
+  softmax: exact # exact | cgf (CGF softmax, FHE-friendly)
+  softmax_kwargs: {}
+  activation: silu # Qwen3's SwiGLU nonlinearity is SiLU, NOT GELU
+  activation_kwargs: {}
+
+distill:
+  # alpha / temperature are classification-KD knobs (logit KL) and are unused by the
+  # embedding task — it has no logits. The embed loss is embedding match + hidden MSE.
+  beta: 1.0 # weight on hidden-state MSE
+  hidden_layer_map: null # null -> auto uniform stride from teacher/student depths (identity at 28)
+  range_penalty: 0.0 # off: exact SiLU has no bounded domain to squash into
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B # base Qwen3Model via AutoModel (no lm_head)
+  teacher_ckpt: null # pretrained checkpoint IS the teacher (no fine-tune)
+  task: embed # embedding self-distillation (no labels)
+  corpus: mixed # 20% instruct-prefixed queries / 40% MS MARCO passages / 40% wikitext-103
+  corpus_size: 2000
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  # No teacher phase for self-distillation; the block stays at its defaults so the
+  # config schema is complete.
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 1.0e-5
+    epochs: 3
+    batch_size: 8 # 0.6B teacher + student both resident in fp32; conservative
+    warmup_ratio: 0.1
+    weight_decay: 0.01

@@ -117,8 +117,9 @@ class MrpcTask(Task):
 
     @torch.no_grad()
     def evaluate(
-        self, backend: ModelBackend, model, tokenizer, cfg: Config, split="validation"
+        self, backend: ModelBackend, model, tokenizer, cfg: Config, split="validation", teacher=None
     ) -> dict:
+        # `teacher` is unused: MRPC scores against labels, not against the teacher.
         data = self.datasets(tokenizer, cfg)
         ds = data[split].with_format("torch", columns=self.torch_columns())
         loader = DataLoader(

@@ -58,10 +58,22 @@ class DistillConfig:
     temperature: float = 2.0
     # None -> auto uniform-stride map computed from teacher/student depths.
     hidden_layer_map: list[int] | None = None
+    # How the per-layer hidden term is measured: "mse" (raw) | "relative" (divided by the teacher
+    # layer's own mean square). Raw MSE lets large-activation layers own the gradient — measured on
+    # Qwen3, per-layer scale spans 11,085x and the FINAL layer, which produces the embedding, gets
+    # only 2.7% of the weight despite the worst relative error. "relative" equalizes layers and
+    # rescales the term to O(0.1), which is what makes `beta` a meaningful knob.
+    hidden_loss: str = "mse"
     # Squash-penalty weight: keeps FFN pre-activations inside a polynomial
     # activation's valid domain (e.g. cheb_gelu) so the bare poly is FHE-safe at
     # inference. 0 = off; ignored for ops without a bounded domain (e.g. exact).
     range_penalty: float = 0.0
+    # Which STUDENT layers the range penalty applies to. None = all of them.
+    # Constraining a layer costs accuracy, so penalize only the layers that are actually
+    # wide: measured on Qwen3, 27 of 28 layers sit inside +-24 on their own while one
+    # outlier layer reaches ~300, and penalizing all 28 to fix that one cost 8.2 recall
+    # points. Measure with scripts/qwen3/act_range.py before choosing.
+    range_penalty_layers: list[int] | None = None
     # Same idea for the softmax op's own range term (cgf: pin row-sums to 1). Separate weight
     # because the units differ by orders of magnitude: this one is squared log-space distance.
     softmax_range_penalty: float = 0.0
@@ -90,8 +102,13 @@ class TrainConfig:
     teacher_ckpt: str | None = None
     output_dir: str = "outputs"
     # Which task drives data/tokenizer/loss/metric/teacher-training (franken.tasks
-    # registry). "mrpc" = GLUE MRPC classification; "embed" = embedding self-distill (stub).
+    # registry). "mrpc" = GLUE MRPC classification; "embed" = embedding self-distill.
     task: str = "mrpc"
+    # Corpus for the label-free embedding task (franken.data.embed_corpus registry):
+    # a named preset, not a dataset id, so a mix stays one config value. Ignored by
+    # tasks that bring their own data (MRPC). corpus_size = training examples to take.
+    corpus: str = "smoke"
+    corpus_size: int = 2000
     # Output namespace under output_dir: outputs/<run_name or model.backend>/...
     # None -> namespace by the model backend (e.g. outputs/bert/, outputs/qwen3/).
     # Set it to carve a specific experiment its own subtree.
@@ -99,6 +116,13 @@ class TrainConfig:
     max_seq_len: int = 128
     seed: int = 42
     device: str = "cuda"
+    # Distillation loop only; evaluation is forced back to fp32. "fp32" | "tf32" (TF32 matmuls,
+    # fp32 storage) | "bf16" (tf32 plus autocast around the student forward and loss). The
+    # teacher never enters the autocast region -- see franken.distill.trainer._autocast.
+    precision: str = "fp32"
+
+    # torch.compile student + teacher for training; eval stays eager (see trainer.evaluate).
+    compile: bool = False
 
     # Per-run optimization blocks (see OptimConfig).
     teacher: OptimConfig = field(default_factory=OptimConfig)
