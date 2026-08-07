@@ -1,0 +1,58 @@
+# Exact-op control for `depth19_multi_domain.yaml`: identical corpus, sequence length, batching,
+# schedule and seed, with exact SiLU and no range penalty. The pair isolates what the FHE ops cost
+# at this scale — every other lever is held.
+#
+# Without it the capability run has no reference: `depth19` (corpus `mixed`, 128 tokens, 3 epochs,
+# fixed batches) differs in four ways at once, so a delta against it decomposes into nothing.
+#
+# Shares the corpus cache with the other two `multi_domain` configs (same corpus/size/seq_len/
+# tokenizer), so one build_corpus.py run serves the set. See `depth19_multi_domain.yaml` for the
+# length, batching and lr derivations — identical here.
+
+model:
+  backend: qwen3
+  num_hidden_layers: 19
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu # Qwen3's SwiGLU nonlinearity is SiLU, NOT GELU
+  activation_kwargs: {}
+  attn_impl: sdpa_causal
+
+distill:
+  beta: 1.0
+  hidden_layer_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+  range_penalty: 0.0 # exact SiLU has no bounded domain to squash into
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: multi_domain
+  corpus_size: 11500000
+  output_dir: outputs
+  run_name: qwen3_depth19_multi_domain_exact
+  max_seq_len: 1024
+  seed: 42
+  device: cuda
+  precision: bf16
+  compile: true
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 3.4e-5 # matched to the ladder so lr*sqrt(steps) = 7.69e-3 and depth is the only difference
+    epochs: 2
+    token_budget: 16384
+    max_seqs: 256
+    bucket: 64
+    # Eval loader ONLY under token budgeting (training uses token_budget). 512 would put all 500
+    # validation rows in one batch padded to 1024 and retain per-layer hidden states: ~20 GB.
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

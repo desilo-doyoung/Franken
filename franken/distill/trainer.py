@@ -1,5 +1,7 @@
+import random
 from contextlib import nullcontext
 
+import pyarrow.compute as pc
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -8,6 +10,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from transformers import get_linear_schedule_with_warmup, set_seed
 
 from franken.config import Config
+from franken.distill.batching import plan_batches, shard
 from franken.distill.dist import barrier, init_distributed, per_rank_batch
 from franken.distill.progress import ProgressLogger
 from franken.models import build_backend
@@ -90,11 +93,28 @@ class Distiller:
         set_seed(self.cfg.train.seed)
         data = self.task.datasets(self.tokenizer, self.cfg)
         train_data = data["train"].with_format("torch", columns=self.task.torch_columns())
-        # Single-process keeps the literal shuffle=True path: DistributedSampler draws a
-        # different permutation even at world_size 1, and batch composition is worth ~0.004
-        # recall -- the width of the comparison band itself.
-        sampler = None
-        if self.dist.enabled:
+        opt = self.cfg.train.distill
+
+        sampler = batch_plan = None
+        if opt.token_budget:
+            lengths = pc.list_value_length(train_data.data.column("input_ids")).to_numpy(
+                zero_copy_only=False
+            )
+            batch_plan = shard(
+                plan_batches(
+                    lengths, opt.token_budget, opt.max_seqs, self.cfg.train.seed, opt.bucket
+                ),
+                self.dist.rank,
+                self.dist.world_size,
+            )
+            self.log(
+                f"token-budgeted batching: {len(batch_plan):,} steps/epoch/rank, "
+                f"{opt.token_budget:,} tokens x {self.dist.world_size} ranks per step"
+            )
+        elif self.dist.enabled:
+            # Single-process keeps the literal shuffle=True path: DistributedSampler draws a
+            # different permutation even at world_size 1, and batch composition is worth ~0.004
+            # recall -- the width of the comparison band itself.
             sampler = DistributedSampler(
                 train_data,
                 num_replicas=self.dist.world_size,
@@ -102,19 +122,30 @@ class Distiller:
                 shuffle=True,
                 seed=self.cfg.train.seed,
             )
-        loader = DataLoader(
-            train_data,
-            batch_size=per_rank_batch(self.cfg.train.distill.batch_size, self.dist),
-            shuffle=sampler is None,
-            sampler=sampler,
-            collate_fn=data["collator"],
-        )
+
+        def build_loader(epoch: int) -> DataLoader:
+            if batch_plan is None:
+                return DataLoader(
+                    train_data,
+                    batch_size=per_rank_batch(opt.batch_size, self.dist),
+                    shuffle=sampler is None,
+                    sampler=sampler,
+                    collate_fn=data["collator"],
+                )
+            # One plan, reordered per epoch. Re-planning would vary steps/epoch with the shuffle
+            # and drift the LR schedule; order alone is enough to decorrelate the epochs.
+            order = list(batch_plan)
+            random.Random(self.cfg.train.seed + epoch).shuffle(order)
+            return DataLoader(train_data, batch_sampler=order, collate_fn=data["collator"])
+
+        loader = build_loader(0)
 
         # DistributedSampler pads the index list to divide evenly, so steps-per-epoch happens to
         # match single-process arithmetic rather than being guaranteed to. Assert it: a mismatch
-        # silently rescales the LR schedule and invalidates every comparison.
-        if self.dist.enabled:
-            expected = -(-len(train_data) // self.cfg.train.distill.batch_size)
+        # silently rescales the LR schedule and invalidates every comparison. `shard` gives the
+        # token-budgeted path the same guarantee by construction.
+        if self.dist.enabled and batch_plan is None:
+            expected = -(-len(train_data) // opt.batch_size)
             if len(loader) != expected:
                 raise RuntimeError(
                     f"steps/epoch {len(loader)} != single-process {expected}; the LR schedule "
@@ -199,6 +230,8 @@ class Distiller:
         for epoch in range(self.cfg.train.distill.epochs):
             if sampler is not None:
                 sampler.set_epoch(epoch)
+            if batch_plan is not None and epoch:
+                loader = build_loader(epoch)
             # Mean range penalty over the epoch. Logged because it is the only visible evidence that
             # the penalty is doing anything: it should fall as pre-activations are squashed into the
             # op's domain. Verify the end state with scripts/qwen3/act_range.py on the checkpoint.

@@ -129,6 +129,8 @@ class EmbedSelfDistillTask(Task):
             cfg.train.corpus_size,
             cfg.train.max_seq_len,
             splits=splits,
+            # Match the batch planner's widths, so the shapes Dynamo sees are the ones it budgeted.
+            pad_to_multiple_of=cfg.train.distill.bucket if cfg.train.distill.token_budget else None,
         )
 
     def torch_columns(self) -> list[str]:

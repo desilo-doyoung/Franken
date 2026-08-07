@@ -22,6 +22,11 @@ DDP maximizes the compute a SINGLE run can absorb, which is what a "push one con
 goes" experiment needs. `train.distill.batch_size` stays the global batch and is split across ranks,
 so raising it to keep the per-rank batch fixed also means raising LR by sqrt(batch) in the config.
 
+⚠️ Under `train.distill.token_budget` that last sentence does NOT apply: the budget is PER RANK, so
+tokens/step scale with the device count, and `batch_size` sizes only the evaluation loader.
+Steps/epoch is data-dependent — the trainer logs the real count at startup, and the LR must be
+reconciled against that, not against `corpus_size / batch_size`.
+
 Usage:
     uv run python scripts/qwen3/run_experiments.py --devices 0,1 \
         configs/qwen3/depth19.yaml configs/qwen3/quad_silu_nopen.yaml
@@ -88,7 +93,12 @@ def _distill_cmd(config: str, nproc: int) -> list[str]:
 
 
 def one_experiment(
-    config: str, device: str, out_dir: str, eval_only: bool, ddp: bool = False
+    config: str,
+    device: str,
+    out_dir: str,
+    eval_only: bool,
+    ddp: bool = False,
+    tasks: str | None = None,
 ) -> dict:
     stem = os.path.splitext(os.path.basename(config))[0]
     tag = f"[gpu{device}] {stem}"
@@ -152,7 +162,8 @@ def one_experiment(
             ckpt,
             "--json",
             ndcg_path,
-        ],
+        ]
+        + (["--tasks", tasks] if tasks else []),
         device.split(",")[0],
         log,
     )
@@ -163,7 +174,14 @@ def one_experiment(
     with open(ndcg_path) as f:
         nd = json.load(f)
     # By name, not `|=`: both payloads carry `k` and `config`.
-    result |= {"ndcg": nd["student_avg"], "ndcg_teacher": nd["teacher_avg"]}
+    # `student_avg` is the CORE macro only, whatever else was scored — keeping non-core tasks out
+    # of it is what stops an added task from re-basing the teacher reference every row compares to.
+    macro = set(nd.get("macro_tasks", []))
+    result |= {
+        "ndcg": nd["student_avg"],
+        "ndcg_teacher": nd["teacher_avg"],
+        "ndcg_extra": {k: v for k, v in nd["tasks"].items() if k not in macro},
+    }
     _say(f"{tag}: nDCG@10 {result['ndcg']:.4f} (teacher {result['ndcg_teacher']:.4f})")
     return result
 
@@ -214,6 +232,20 @@ def report(results: list[dict], out_dir: str) -> None:
         "\n¹ nDCG deficit ÷ recall deficit — the ratio column in PROGRESS. Low means the "
         "divergence recall@10 reports is not costing real quality."
     )
+
+    # Separate table on purpose: these sit outside the macro, so folding them into the columns
+    # above would invite averaging them back in.
+    names = sorted({t for r in ok for t in r.get("ndcg_extra", {})})
+    if names:
+        emit("\nnDCG@10 on non-macro tasks (student, teacher in parentheses)\n")
+        emit("| run | " + " | ".join(names) + " |")
+        emit("|---" * (len(names) + 1) + "|")
+        for r in ok:
+            cells = []
+            for name in names:
+                task = r.get("ndcg_extra", {}).get(name)
+                cells.append(f"{task['student']:.4f} ({task['teacher']:.4f})" if task else "—")
+            emit(f"| {r['stem']} | " + " | ".join(cells) + " |")
     ndcg_teachers = {round(r["ndcg_teacher"], 4) for r in ok}
     if ndcg_teachers:
         emit(f"teacher nDCG@10: {', '.join(f'{t:.4f}' for t in sorted(ndcg_teachers))}")
@@ -243,6 +275,38 @@ def report(results: list[dict], out_dir: str) -> None:
     print(f"\nsaved: {md}\n       {js}")
 
 
+# Below this a rebuild is seconds, so a missing cache is not worth blocking on.
+_PREBUILD_THRESHOLD = 100_000
+
+
+def _require_corpus_cache(cfg, config_path: str) -> None:
+    """Refuse to start a big embed batch with no corpus cache.
+
+    Runs go one per device CONCURRENTLY, and `_build_split` is per process — with no cache every
+    run streams and tokenizes the whole corpus independently (hours each at 11.5M texts). A fresh
+    remote checkout never has one: `outputs/corpus_cache` is gitignored.
+    """
+    if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
+        return
+    from franken.data.embed_corpus import _cache_path  # noqa: PLC0415  (heavy import, rare path)
+    from franken.tasks import build_task  # noqa: PLC0415
+
+    tokenizer = build_task(cfg.train.task).build_tokenizer(cfg)
+    cached = os.path.join(
+        _ROOT,
+        _cache_path(
+            cfg.train.corpus, "train", cfg.train.corpus_size, cfg.train.max_seq_len, tokenizer
+        ),
+    )
+    if not os.path.isdir(cached):
+        raise SystemExit(
+            f"{config_path}: no corpus cache for {cfg.train.corpus} "
+            f"({cfg.train.corpus_size:,} texts) at {cached}\n"
+            f"Build it once before the batch, or every run rebuilds it in parallel:\n"
+            f"    uv run python scripts/qwen3/build_corpus.py --config {config_path}"
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -257,6 +321,11 @@ def main(argv: list[str] | None = None) -> None:
         "instead of one config per device",
     )
     p.add_argument("--out", default="outputs/experiments", help="logs + per-run metrics JSON")
+    p.add_argument(
+        "--tasks",
+        help="nDCG tasks, comma-separated (default: retrieval_eval's CORE). Extras are reported "
+        "in their own table and never enter the macro, e.g. nfcorpus,scifact,fiqa,xpqa_cmn",
+    )
     args = p.parse_args(argv)
 
     devices = [d.strip() for d in args.devices.split(",") if d.strip()]
@@ -265,7 +334,8 @@ def main(argv: list[str] | None = None) -> None:
 
     pending: queue.Queue = queue.Queue()
     for i, config in enumerate(args.configs):
-        Config.from_yaml(config)  # fail on a bad config now, not 30 min into the batch
+        cfg = Config.from_yaml(config)  # fail on a bad config now, not 30 min into the batch
+        _require_corpus_cache(cfg, config)
         pending.put((i, config))
     results: dict[int, dict] = {}
 
@@ -276,7 +346,9 @@ def main(argv: list[str] | None = None) -> None:
             except queue.Empty:
                 return
             try:
-                results[i] = one_experiment(config, device, out_dir, args.eval_only, args.ddp)
+                results[i] = one_experiment(
+                    config, device, out_dir, args.eval_only, args.ddp, args.tasks
+                )
             except Exception as exc:  # keep the other runs alive; report it as a row
                 results[i] = {"stem": os.path.basename(config), "error": repr(exc)}
 

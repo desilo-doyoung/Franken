@@ -12,6 +12,7 @@ import os
 import sys
 import time
 
+import pyarrow.compute as pc
 import torch
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
@@ -19,6 +20,7 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from franken.config import Config  # noqa: E402
+from franken.distill.batching import plan_batches  # noqa: E402
 from franken.distill.trainer import (  # noqa: E402
     Distiller,
     _apply_precision,
@@ -48,12 +50,20 @@ def main(argv=None):
 
     data = d.task.datasets(d.tokenizer, cfg)
     train_data = data["train"].with_format("torch", columns=d.task.torch_columns())
-    loader = DataLoader(
-        train_data,
-        batch_size=cfg.train.distill.batch_size,
-        shuffle=True,
-        collate_fn=data["collator"],
-    )
+    opt = cfg.train.distill
+    if opt.token_budget:
+        lengths = pc.list_value_length(train_data.data.column("input_ids")).to_numpy(
+            zero_copy_only=False
+        )
+        plan = plan_batches(lengths, opt.token_budget, opt.max_seqs, cfg.train.seed, opt.bucket)
+        loader = DataLoader(train_data, batch_sampler=plan, collate_fn=data["collator"])
+    else:
+        loader = DataLoader(
+            train_data,
+            batch_size=opt.batch_size,
+            shuffle=True,
+            collate_fn=data["collator"],
+        )
     optimizer = AdamW(d.student.parameters(), lr=cfg.train.distill.lr)
 
     student = _maybe_compile(d.student, cfg)
@@ -96,11 +106,18 @@ def main(argv=None):
 
     ms = elapsed / args.steps * 1000
     peak = torch.cuda.max_memory_allocated() / 2**30
+    batching = (
+        f"token_budget={opt.token_budget:,} max_seqs={opt.max_seqs} bucket={opt.bucket}"
+        if opt.token_budget
+        else f"bs={opt.batch_size}"
+    )
     print(
         f"{os.path.basename(args.config)}  depth={cfg.model.num_hidden_layers} "
-        f"bs={cfg.train.distill.batch_size} precision={cfg.train.precision} "
+        f"seq={cfg.train.max_seq_len} {batching} precision={cfg.train.precision} "
         f"compile={cfg.train.compile}"
     )
+    if cfg.train.compile:
+        print(f"  dynamo unique_graphs: {torch._dynamo.utils.counters['stats']['unique_graphs']}")
     print(
         f"  {ms:.0f} ms/step   {real_tokens / elapsed:.0f} tok/s (real)   "
         f"{padded_tokens / elapsed:.0f} tok/s (padded)   {peak:.1f} GB peak"

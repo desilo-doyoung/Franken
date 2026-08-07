@@ -1,0 +1,62 @@
+# Untouched-architecture baseline for the `multi_domain` ladder: full teacher depth, exact ops, no
+# penalty. The student is mathematically the teacher and is seeded from it, so this measures the
+# TRAINING CHANGE alone — new corpus, 1024 tokens, token-budgeted batching. It should stay near
+# ceiling; anything that drops here is the setup, not the architecture, and invalidates the reading
+# of the other two runs.
+#
+# Ladder (identical corpus, length, batching, schedule, seed — so one corpus cache serves all three):
+#   depth28_multi_domain        28, exact      -> the corpus/length/batching change
+#   depth19_multi_domain_exact  19, exact      -> the layer cut
+#   depth19_multi_domain        19, quad_silu  -> the FHE ops
+#
+# See `depth19_multi_domain.yaml` for the length, batching and lr derivations — identical here.
+# `token_budget` needs no adjustment for the extra depth: 16384 is the per-rank token count
+# PROGRESS measured *at* depth 28, and the budget bounds activation memory whatever the depth.
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28 # full teacher depth — no reduction in the baseline
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+  attn_impl: sdpa_causal
+
+distill:
+  beta: 1.0
+  hidden_layer_map: null # null -> auto uniform stride; identity at 28
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: multi_domain
+  corpus_size: 11500000
+  output_dir: outputs
+  run_name: qwen3_depth28_multi_domain
+  max_seq_len: 1024
+  seed: 42
+  device: cuda
+  precision: bf16
+  compile: true
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 3.4e-5 # matched to the ladder so lr*sqrt(steps) = 7.69e-3 and depth is the only difference
+    epochs: 2
+    token_budget: 16384
+    max_seqs: 256
+    bucket: 64
+    # Eval loader ONLY under token budgeting (training uses token_budget). 512 would put all 500
+    # validation rows in one batch padded to 1024 and retain per-layer hidden states: ~20 GB.
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

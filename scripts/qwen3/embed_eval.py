@@ -69,19 +69,27 @@ def _embed_texts(backend, model, tokenizer, cfg, texts, device, batch_size: int 
     Distinct from `_embed`, which consumes pre-collated batches from the corpus loader. Shared with
     `retrieval_eval.py` so the two scripts cannot drift on tokenization or truncation — the same
     reason `recall_at_k` lives in `franken/tasks/embed.py` rather than here.
+
+    Batches are length-sorted and the original order restored afterwards. Unsorted, each batch pads
+    to its longest member: at `max_seq_len` 1024 that is ~1024 tokens per text against a median near
+    130. Longest-first, so an over-large batch fails on step 1 rather than 90% of the way in.
     """
-    out = []
-    for i in range(0, len(texts), batch_size):
+    order = sorted(range(len(texts)), key=lambda i: len(texts[i]), reverse=True)
+    out: list[torch.Tensor] = [None] * len(texts)
+    for i in range(0, len(order), batch_size):
+        chunk = order[i : i + batch_size]
         enc = tokenizer(
-            texts[i : i + batch_size],
+            [texts[j] for j in chunk],
             padding=True,
             truncation=True,
             max_length=cfg.train.max_seq_len,
             return_tensors="pt",
         ).to(device)
         inputs = {"input_ids": enc["input_ids"], "attention_mask": enc["attention_mask"]}
-        out.append(backend.forward(model, inputs)["output"].float().cpu())
-    return torch.cat(out)
+        emb = backend.forward(model, inputs)["output"].float().cpu()
+        for k, j in enumerate(chunk):
+            out[j] = emb[k]
+    return torch.stack(out)
 
 
 def _stsb(backend, model, tokenizer, cfg, device):
