@@ -123,7 +123,15 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"\n{len(ds)} texts, {n_tok} real tokens")
     worst = _report("FFN pre-activations — input to the polynomial activation", preact, True)
-    _report("attention scores — input to the softmax (visible entries only)", scores, False)
+    if scores:
+        _report("attention scores — input to the softmax (visible entries only)", scores, False)
+    else:
+        # Reporting the empty store would print "max 0.0", which reads as a measurement.
+        print(
+            f"\nattention scores: NOT MEASURED — attn_impl={cfg.model.attn_impl!r} fuses the "
+            f"softmax so its hook never fires. Re-run with 'manual' when softmax is not 'exact' "
+            f"(here: {cfg.model.softmax!r})."
+        )
 
     over = [i for i in sorted(preact) if max(abs(preact[i]["min"]), preact[i]["max"]) > domain]
     print(f"\nlayers exceeding D={domain}: {over or 'none'}")

@@ -7,7 +7,8 @@ source of truth. Training itself is `main.py distill`, not here.
 |---|---|---|
 | `parity_gate.py` | is the from-scratch student still bit-equal to the teacher? | after touching any module under `franken/models/qwen3/` |
 | `precision_gate.py` | is `precision: bf16` safe for this architecture? | before trusting a bf16 run; after touching `rope.py` or the residual path |
-| `bench_step.py` | how fast is one training step? | before/after any change made for speed |
+| `bench_step.py` | how fast is one training step? | comparing OPS (cgf vs exact, an attn_impl) without paying for a full run — a live run already prints tok/s, s/step and `unique_graphs` |
+| `build_corpus.py` | build + cache the corpus, and report the realized mix | before any batch whose corpus is big; `run_experiments.py` refuses without the cache |
 | `embed_eval.py` | how close to the teacher is a checkpoint? | to score a run (**recall@10** is the headline) |
 | `retrieval_eval.py` | is the student absolutely worse, not just different? | end of a run, when the question is "good enough?" |
 | `act_range.py` | what range do the FHE operators actually see? | before picking a polynomial `domain` |
@@ -17,6 +18,7 @@ source of truth. Training itself is `main.py distill`, not here.
 uv run python scripts/qwen3/parity_gate.py     --config configs/qwen3/exact.yaml
 uv run python scripts/qwen3/precision_gate.py  --config configs/qwen3/depth28_exact.yaml
 uv run python scripts/qwen3/bench_step.py      --config ... [--precision bf16] [--compile]
+uv run python scripts/qwen3/build_corpus.py    --config configs/qwen3/depth19_multi_domain.yaml
 uv run python scripts/qwen3/act_range.py       --config ... [--student-ckpt ...]
 uv run python scripts/qwen3/embed_eval.py      --student-ckpt outputs/qwen3/student/pytorch_model.bin
 uv run python scripts/qwen3/retrieval_eval.py  --student-ckpt ... --tasks nfcorpus,scifact

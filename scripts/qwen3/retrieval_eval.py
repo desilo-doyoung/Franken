@@ -7,9 +7,13 @@ STS-B is absolute but too coarse for top-of-list damage. This fills the remainin
 condition) vs MTEB's 512, one generic instruction. Valid teacher-vs-student only. With no
 --student-ckpt the student IS the teacher, so every delta must be ~0 — the self-test.
 
-The macro average covers `CORE` only and `--tasks` defaults to it, so the teacher 0.5083 reference
-stays fixed however many extra tasks are scored. `xpqa_ara` / `xpqa_cmn` cover the multilingual
-side of the `multi_domain` corpus and are opt-in.
+⚠️ The macro was nfcorpus+scifact ("CORE") until 2026-08-10, held narrow so the teacher reference
+stayed fixed across eras. That comparability was not worth what it cost: two biomedical/scientific
+tasks against a 17%-science corpus read the best case and reported it as the whole. It put the
+depth-19 layer cut at **+0.4%** where five tasks put it at **−16.0%** (`code_apps` −60.7%,
+`fiqa` −13.5%), and inverted the ratio column with it. The macro is now every scored task and
+`--tasks` defaults to all of them. Rows recorded before that date are 2-task and do not compare;
+per-task numbers are always printed, so an old-style average can be recomputed by hand.
 
     uv run python scripts/qwen3/retrieval_eval.py --config configs/qwen3/depth19.yaml \
         --student-ckpt outputs/qwen3_depth19/student/pytorch_model.bin
@@ -111,11 +115,10 @@ TASKS = {
     "code_apps": partial(_load_beir, "CoIR-Retrieval/apps"),
 }
 
-# The macro covers CORE ONLY, whatever else is scored alongside it. `run_experiments.py` reads
-# `teacher_avg`/`student_avg` into the headline table and asserts the teacher value is constant
-# across runs, so folding a task in would silently re-base every published number (teacher
-# 0.5083 = nfcorpus 0.3506 + scifact 0.6660). Non-core tasks print below it, unaveraged.
-CORE = ("nfcorpus", "scifact")
+# The macro is EVERY scored task. It was nfcorpus+scifact only, for cross-era comparability; that
+# read the depth-19 cut at +0.4% where the full set said -16.0%, and inverted the ratio column
+# (0.08 vs 1.62) -- it reversed the conclusion, not just the value. Per-task rows are always
+# printed, so a historical 2-task average stays recoverable by hand.
 
 
 def ndcg_at_k(ranked_ids, relevant: dict[str, float], k: int = K) -> float:
@@ -169,9 +172,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     p.add_argument("--config", default="configs/qwen3/exact.yaml")
     p.add_argument("--student-ckpt", default=None, help="default: identity (seeded from teacher)")
-    # Defaults to CORE, not every task: `run_experiments.py` calls this without --tasks, so a
-    # wider default would silently add cost and non-core rows to every experiment.
-    p.add_argument("--tasks", default=",".join(CORE), help=f"comma-separated: {', '.join(TASKS)}")
+    # All of them: CORE alone read the depth-19 cut at +0.4% where the full set said -16.0%.
+    p.add_argument("--tasks", default=",".join(TASKS), help=f"comma-separated: {', '.join(TASKS)}")
     p.add_argument("--json", help="also dump the metrics here, for scripted runs")
     args = p.parse_args(argv)
 
@@ -204,11 +206,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     result: dict = {"config": args.config, "student_ckpt": args.student_ckpt, "k": K, "tasks": {}}
-    core = [n for n in tasks if n in CORE]
-    extra = [n for n in tasks if n not in CORE]
-    for name in core + extra:
-        if extra and name == extra[0]:
-            print(f"{'-' * 24} below: not in the macro {'-' * 15}")
+    for name in tasks:
         d_ids, d_texts, q_ids, q_texts, qrels = TASKS[name]()
         t = score(
             backend,
@@ -236,19 +234,16 @@ def main(argv: list[str] | None = None) -> None:
             "docs": len(d_ids),
         }
 
-    if core:
-        ts = [result["tasks"][n]["teacher"] for n in core]
-        ss = [result["tasks"][n]["student"] for n in core]
-        t_avg, s_avg = sum(ts) / len(ts), sum(ss) / len(ss)
-        result |= {"teacher_avg": t_avg, "student_avg": s_avg, "macro_tasks": core}
-        # Flag a partial macro loudly: it is not the 0.5083-comparable number.
-        label = "MACRO AVG" if tuple(core) == CORE else "MACRO(PART)"
-        print(
-            f"{label:>10} {'':>8} {'':>7} {t_avg:>9.4f} {s_avg:>9.4f} "
-            f"{s_avg - t_avg:>+9.4f} {100 * (s_avg - t_avg) / t_avg:>7.1f}%\n"
-        )
-    else:
-        print("\nno CORE task scored — no macro average, and no comparable number\n")
+    ts = [result["tasks"][n]["teacher"] for n in tasks]
+    ss = [result["tasks"][n]["student"] for n in tasks]
+    t_avg, s_avg = sum(ts) / len(ts), sum(ss) / len(ss)
+    result |= {"teacher_avg": t_avg, "student_avg": s_avg, "macro_tasks": tasks}
+    # Label carries the task count: a macro over a different set is a different number, and the
+    # 2-task era's 0.5299 teacher is not this one's 0.5689.
+    print(
+        f"{f'MACRO({len(tasks)})':>10} {'':>8} {'':>7} {t_avg:>9.4f} {s_avg:>9.4f} "
+        f"{s_avg - t_avg:>+9.4f} {100 * (s_avg - t_avg) / t_avg:>7.1f}%\n"
+    )
 
     if args.json:
         with open(args.json, "w") as f:

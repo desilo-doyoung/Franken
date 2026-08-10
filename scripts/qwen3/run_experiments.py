@@ -174,15 +174,16 @@ def one_experiment(
     with open(ndcg_path) as f:
         nd = json.load(f)
     # By name, not `|=`: both payloads carry `k` and `config`.
-    # `student_avg` is the CORE macro only, whatever else was scored — keeping non-core tasks out
-    # of it is what stops an added task from re-basing the teacher reference every row compares to.
-    macro = set(nd.get("macro_tasks", []))
     result |= {
         "ndcg": nd["student_avg"],
         "ndcg_teacher": nd["teacher_avg"],
-        "ndcg_extra": {k: v for k, v in nd["tasks"].items() if k not in macro},
+        "ndcg_tasks": nd["tasks"],
+        "ndcg_n": len(nd.get("macro_tasks", [])),
     }
-    _say(f"{tag}: nDCG@10 {result['ndcg']:.4f} (teacher {result['ndcg_teacher']:.4f})")
+    _say(
+        f"{tag}: nDCG@10 {result['ndcg']:.4f} (teacher {result['ndcg_teacher']:.4f}, "
+        f"{result['ndcg_n']} tasks)"
+    )
     return result
 
 
@@ -229,21 +230,22 @@ def report(results: list[dict], out_dir: str) -> None:
             emit(f"\nFAILED {r['stem']}: {r['error']}{log}")
 
     emit(
-        "\n¹ nDCG deficit ÷ recall deficit — the ratio column in PROGRESS. Low means the "
-        "divergence recall@10 reports is not costing real quality."
+        "\n¹ nDCG deficit ÷ recall deficit. <1 means recall@10 overstates the damage; >1 means it "
+        "understates it. Measured 1.6 for the depth-19 cut once every task is in the macro — it "
+        "read 0.08 on the old 2-task one."
     )
 
-    # Separate table on purpose: these sit outside the macro, so folding them into the columns
-    # above would invite averaging them back in.
-    names = sorted({t for r in ok for t in r.get("ndcg_extra", {})})
+    # Always print the per-task breakdown: the macro is an average over domains that move in
+    # opposite directions (code -61%, Chinese +1%), and only this table shows that.
+    names = sorted({t for r in ok for t in r.get("ndcg_tasks", {})})
     if names:
-        emit("\nnDCG@10 on non-macro tasks (student, teacher in parentheses)\n")
+        emit(f"\nper-task nDCG@10, student (teacher) — the {len(names)} tasks in the macro\n")
         emit("| run | " + " | ".join(names) + " |")
         emit("|---" * (len(names) + 1) + "|")
         for r in ok:
             cells = []
             for name in names:
-                task = r.get("ndcg_extra", {}).get(name)
+                task = r.get("ndcg_tasks", {}).get(name)
                 cells.append(f"{task['student']:.4f} ({task['teacher']:.4f})" if task else "—")
             emit(f"| {r['stem']} | " + " | ".join(cells) + " |")
     ndcg_teachers = {round(r["ndcg_teacher"], 4) for r in ok}
@@ -323,8 +325,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", default="outputs/experiments", help="logs + per-run metrics JSON")
     p.add_argument(
         "--tasks",
-        help="nDCG tasks, comma-separated (default: retrieval_eval's CORE). Extras are reported "
-        "in their own table and never enter the macro, e.g. nfcorpus,scifact,fiqa,xpqa_cmn",
+        help="nDCG tasks, comma-separated (default: every task in retrieval_eval). All scored "
+        "tasks enter the macro, so a narrower list is a different, non-comparable number.",
     )
     args = p.parse_args(argv)
 

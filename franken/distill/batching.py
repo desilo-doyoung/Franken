@@ -1,15 +1,12 @@
 """Token-budgeted batching: fit the batch to the input, instead of the input to the batch.
 
 ``DataCollatorWithPadding`` pads to the batch maximum, so a fixed sequence count pays for whatever
-the batch's longest member does not use. Measured on ``multi_domain`` at ``max_seq_len`` 1024: the
-corpus carries 132.0 real tokens per text, but a shuffled batch of 128 almost always holds one long
-document, so ~950 padded tokens are paid per text -- 14% efficiency.
+the batch's longest member does not use. Measured on ``multi_domain`` @1024: 132 real tokens per
+text, ~950 padded under shuffled batches of 128, i.e. 14% efficiency. Holding *tokens* per batch
+constant instead gives 162 padded (81%), turning ~7x into ~1.4x.
 
-Holding *tokens* per batch constant and letting the sequence count float brings padded to ~166 (80%,
-including the bucket round-up), which is what makes full context cost ~1.4x of the 128-token run
-rather than ~7x. It also bounds activation memory by construction -- a batch of 1024-token texts
-simply holds fewer of them -- so there is no worst-case micro-batch to size and no gradient
-accumulation to add.
+It also bounds activation memory by construction -- a batch of 1024-token texts simply holds fewer
+of them -- so there is no worst-case micro-batch to size and no gradient accumulation to add.
 """
 
 from __future__ import annotations
