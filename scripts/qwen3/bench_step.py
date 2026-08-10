@@ -65,7 +65,7 @@ def main(argv=None):
         lengths = pc.list_value_length(train_data.data.column("input_ids")).to_numpy(
             zero_copy_only=False
         )
-        plan = plan_batches(lengths, opt.token_budget, opt.max_seqs, cfg.train.seed, opt.bucket)
+        plan = plan_batches(lengths, opt.token_budget, opt.max_seqs, cfg.train.seed)
         loader = DataLoader(train_data, batch_sampler=plan, collate_fn=data["collator"])
     else:
         loader = DataLoader(
@@ -122,7 +122,7 @@ def main(argv=None):
     ms = elapsed / args.steps * 1000
     peak = torch.cuda.max_memory_allocated() / 2**30
     batching = (
-        f"token_budget={opt.token_budget:,} max_seqs={opt.max_seqs} bucket={opt.bucket}"
+        f"token_budget={opt.token_budget:,} max_seqs={opt.max_seqs}"
         if opt.token_budget
         else f"bs={opt.batch_size}"
     )

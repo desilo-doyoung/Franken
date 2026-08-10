@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pyarrow.compute as pc
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -20,6 +21,7 @@ from transformers import AutoTokenizer
 
 from franken.config import Config, DistillConfig
 from franken.data.embed_corpus import load_embed_corpus
+from franken.distill.batching import plan_batches
 from franken.distill.layer_map import resolve_layer_map
 from franken.distill.loss import masked_mse_loss, masked_relative_mse_loss
 from franken.models.base import ModelBackend
@@ -129,8 +131,6 @@ class EmbedSelfDistillTask(Task):
             cfg.train.corpus_size,
             cfg.train.max_seq_len,
             splits=splits,
-            # Match the batch planner's widths, so the shapes Dynamo sees are the ones it budgeted.
-            pad_to_multiple_of=cfg.train.distill.bucket if cfg.train.distill.token_budget else None,
         )
 
     def torch_columns(self) -> list[str]:
@@ -172,13 +172,20 @@ class EmbedSelfDistillTask(Task):
         # once per epoch is pure wall-clock (minutes per call at corpus_size 216k).
         data = self.datasets(tokenizer, cfg, splits=(split,))
         ds = data[split].with_format("torch", columns=self.torch_columns())
-        # The run's batch size, from config — eval needs no separate knob. Dynamic padding does
-        # perturb the embeddings across batch compositions, but only at ~5e-7: measured on the
-        # depth-19 checkpoint, recall@10 is *bit-identical* at eval batch 8/16/32/64 (0.863000)
-        # and only `embed_dist` moves, in its 8th decimal. Selection is therefore unaffected.
-        loader = DataLoader(
-            ds, batch_size=cfg.train.distill.batch_size, collate_fn=data["collator"]
-        )
+        # Batched the same way training is, so one knob bounds memory everywhere: a fixed sequence
+        # count at max_seq_len 1024 puts the whole 500-row pool in one batch, and the returned
+        # per-layer hidden states make that ~20 GB. Safe to differ from training's batching —
+        # dynamic padding perturbs embeddings across batch compositions at only ~5e-7 (recall@10 is
+        # *bit-identical* at eval batch 8/16/32/64; only `embed_dist` moves, in its 8th decimal).
+        opt = cfg.train.distill
+        if opt.token_budget:
+            lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(
+                zero_copy_only=False
+            )
+            plan = plan_batches(lengths, opt.token_budget, opt.max_seqs, cfg.train.seed)
+            loader = DataLoader(ds, batch_sampler=plan, collate_fn=data["collator"])
+        else:
+            loader = DataLoader(ds, batch_size=opt.batch_size, collate_fn=data["collator"])
         device = next(model.parameters()).device
 
         # Whole-pool embeddings, not a streaming mean: recall@k is a property of the pool's

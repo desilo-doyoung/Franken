@@ -92,10 +92,11 @@ class OptimConfig:
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
     # Per-rank padded tokens per batch, sequence count floating to fit (franken.distill.batching).
-    # None = fixed `batch_size` batches; `batch_size` sizes the eval loader either way.
+    # Set it and `batch_size` goes unused — training AND eval batch by tokens, so one knob bounds
+    # memory everywhere. ⚠️ Per RANK, so steps/epoch (hence drift) depends on the world size,
+    # unlike `batch_size`, which is global and split by `per_rank_batch`.
     token_budget: int | None = None
-    max_seqs: int = 256  # never binds above token_budget // bucket
-    bucket: int = 64  # holds Dynamo's shape count down, at ~19% more padded tokens
+    max_seqs: int = 256  # ceiling on sequences per batch, whatever the budget allows
 
 
 @dataclass

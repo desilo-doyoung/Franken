@@ -317,7 +317,6 @@ def load_embed_corpus(
     max_seq_len: int = 128,
     val_size: int = 500,
     splits: tuple[str, ...] = ("train", "validation"),
-    pad_to_multiple_of: int | None = None,
 ) -> dict[str, Any]:
     """Load and tokenize an embedding corpus preset.
 
@@ -331,7 +330,5 @@ def load_embed_corpus(
         )
         for split in splits
     }
-    out["collator"] = transformers.DataCollatorWithPadding(
-        tokenizer, pad_to_multiple_of=pad_to_multiple_of
-    )
+    out["collator"] = transformers.DataCollatorWithPadding(tokenizer)
     return out

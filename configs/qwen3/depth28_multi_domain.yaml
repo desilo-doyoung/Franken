@@ -54,9 +54,5 @@ train:
     epochs: 2
     token_budget: 16384
     max_seqs: 256
-    bucket: 64
-    # Eval loader ONLY under token budgeting (training uses token_budget). 512 would put all 500
-    # validation rows in one batch padded to 1024 and retain per-layer hidden states: ~20 GB.
-    batch_size: 32
     warmup_ratio: 0.1
     weight_decay: 0.01
