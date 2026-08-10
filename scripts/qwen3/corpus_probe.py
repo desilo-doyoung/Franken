@@ -15,6 +15,7 @@ loader or a renamed column fails here rather than hours into `build_corpus.py`.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -32,6 +33,7 @@ TARGETS = (11_500_000, 15_500_000, 16_500_000)
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="configs/qwen3/depth19_multi_domain.yaml")
+    p.add_argument("--json", help="machine-readable output, so a driver script need not scrape")
     args = p.parse_args(argv)
 
     datasets.disable_progress_bars()
@@ -116,6 +118,29 @@ def main(argv: list[str] | None = None) -> None:
     )[:6]
     for frac, name, w, mx in worst:
         print(f"  {name:<16} w={w:<6.3f} cut {frac:>6.1%}  longest {mx:>6}")
+
+    if args.json:
+        os.makedirs(os.path.dirname(args.json) or ".", exist_ok=True)
+        with open(args.json, "w") as f:
+            json.dump(
+                {
+                    "corpus": cfg.train.corpus,
+                    "max_seq_len": cap,
+                    "tok_per_text": weighted / covered if covered else 0.0,
+                    "covered_weight": covered,
+                    "failed": missing,
+                    "sources": {
+                        n: {"domain": d, "weight": w, "mean": m, "max_untruncated": r[-1]}
+                        for n, d, w, m, r in rows
+                    },
+                },
+                f,
+                indent=2,
+            )
+
+    # Non-zero exit so a driver script can gate on this: a dead loader or renamed column must stop
+    # the pipeline here, not surface hours into build_corpus.py.
+    raise SystemExit(1 if missing else 0)
 
 
 if __name__ == "__main__":
