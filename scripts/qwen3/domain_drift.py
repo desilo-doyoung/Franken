@@ -48,7 +48,6 @@ import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from embed_eval import _embed_texts  # noqa: E402
 from franken.config import Config  # noqa: E402
-from franken.data.embed_corpus import VAL_RESERVE  # noqa: E402
 from franken.models import build_backend  # noqa: E402
 from franken.tasks import build_task  # noqa: E402
 from franken.tasks.embed import RECALL_K as K  # noqa: E402
@@ -61,21 +60,26 @@ POOL = 500
 
 
 def _csn_python():
-    """The corpus's own held-out code, which happens to be pure Python.
+    """Held-out CodeSearchNet Python: same language as APPS, so genre is the only moving part.
 
-    `_partitioned` reserves the stream's first `VAL_RESERVE` rows for validation and train
-    `skip()`s past them. The CodeSearchNet `all` stream is grouped by language with Python first
-    (verified: first 6,000 rows are 100% python), so that reserve is 5,000 held-out Python
-    functions -- the same language APPS uses, which is what makes genre the only moving part.
+    Read from CodeSearchNet's own `validation` split rather than the corpus loader, so this slice
+    does not shift when the mix does. Filtered to python explicitly — the stream is grouped by
+    language, and relying on that grouping is exactly the bias the corpus loader now shuffles away.
     """
     ds = datasets.load_dataset(
-        "code-search-net/code_search_net", "all", split="train", streaming=True
+        "code-search-net/code_search_net", "all", split="validation", streaming=True
     )
-    return [r["whole_func_string"] for r in ds.take(min(POOL, VAL_RESERVE))]
+    out = []
+    for r in ds:
+        if r["language"] == "python":
+            out.append(r["whole_func_string"])
+            if len(out) >= POOL:
+                break
+    return out
 
 
 def _slices() -> dict[str, list[str]]:
-    """Text-only slices; documents take no instruction prefix, queries are wrapped by `_assemble`."""
+    """Documents take no instruction prefix; query sides are wrapped by `_assemble`."""
     apps_d, apps_q = _load_beir("CoIR-Retrieval/apps")[1::2]
     nf_d, nf_q = _load_beir("mteb/nfcorpus")[1::2]
     fiqa_d = _load_beir("mteb/fiqa")[1]
@@ -109,7 +113,10 @@ def main(argv: list[str] | None = None) -> None:
     student = student.to(device).eval()
 
     print(f"\nstudent: {args.student_ckpt or 'IDENTITY (seeded from teacher)'}")
-    print(f"depth={cfg.model.num_hidden_layers} act={cfg.model.activation} seq={cfg.train.max_seq_len}")
+    print(
+        f"depth={cfg.model.num_hidden_layers} act={cfg.model.activation} "
+        f"seq={cfg.train.max_seq_len}"
+    )
 
     rows = {}
     for name, texts in _slices().items():
@@ -123,7 +130,9 @@ def main(argv: list[str] | None = None) -> None:
             "recall": recall_at_k(s_emb, t_emb, K),
         }
         r = rows[name]
-        print(f"  {name:<18} n={r['n']:<4} dist {r['embed_dist']:.5f}   recall@{K} {r['recall']:.4f}")
+        print(
+            f"  {name:<18} n={r['n']:<4} dist {r['embed_dist']:.5f}   recall@{K} {r['recall']:.4f}"
+        )
 
     print(
         f"\n  dist is comparable across slices; recall@{K} only across models within a slice "

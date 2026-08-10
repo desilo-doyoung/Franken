@@ -101,9 +101,7 @@ class Distiller:
                 zero_copy_only=False
             )
             batch_plan = shard(
-                plan_batches(
-                    lengths, opt.token_budget, opt.max_seqs, self.cfg.train.seed
-                ),
+                plan_batches(lengths, opt.token_budget, opt.max_seqs, self.cfg.train.seed),
                 self.dist.rank,
                 self.dist.world_size,
             )

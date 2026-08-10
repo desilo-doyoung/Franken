@@ -53,7 +53,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  corpus_size: 11500000
+  corpus_size: 16200000 # 16.2M x 123.8 measured tok/text = 2.0B tokens/epoch (corpus_probe.py)
   output_dir: outputs
   run_name: qwen3_depth19_multi_domain
   max_seq_len: 1024
