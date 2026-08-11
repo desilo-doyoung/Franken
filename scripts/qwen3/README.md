@@ -19,8 +19,17 @@ One command. It gates the corpus once per corpus, **builds the cache if there is
 each config on its own GPU, scores all three eval suites, and prints the table:
 
 ```bash
-uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/*_multi_domain*.yaml
+# depth28 FIRST under --ddp: it is the control, and --ddp finishes it before spending on the rest.
+uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
+  configs/qwen3/depth28_multi_domain.yaml \
+  configs/qwen3/depth19_multi_domain_exact.yaml \
+  configs/qwen3/depth19_multi_domain.yaml
 ```
+
+⚠️ `distill.token_budget` is **per rank**, so the `multi_domain` configs are calibrated for **4 ranks**
+(16,384 × 4 = 65,536 tokens/step → ~25.6k steps/epoch). On a different rank count the trainer still
+derives a correct `lr` from `distill.drift`, but the step count moves and the numbers stop being
+comparable to the recorded ladder.
 
 Or step by step for a single config, via the top-level CLI:
 
@@ -65,6 +74,13 @@ CUDA_VISIBLE_DEVICES=$DEV uv run python main.py distill \
 CUDA_VISIBLE_DEVICES=$DEV uv run python main.py eval \
   --config configs/qwen3/smoke_multi_domain.yaml \
   --suite corpus,external --sources gooaq,specter --tasks nfcorpus
+```
+
+```bash
+# 5. only if the real run will use --ddp: exercise the collective path too (~10 min). A
+#    single-GPU smoke cannot catch a DDP deadlock, and `token_budget` is PER RANK.
+CUDA_VISIBLE_DEVICES=0,1 uv run python -m torch.distributed.run --nproc_per_node=2 \
+  main.py distill --config configs/qwen3/smoke_multi_domain.yaml
 ```
 
 Step 4 is the one to read carefully: **any non-zero delta means the eval is broken**, not that the

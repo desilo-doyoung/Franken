@@ -86,7 +86,8 @@ Label-free: the teacher's pooled embedding *is* the target, so there is no teach
 each config on its own GPU, scores all three eval suites, and writes a markdown table:
 
 ```bash
-uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/*_multi_domain*.yaml
+uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
+  configs/qwen3/depth28_multi_domain.yaml configs/qwen3/depth19_multi_domain{_exact,}.yaml
 ```
 
 Or step by step for a single config:
