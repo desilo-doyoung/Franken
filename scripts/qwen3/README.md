@@ -41,6 +41,40 @@ maximizes throughput, `--ddp` maximizes what a single run can absorb. ⚠️ `co
 ~6-minute CPU-bound warmup per rank before the first epoch line, which reads exactly like a collective
 deadlock — check `%CPU` first (~90%, state `R` = Dynamo compiling).
 
+## Smoke-test a fresh box first
+
+Four checks, ~30 min total, before committing hours. Each one fails loudly and locally.
+
+```bash
+DEV=2                                    # a card you own
+CFG=configs/qwen3/depth19_multi_domain.yaml
+
+# 1. env, CUDA, model download, and the student still bit-equal to the teacher  (~2 min)
+uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/exact.yaml
+
+# 2. the real corpus gates: all 18 sources load, all are scoreable, tok/text measured (~40 min,
+#    and its HF downloads are exactly the ones the real build reuses, so this is not wasted)
+uv run python main.py corpus --config $CFG
+
+# 3. the whole pipeline on 1/450th of the data: build -> distill -> checkpoint  (~10 min)
+CUDA_VISIBLE_DEVICES=$DEV uv run python main.py distill \
+  --config configs/qwen3/smoke_multi_domain.yaml
+
+# 4. eval plumbing, with a known right answer: smoke is full depth + exact ops, so with no
+#    --student-ckpt the student IS the teacher and every delta must be exactly 0.0000  (~10 min)
+CUDA_VISIBLE_DEVICES=$DEV uv run python main.py eval \
+  --config configs/qwen3/smoke_multi_domain.yaml \
+  --suite corpus,external --sources gooaq,specter --tasks nfcorpus
+```
+
+Step 4 is the one to read carefully: **any non-zero delta means the eval is broken**, not that the
+model is. Narrow `--sources` / `--tasks` on purpose — pool size is independent of `corpus_size`, so
+the full suite would cost as much here as on a real run.
+
+If all four pass, the only thing left untested is scale. Report: `parity_gate` verdict, the `CORPUS OK`
+line plus the printed `corpus_size` (it must match the config), the distill run's
+`token-budgeted batching: N steps/epoch/rank` line, and step 4's delta column.
+
 ## `corpus.py` — three stages, each gating the next
 
 Datasets are declared **once**, as a `Source` in `franken/data/embed_corpus/registry.py`; the training

@@ -18,7 +18,7 @@ def _load_config(args: argparse.Namespace) -> Config:
     return Config.from_yaml(args.config)
 
 
-def cmd_train_teacher(args: argparse.Namespace) -> None:
+def cmd_train_teacher(args: argparse.Namespace, extra: list[str]) -> None:
     from franken.tasks import build_task
 
     cfg = _load_config(args)
@@ -32,7 +32,7 @@ def cmd_train_teacher(args: argparse.Namespace) -> None:
         )
 
 
-def cmd_distill(args: argparse.Namespace) -> None:
+def cmd_distill(args: argparse.Namespace, extra: list[str]) -> None:
     import os
 
     import torch
@@ -93,7 +93,7 @@ def cmd_corpus(args: argparse.Namespace) -> None:
     )
 
 
-def cmd_eval(args: argparse.Namespace) -> None:
+def cmd_eval(args: argparse.Namespace, extra: list[str]) -> None:
     import os
 
     cfg = _load_config(args)  # backend name selects which model's evaluator to run
@@ -106,7 +106,7 @@ def cmd_eval(args: argparse.Namespace) -> None:
             os.path.join(args.ckpt, "pytorch_model.bin") if os.path.isdir(args.ckpt) else args.ckpt
         )
         argv += ["--student-ckpt", ckpt]
-    _delegate(cfg.model.backend, script, argv)
+    _delegate(cfg.model.backend, script, argv + extra)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -144,8 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
-    args.func(args)
+    # Unrecognized flags pass through to the delegated script, so `eval --suite corpus --sources X`
+    # works without this file mirroring every scorer flag.
+    args, extra = parser.parse_known_args(argv)
+    # Only the delegating commands forward extras; elsewhere an unknown flag is a typo.
+    if extra and args.command not in ("corpus", "eval"):
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
+    args.func(args, extra)
 
 
 if __name__ == "__main__":

@@ -218,6 +218,36 @@ PRESETS: dict[str, list[Source]] = {
             1.0,
         )
     ],
+    # The original three-source recipe, kept only so the pre-1024 configs naming it still run. Not
+    # scoreable and not in MIXES: its sources carry no eval pair. Its declared weights never took
+    # effect either -- all three exhaust before 2.1M, so the realized mix was 5.2 / 42.9 / 51.8%.
+    "mixed": [
+        Source(
+            "msmarco_query",
+            "query",
+            "microsoft/ms_marco",
+            "v1.1",
+            adapters.marco_side("query"),
+            0.2,
+            prefix_query=True,
+        ),
+        Source(
+            "msmarco_passage",
+            "english_prose",
+            "microsoft/ms_marco",
+            "v1.1",
+            adapters.marco_side("passage"),
+            0.4,
+        ),
+        Source(
+            "wikitext103",
+            "english_prose",
+            "Salesforce/wikitext",
+            "wikitext-103-raw-v1",
+            adapters.wikitext,
+            0.4,
+        ),
+    ],
     **MIXES,
 }
 

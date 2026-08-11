@@ -1,0 +1,47 @@
+# Setup smoke test: the real registry, adapters, batching and eval on ~1/450th of the data.
+# Full teacher depth + exact ops, so the student IS the teacher and `eval` with no --student-ckpt
+# must read every delta as exactly 0.0000 — the check has a known right answer.
+# NEVER a result. See scripts/qwen3/README.md for the sequence.
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+  attn_impl: sdpa_causal
+
+distill:
+  beta: 1.0
+  hidden_layer_map: null
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: multi_domain # the real mix, so a dead source or renamed column still fails here
+  corpus_size: 20000
+  output_dir: outputs
+  run_name: qwen3_smoke
+  max_seq_len: 256
+  seed: 42
+  device: cuda
+  precision: bf16
+  compile: false # a ~6 min Dynamo warmup is most of this run's wall clock
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    drift: 7.69e-3 # exercises the derive-lr-from-realized-steps path
+    epochs: 1
+    token_budget: 16384
+    max_seqs: 256
+    warmup_ratio: 0.1
+    weight_decay: 0.01

@@ -83,3 +83,17 @@ def wikitext(row) -> Record | None:
     if len(text) < _MIN_DOC or text.startswith("="):
         return None
     return Record(docs=(text,))
+
+
+def marco_side(kind: str) -> Callable[[dict], Record | None]:
+    """Legacy `mixed` preset: the query side alone, or the passages alone. `marco` yields both,
+    which is right for multi_domain but would change `mixed`'s measured proportions."""
+
+    def adapt(row) -> Record | None:
+        if kind == "query":
+            query = row["query"].strip()
+            return Record(query=query) if query else None
+        texts = tuple(p.strip() for p in row["passages"]["passage_text"] if p.strip())
+        return Record(docs=texts) if texts else None
+
+    return adapt

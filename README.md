@@ -99,6 +99,10 @@ uv run python main.py distill --config $CFG            # lr derived from distill
 uv run python main.py eval    --config $CFG            # agreement + corpus + external nDCG
 ```
 
+On a fresh machine, smoke-test the setup first — `scripts/qwen3/README.md` has a four-step sequence
+(~30 min) ending in a check with a known right answer: `configs/qwen3/smoke_multi_domain.yaml` is full
+teacher depth with exact ops, so `eval` with no `--student-ckpt` must read every delta as `0.0000`.
+
 `--config` is required everywhere: the config *is* the experiment, and these commands cost hours.
 The corpus gates fail if a source stops loading or becomes unscoreable, and `--build` fails if the
 built corpus misses the 2B token-pass budget by >2%, printing the `corpus_size` that would hit it.
