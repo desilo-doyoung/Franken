@@ -44,7 +44,9 @@ SOFTMAX2_LAYERS = frozenset({1})
 # for he_inv's Goldschmidt, so 1/Sum overshoots and detonates (sftmx_out ~1e+86). Checked
 # first in stage_07_softmax; same domain/encoding as softmax2, so no re-encode.
 # Not predictable from ranges — populate from a forward run that detonates.
-SOFTMAX3_LAYERS = frozenset()
+# L1 qualifies at depth 6: inv_D was 8.95 vs 0.16 on every other layer (55x), exp_scale=16
+# brings it to 0.049. Fixes all 5 softmax divergences (18 runs, 0 divergent).
+SOFTMAX3_LAYERS = frozenset({1})
 
 # Union = all wide-exp-domain layers. Drives encoding scale (1/1024 vs 1/512), stage_07
 # level handling, and the plot rescale -- NOT dispatch (that uses the two sets above).
