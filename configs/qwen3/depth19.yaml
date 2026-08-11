@@ -2,7 +2,7 @@
 # scaled; scaling the better architecture beats rescuing a worse one (depth 14 at 3x compute still lost).
 # A 32% layer cut at ~-2% quality would be the best FHE trade measured.
 #
-# Score this on nDCG@10 (`retrieval_eval.py`), NOT recall: `depth14_max` proved compute buys fidelity
+# Score this on nDCG@10 (`eval.py`), NOT recall: `depth14_max` proved compute buys fidelity
 # without quality, and `depth28_control_max` proved recall keeps moving after nDCG has saturated.
 #
 # Pairs with `depth28_control_max` (0.9790): same corpus, epochs and LR schedule shape, and sqrt-batch
@@ -10,7 +10,7 @@
 #
 #   uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
 #       configs/qwen3/depth19_max.yaml
-#   uv run python scripts/qwen3/retrieval_eval.py --config configs/qwen3/depth19_max.yaml \
+#   uv run python scripts/qwen3/eval.py --config configs/qwen3/depth19_max.yaml \
 #       --student-ckpt outputs/qwen3_depth19_max/student/pytorch_model.bin
 
 model:

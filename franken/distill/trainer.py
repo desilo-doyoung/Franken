@@ -1,3 +1,4 @@
+import math
 import random
 from contextlib import nullcontext
 
@@ -150,12 +151,20 @@ class Distiller:
                     "and recorded results would not be comparable."
                 )
 
-        optimizer = AdamW(
-            self.student.parameters(),
-            lr=self.cfg.train.distill.lr,
-            weight_decay=self.cfg.train.distill.weight_decay,
-        )
-        total_steps = len(loader) * self.cfg.train.distill.epochs
+        # `drift` derives the LR from the realized step count. Drift goes as `lr*sqrt(steps)`, and
+        # steps depend on *padded* tokens -- unknowable until the corpus is built, so a config that
+        # hardcodes `lr` is a config that goes stale. The last ladder ran 5.6% hot exactly that way.
+        # The resolved value is logged, and the configs carry `drift` instead of `lr`.
+        opt_cfg = self.cfg.train.distill
+        total_steps = len(loader) * opt_cfg.epochs
+        lr = opt_cfg.lr
+        if opt_cfg.drift:
+            lr = opt_cfg.drift / math.sqrt(total_steps)
+            self.log(
+                f"lr {lr:.4e} = drift {opt_cfg.drift:g} / sqrt({total_steps:,} steps)"
+                f" [{len(loader):,} steps/epoch x {opt_cfg.epochs} epochs]"
+            )
+        optimizer = AdamW(self.student.parameters(), lr=lr, weight_decay=opt_cfg.weight_decay)
         scheduler = get_linear_schedule_with_warmup(
             optimizer, int(total_steps * self.cfg.train.distill.warmup_ratio), total_steps
         )

@@ -52,13 +52,13 @@ franken/
   models/            base.py = ModelBackend ABC + build_backend registry; bert/, qwen3/
   tasks/             base.py = Task ABC + build_task registry; mrpc.py, embed.py
   distill/           layer_map, masked_mse_loss, Distiller (backend + task driven)
-  data/              mrpc.py, embed_corpus.py
+  data/              mrpc.py, embed_corpus/ (the embedding corpus + its eval pools; see its README)
   cli.py             train-teacher | distill | eval
 configs/<model>/     e.g. configs/bert/{default,fhe_gelu,fhe_full,quad,quad_fhe,quad_cgf_fhe}.yaml
 scripts/
   stage_distill.py   op-curriculum (staged op-replacement) distillation — model-agnostic
   bert/              MRPC-specific: evaluate.py, act_range.py, seed_sweep.py
-  qwen3/             gates, eval, orchestration (see scripts/qwen3/README.md)
+  qwen3/             corpus.py, eval.py, gates, orchestration (see scripts/qwen3/README.md)
 outputs/<model>/     teacher/, student/, stage*/ (gitignored)
 ```
 
@@ -78,6 +78,34 @@ uv run python main.py eval --config configs/bert/default.yaml --ckpt outputs/ber
 Swap ops by editing the config (`model.softmax: cgf`, `model.activation: cheb_gelu` or `quad`, with per-op
 `*_kwargs`) and re-running `distill`, or start from a recipe in `configs/bert/`.
 
+### Qwen3-Embedding track
+
+Label-free: the teacher's pooled embedding *is* the target, so there is no teacher to fine-tune. Three
+commands, in order — or `run_experiments.py`, which does all of it per config and prints one table.
+
+```bash
+CFG=configs/qwen3/depth19_multi_domain.yaml
+
+# 1. gate + measure the corpus, then build its cache (hours; every rank must cache-hit)
+uv run python scripts/qwen3/corpus.py --config $CFG            # holdout, scoreability, corpus_size
+uv run python scripts/qwen3/corpus.py --config $CFG --build    # after pasting corpus_size
+
+# 2. distill
+uv run python main.py distill --config $CFG                    # lr derived from distill.drift
+
+# 3. score: teacher agreement + in-distribution nDCG + external nDCG, and the coverage gap
+uv run python scripts/qwen3/eval.py --config $CFG \
+  --student-ckpt outputs/qwen3_depth19_multi_domain/student/pytorch_model.bin
+
+# ... or the whole ladder, gates included, one config per GPU
+uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/*_multi_domain*.yaml
+```
+
+`corpus.py` refuses to pass its gates if a corpus source stops loading or becomes unscoreable, and
+`--build` fails if the built corpus misses the 2B token-pass budget by >2%. Run `eval.py` with **no**
+`--student-ckpt` on a full-depth config for the self-test: the student is then the teacher, so every
+delta must read ~0.
+
 ```bash
 # Op-curriculum: distill the easier op set first, then warm-start and swap in the harder op.
 # Helps when two aggressive ops interact (e.g. quad GELU + cgf softmax); see PROGRESS.md.
@@ -90,4 +118,5 @@ uv run python scripts/bert/act_range.py --config configs/bert/quad_cgf_fhe.yaml 
 ```
 
 Results live in `PROGRESS.md` (BERT/MRPC), `franken/models/qwen3/PROGRESS.md` (Qwen3), and
-`thor/EXECUTION_NOTES.md` (running these students under FHE).
+`thor/EXECUTION_NOTES.md` (running these students under FHE). Corpus and dataset design is documented
+in `franken/data/embed_corpus/README.md`.

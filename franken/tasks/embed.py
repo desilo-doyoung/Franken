@@ -47,6 +47,9 @@ def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = RECALL_K)
     Rows must be L2-normed (the backend's pooled output is), so ``x @ x.T`` is cosine.
     Defined here rather than in the eval script so training-time selection and end-of-run
     scoring cannot drift apart.
+
+    Only comparable at a FIXED pool size. Difficulty is set by ``k/(n-1)``, not by the model, so at
+    identical per-vector damage this measures 1.000 at n=11, 0.110 at n=500 and 0.039 at n=5000.
     """
     ss, st = student @ student.T, teacher @ teacher.T
     # Mask self-similarity, else every row's nearest neighbour is itself and both models

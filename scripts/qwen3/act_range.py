@@ -12,16 +12,8 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
+import common
 import torch
-from franken.config import Config
-from franken.models import build_backend
-from franken.tasks import build_task
 from torch.utils.data import DataLoader
 
 SAMPLE = 20_000  # values kept per layer per batch, for quantiles only
@@ -63,29 +55,18 @@ def _report(title, store, show_over):
 
 @torch.no_grad()
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="configs/qwen3/exact.yaml")
-    p.add_argument("--student-ckpt", default=None, help="default: identity (seeded from teacher)")
+    p = common.parser(__doc__, json=False)
     args = p.parse_args(argv)
 
-    cfg = Config.from_yaml(args.config)
-    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+    m = common.load(args)
+    cfg, backend, task, tokenizer, device = m.cfg, m.backend, m.task, m.tokenizer, m.device
     torch.manual_seed(cfg.train.seed)
-    backend, task = build_backend(cfg.model.backend), build_task(cfg.train.task)
-    tokenizer = task.build_tokenizer(cfg)
-
-    teacher = backend.load_teacher(cfg).to(device)
-    model = backend.build_student(cfg)
-    backend.seed_student(model, teacher, cfg)
-    if args.student_ckpt:
-        model.load_state_dict(torch.load(args.student_ckpt, map_location="cpu"))
-    model = model.to(device).eval()
-    del teacher
+    model = m.student
+    del m.teacher  # only needed to seed the student; the ranges are the student's
 
     acts = backend.activation_ops(model)
     domain = getattr(acts[0], "domain", None) or 32.0
-    print(f"\nstudent: {args.student_ckpt or 'IDENTITY (seeded from teacher)'}")
-    print(f"act={cfg.model.activation} softmax={cfg.model.softmax} | domain reference D={domain}")
+    print(f"domain reference D={domain}")
 
     preact, scores, mask_holder = {}, {}, {}
     hooks = []

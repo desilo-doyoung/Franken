@@ -1,17 +1,8 @@
-# Untouched-architecture baseline for the `multi_domain` ladder: full teacher depth, exact ops, no
-# penalty. The student is mathematically the teacher and is seeded from it, so this measures the
-# TRAINING CHANGE alone — new corpus, 1024 tokens, token-budgeted batching. It should stay near
-# ceiling; anything that drops here is the setup, not the architecture, and invalidates the reading
-# of the other two runs.
-#
-# Ladder (identical corpus, length, batching, schedule, seed — so one corpus cache serves all three):
-#   depth28_multi_domain        28, exact      -> the corpus/length/batching change
-#   depth19_multi_domain_exact  19, exact      -> the layer cut
-#   depth19_multi_domain        19, quad_silu  -> the FHE ops
-#
-# See `depth19_multi_domain.yaml` for the length, batching and lr derivations — identical here.
-# `token_budget` needs no adjustment for the extra depth: 16384 is the per-rank token count
-# PROGRESS measured *at* depth 28, and the budget bounds activation memory whatever the depth.
+# multi_domain ladder, baseline arm: full teacher depth, exact ops, no penalty.
+# The student is mathematically the teacher, so this measures the TRAINING change alone (new corpus,
+# 1024 tokens, token-budgeted batching). Anything that drops here is the setup, not the architecture,
+# and invalidates the other two arms. Also the config to run the identity self-tests under.
+# See depth19_multi_domain.yaml for the shared setup.
 
 model:
   backend: qwen3
@@ -33,7 +24,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  corpus_size: 16200000 # 16.2M x 123.8 measured tok/text = 2.0B tokens/epoch (corpus_probe.py)
+  corpus_size: 9000000 # corpus.py probe: 111.3 tok/text -> 1.00B/epoch, x2 epochs = 2.00B
   output_dir: outputs
   run_name: qwen3_depth28_multi_domain
   max_seq_len: 1024
@@ -50,9 +41,9 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 3.4e-5 # matched to the ladder so lr*sqrt(steps) = 7.69e-3 and depth is the only difference
+    drift: 7.69e-3 # lr derived from the realized step count at startup
     epochs: 2
-    token_budget: 16384
+    token_budget: 16384 # per RANK, measured at depth 28
     max_seqs: 256
     warmup_ratio: 0.1
     weight_decay: 0.01

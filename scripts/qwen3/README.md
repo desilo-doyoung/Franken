@@ -3,105 +3,132 @@
 Every script takes `--config <yaml>` and reads model/task/corpus from it, so the config is the single
 source of truth. Training itself is `main.py distill`, not here.
 
-| script | answers | run it when |
-|---|---|---|
-| `parity_gate.py` | is the from-scratch student still bit-equal to the teacher? | after touching any module under `franken/models/qwen3/` |
-| `precision_gate.py` | is `precision: bf16` safe for this architecture? | before trusting a bf16 run; after touching `rope.py` or the residual path |
-| `bench_step.py` | how fast is one training step? | comparing OPS (cgf vs exact, an attn_impl) without paying for a full run — a live run already prints tok/s, s/step and `unique_graphs` |
-| `build_corpus.py` | build + cache the corpus, and report the realized mix | before any batch whose corpus is big; `run_experiments.py` refuses without the cache |
-| `embed_eval.py` | how close to the teacher is a checkpoint? | to score a run (**recall@10** is the headline) |
-| `retrieval_eval.py` | is the student absolutely worse, not just different? | end of a run, when the question is "good enough?" |
-| `act_range.py` | what range do the FHE operators actually see? | before picking a polynomial `domain` |
-| `run_experiments.py` | all of the above, over many configs | any batch of experiments |
+| script | answers |
+|---|---|
+| `corpus.py` | is the holdout sound, is every source scoreable, what is `corpus_size` — and build the cache |
+| `eval.py` | how much did the student lose, and is it coverage or capacity? |
+| `parity_gate.py` | is the from-scratch student still bit-equal to the teacher? |
+| `precision_gate.py` | is `precision: bf16` safe for this architecture? |
+| `act_range.py` | what range do the FHE operators actually see? |
+| `run_experiments.py` | all of the above over many configs, into one markdown table |
+| `common.py` | shared: path bootstrap, flags, `load()` (teacher+student), nDCG scoring |
 
+## The whole workflow
+
+```bash
+CFG=configs/qwen3/depth19_multi_domain.yaml
+
+uv run python scripts/qwen3/corpus.py --config $CFG              # gate + measure
+uv run python scripts/qwen3/corpus.py --config $CFG --build      # after pasting corpus_size
+uv run python main.py distill --config $CFG
+uv run python scripts/qwen3/eval.py --config $CFG \
+  --student-ckpt outputs/qwen3_depth19_multi_domain/student/pytorch_model.bin
 ```
-uv run python scripts/qwen3/parity_gate.py     --config configs/qwen3/exact.yaml
-uv run python scripts/qwen3/precision_gate.py  --config configs/qwen3/depth28_exact.yaml
-uv run python scripts/qwen3/bench_step.py      --config ... [--precision bf16] [--compile]
-uv run python scripts/qwen3/build_corpus.py    --config configs/qwen3/depth19_multi_domain.yaml
-uv run python scripts/qwen3/act_range.py       --config ... [--student-ckpt ...]
-uv run python scripts/qwen3/embed_eval.py      --student-ckpt outputs/qwen3/student/pytorch_model.bin
-uv run python scripts/qwen3/retrieval_eval.py  --student-ckpt ... --tasks nfcorpus,scifact
-uv run python scripts/qwen3/run_experiments.py --devices 2,3 [--eval-only] configs/qwen3/depth19.yaml ...
+
+Or one command for a whole ladder — it runs the corpus gates once per corpus, distills each config on
+its own GPU, scores it, and prints the table:
+
+```bash
+uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/*_multi_domain*.yaml
 ```
+
+Pass only cards you own — `--devices` becomes `CUDA_VISIBLE_DEVICES` per subprocess, and a co-tenant's
+idle GPU is not free capacity. `--ddp` instead spreads one config across all devices; the default queue
+maximizes throughput, `--ddp` maximizes what a single run can absorb. ⚠️ `compile: true` costs a
+~6-minute CPU-bound warmup per rank before the first epoch line, which reads exactly like a collective
+deadlock — check `%CPU` first (~90%, state `R` = Dynamo compiling).
+
+## `corpus.py` — three stages, each gating the next
+
+Datasets are declared **once**, as a `Source` in `franken/data/embed_corpus/registry.py`; the training
+corpus and the eval pools both derive from that entry, and a source must be scoreable to exist. See
+that package's README for the design.
+
+1. **check** — holdout disjoint and representative, for the sources with upstream splits. Hash-split
+   sources are disjoint by construction.
+2. **measure** — every source loads, every source is scoreable, and `tok/text` is *measured*, printing
+   the `corpus_size` to paste. The documented precedent is a 15% miss on an estimated mean.
+3. **build** (`--build`) — builds the cache, reports the realized mix off the stored `source` column,
+   and **fails if the realized token count misses `TOKEN_TARGET` by >2%**.
+
+Stages 1–2 are cheap and `run_experiments.py` runs them automatically before any GPU time; `--build`
+stays opt-in because it is the hours-long one. ⚠️ Never chain `corpus.py --build && run_experiments.py`:
+an HF retry thread raises SIGABRT during interpreter finalization *after* results print, so a
+successful build can exit 134.
+
+`TOKEN_TARGET = 2e9` lives in exactly one place (`corpus.py`). `corpus_size` is measured once and
+pasted into the config. `lr` is never in a config — `distill.drift` is, and the trainer derives `lr`
+from the realized step count. A ladder once ran 5.6% hot because a corrected estimate never reached
+the config that consumed it.
+
+## `eval.py` — three suites, and the subtraction between two of them
+
+| suite | data | answers |
+|---|---|---|
+| `agreement` | the corpus's own held-out pool + STS-B | did the student track *this* teacher? |
+| `corpus` | held-out rows of the **training** slices | quality lost where the corpus **has** coverage |
+| `external` | benchmarks the corpus does not contain | quality lost in the wild — the number to quote |
+
+`external − corpus` is the **coverage gap**, printed at the bottom: a small in-distribution deficit
+with a large external one means the fix is data; both large means it is capacity and more data will not
+help. This subtraction replaced a separate drift script that attempted the same read with weaker,
+unlabelled metrics.
+
+- ⚠️ **Two corpus macros, not one.** `MACRO-pair` is fully held out. `MACRO-qrels` is not — the
+  judgements pick the gold documents, so each is ~96% likely to be a train row and only the
+  distractors are held out. Averaging them together is the CORE-macro mistake.
+- ⚠️ **recall@10 is already relative to the teacher** — 1.0 is the ceiling, so quote it raw; it comes
+  from the same function that selected the checkpoint, and is **only comparable at a fixed pool size**
+  (measured, at fixed damage: 1.000 at n=11, 0.110 at 500, 0.039 at 5000).
+- ⚠️ `embed_dist` **misranks** recall@10; logging only. Report retrieval strictly as **nDCG@10** —
+  MTEB also defines a "recall@10" and ours means teacher-neighbour agreement.
+- ⚠️ **Not comparable to the published MTEB table**: task subset, the config's own `max_seq_len` (the
+  FHE deployment condition) vs MTEB's 512, one generic instruction. Valid teacher-vs-student only.
+- The external macro is **every** scored task. Two tasks ("CORE") read the depth-19 cut at +0.4% where
+  five put it at −16.0% and inverted the ratio column too — it reversed the conclusion, not the value.
+- With no `--student-ckpt` on a **full-depth** config the student *is* the teacher, so every delta must
+  read ~0 — the self-test. Below full depth it is an untrained truncation and reads ~−100%.
+
+`--suite`, `--sources` and `--tasks` narrow it; a narrower list is a different, non-comparable macro.
 
 ## Correctness gates
 
-**`parity_gate.py`** — exact ops + full depth + teacher weights ⇒ the student *is* the teacher, so any gap
-is a module bug (RoPE/QK-norm order, `repeat_kv`, causal+pad mask, `hidden_states` bookkeeping), not float
-noise. Passes at pooled cosine 1.0.
+**`parity_gate.py`** — exact ops + full depth + teacher weights ⇒ the student *is* the teacher, so any
+gap is a module bug (RoPE/QK-norm order, `repeat_kv`, causal+pad mask, `hidden_states` bookkeeping),
+not float noise. Passes at pooled cosine 1.0.
 
 - ⚠️ **Fails by design on FHE configs** (`cgf`, polynomial activation) — it is an exact-op gate.
-- ⚠️ **Judge hidden deltas in ULPs.** `|Δ|max` lands on layer 3's massive-activation channel where one fp32
-  ULP is ~5e-4, so 9.8e-4 is 2 ULP of summation-order noise.
+- ⚠️ **Judge hidden deltas in ULPs.** `|Δ|max` lands on layer 3's massive-activation channel where one
+  fp32 ULP is ~5e-4, so 9.8e-4 is 2 ULP of summation-order noise.
 - The comparison covers **real tokens only**, with the raw pad-inclusive max printed alongside:
-  `attn_impl: sdpa_causal` leaves garbage at pad positions on purpose and nothing reads them, but a broken
-  pad mask still shows up in the raw column.
+  `attn_impl: sdpa_causal` leaves garbage at pad positions on purpose and nothing reads them, but a
+  broken pad mask still shows up in the raw column.
 
-**`precision_gate.py`** — three assertions that bf16's safety argument holds: RoPE cos/sin stay fp32 inside
-an autocast region, all 29 `hidden_states` stay fp32, and a bf16 teacher moves the targets by more than the
-comparison band. The third **passes when the bf16 teacher DISAGREES** — that proves keeping the teacher out
-of the autocast region is load-bearing.
+**`precision_gate.py`** — three assertions that bf16's safety argument holds: RoPE cos/sin stay fp32
+inside an autocast region, all 29 `hidden_states` stay fp32, and a bf16 teacher moves the targets by
+more than the comparison band. The third **passes when the bf16 teacher DISAGREES** — that proves
+keeping the teacher out of the autocast region is load-bearing.
 
-## Measurement
-
-**`bench_step.py`** — times the real hot path (teacher forward, student forward/backward, clip, optimizer)
-after a warmup absorbing autotuning and `torch.compile`. `--precision` / `--compile` override the config so
-a sweep needs no YAML edits. `tok/s` counts **real (non-pad)** tokens, matching `PROGRESS.md`.
-⚠️ Does not attach the range-penalty hooks, so penalized configs read slightly fast.
-
-**`act_range.py`** — per-layer range of what each approximated operator *receives*: `gate_proj` output for
-the activation, attention scores for the softmax.
+**`act_range.py`** — per-layer range of what each approximated operator *receives*: `gate_proj` output
+for the activation, attention scores for the softmax.
 
 - ⚠️ Measure the **operator's input**, never hidden states — RMSNorm strips Qwen3's massive activations
   before `gate_proj`, so hidden-state stats overestimate the needed domain ~20×, and domain costs
   multiplicative depth.
 - ⚠️ **The max matters, not the percentile** (no clamp at inference; a high-degree polynomial explodes
   outside its domain). Maxima are exact — never subsample them.
-
-## Scoring
-
-**`embed_eval.py`** — recall@10 (headline), `embed_dist`, sim-rho, STS-B as a delta.
-
-- ⚠️ **recall@10 is already relative to the teacher — 1.0 is the ceiling, so quote it raw.** Normalizing by a
-  trained control double-normalizes.
-- ⚠️ `embed_dist` **misranks** recall@10; logging only.
-- With no `--student-ckpt` the student is seeded from the teacher, so recall ~1.0 / delta ~0 is the self-test.
-
-**`retrieval_eval.py`** — nDCG@10 against ground-truth judgements: the only absolute, top-k-sensitive metric
-here (recall@10 says only that the student retrieves *differently*; STS-B is too coarse for top-of-list
-damage). ⚠️ **Not comparable to the published MTEB table** — task subset, `max_seq_len` 128 (the FHE
-deployment condition) vs MTEB's 512, one generic instruction. Valid teacher-vs-student, invalid as a
-leaderboard figure. Report strictly as **nDCG@10**; MTEB also defines a "recall@10" and ours means
-teacher-neighbour agreement.
-
-## Orchestration
-
-**`run_experiments.py`** — distills each config, scores it with `embed_eval --json` (never scraped from
-prose), and prints one markdown table that pastes into `PROGRESS.md` plus every run's per-epoch trace.
-
-- Configs are a **work queue** over the given cards, so N configs cost ⌈N/devices⌉ slots even when runs
-  differ in length. For a batch of experiments this beats DDP outright: full utilization, zero communication.
-- A crashed run degrades to one `FAILED` row with its log tail; the batch and the table survive.
-- ⚠️ Pass only cards you own — `--devices` becomes `CUDA_VISIBLE_DEVICES` per subprocess.
+- 🐛 Reports `0.0` for attention scores under `attn_impl: sdpa_causal` instead of saying so — actively
+  misleading on a `cgf` config.
 
 ## Multi-GPU for a single run
 
-`main.py distill` reads torchrun's environment (`franken/distill/dist.py`), either directly or
-through the runner's `--ddp`, which wraps the same launch and still writes the table:
+`main.py distill` reads torchrun's environment (`franken/distill/dist.py`), either directly or through
+the runner's `--ddp`:
 
-```
+```bash
 CUDA_VISIBLE_DEVICES=2,3 torchrun --nproc_per_node=2 main.py distill --config X
-uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp configs/qwen3/X.yaml
 ```
 
-Pick by what is scarce: the default queue maximizes **throughput** (a batch of configs, zero
-communication), `--ddp` maximizes the compute **one** run can absorb. ⚠️ `compile: true` costs a
-~6-minute CPU-bound warmup on every rank before the first epoch line appears — GPUs sit at 0%
-util with memory resident, which reads exactly like a collective deadlock. Check `%CPU` first:
-~90% and state `R` on every rank is Dynamo compiling, not a hang.
-
-`train.distill.batch_size` is the **global** batch, split across ranks, so steps/epoch and the LR schedule
-are preserved — per-rank batch therefore shrinks as cards are added. The standard recipe is `batch_size: 512`
-(128/rank on 4 cards, the measured H100 throughput peak) with LR scaled by **√batch**, not linearly.
-⚠️ 192/rank does not OOM — it runs ~32× slower on allocator thrashing.
+⚠️ Under `distill.token_budget` the budget is **per rank**, so tokens/step scale with the device count
+and steps/epoch is data-dependent — the trainer logs the real count at startup and derives `lr` from
+it. `batch_size` is unused under `token_budget` except to size the eval loader.

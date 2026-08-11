@@ -1,13 +1,6 @@
-# Exact-op control for `depth19_multi_domain.yaml`: identical corpus, sequence length, batching,
-# schedule and seed, with exact SiLU and no range penalty. The pair isolates what the FHE ops cost
-# at this scale — every other lever is held.
-#
-# Without it the capability run has no reference: `depth19` (corpus `mixed`, 128 tokens, 3 epochs,
-# fixed batches) differs in four ways at once, so a delta against it decomposes into nothing.
-#
-# Shares the corpus cache with the other two `multi_domain` configs (same corpus/size/seq_len/
-# tokenizer), so one build_corpus.py run serves the set. See `depth19_multi_domain.yaml` for the
-# length, batching and lr derivations — identical here.
+# multi_domain ladder, layer-cut arm: depth 19 with exact ops and no penalty.
+# The exact-op control for depth19_multi_domain — every other lever is held, so the pair isolates
+# what the FHE ops cost. See depth19_multi_domain.yaml for the shared setup.
 
 model:
   backend: qwen3
@@ -29,7 +22,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  corpus_size: 16200000 # 16.2M x 123.8 measured tok/text = 2.0B tokens/epoch (corpus_probe.py)
+  corpus_size: 9000000 # corpus.py probe: 111.3 tok/text -> 1.00B/epoch, x2 epochs = 2.00B
   output_dir: outputs
   run_name: qwen3_depth19_multi_domain_exact
   max_seq_len: 1024
@@ -46,9 +39,9 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 3.4e-5 # matched to the ladder so lr*sqrt(steps) = 7.69e-3 and depth is the only difference
+    drift: 7.69e-3 # lr derived from the realized step count at startup
     epochs: 2
-    token_budget: 16384
+    token_budget: 16384 # per RANK, measured at depth 28
     max_seqs: 256
     warmup_ratio: 0.1
     weight_decay: 0.01

@@ -97,6 +97,11 @@ class OptimConfig:
     # unlike `batch_size`, which is global and split by `per_rank_batch`.
     token_budget: int | None = None
     max_seqs: int = 256  # ceiling on sequences per batch, whatever the budget allows
+    # Target for the drift invariant `lr*sqrt(steps)`. Set it and `lr` is DERIVED at startup
+    # from the realized steps/epoch -- the only point that count is known, since it depends
+    # on padded tokens and therefore on the corpus that was actually built. The qwen3
+    # multi_domain configs set this and omit `lr`; leave it None to use `lr` verbatim.
+    drift: float | None = None
 
 
 @dataclass

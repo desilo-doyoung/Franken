@@ -1,38 +1,24 @@
 """Run a batch of distillation experiments across the available GPUs and print one table.
 
-The remote workflow this exists for: pull, run this with the configs you want, copy the
-final block back. Each config is distilled and then scored by `embed_eval.py` (recall@10,
-STS-B) and `retrieval_eval.py` (nDCG@10 — the absolute number to quote), one config per GPU
-at a time, and everything a decision needs ends up in a single markdown table that pastes
-straight into `franken/models/qwen3/PROGRESS.md`.
+The remote workflow this exists for: pull, run it with the configs you want, copy the final block
+back. Per config: the corpus gates (once per corpus), distill, then `eval.py` (teacher agreement,
+in-distribution nDCG, external nDCG, and the coverage gap between the last two). Everything a
+decision needs lands in one markdown table for PROGRESS.md.
 
-Why a runner rather than a shell loop: results are collected from `--json`, not
-scraped from prose, so a reworded print can't corrupt the table; a crashed run degrades to
-one FAILED row with its log tail instead of losing the whole batch; and the GPU assignment
-is a work queue, so N configs over 2 devices finish in ceil(N/2) slots even when runs differ
-in length.
+Numbers come from each scorer's `--json`, never scraped from prose, so a reworded print cannot
+corrupt the table; a crashed run degrades to one FAILED row with its log tail. Configs are a work
+queue over the given cards, so N configs cost ceil(N/devices) slots even when runs differ in
+length. Pass only cards you actually own -- a co-tenant's idle GPU is not free capacity.
 
-Devices are passed as CUDA indices and exported per-subprocess as CUDA_VISIBLE_DEVICES, so
-`train.device: cuda` in the config always resolves to the intended card. Pass only cards you
-actually own — a co-tenant's idle GPU is not free capacity.
+`--ddp` switches the other way: one config at a time, spread over ALL devices via torchrun. The
+queue maximizes throughput; DDP maximizes what a SINGLE run can absorb.
 
-`--ddp` switches the other way: configs run one at a time, each spread over ALL the devices via
-torchrun. The queue maximizes throughput (N configs in ceil(N/devices) slots, zero communication);
-DDP maximizes the compute a SINGLE run can absorb, which is what a "push one config as far as it
-goes" experiment needs. `train.distill.batch_size` stays the global batch and is split across ranks,
-so raising it to keep the per-rank batch fixed also means raising LR by sqrt(batch) in the config.
-
-⚠️ Under `train.distill.token_budget` that last sentence does NOT apply: the budget is PER RANK, so
-tokens/step scale with the device count, and `batch_size` sizes only the evaluation loader.
-Steps/epoch is data-dependent — the trainer logs the real count at startup, and the LR must be
-reconciled against that, not against `corpus_size / batch_size`.
+Under `token_budget` the budget is PER RANK, so tokens/step scale with the device count and
+steps/epoch is data-dependent -- the trainer logs the real count at startup and derives lr from it.
 
 Usage:
-    uv run python scripts/qwen3/run_experiments.py --devices 0,1 \
-        configs/qwen3/depth19.yaml configs/qwen3/quad_silu_nopen.yaml
+    uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/depth19*.yaml
     uv run python scripts/qwen3/run_experiments.py --devices 2,3 --eval-only configs/qwen3/*.yaml
-    uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
-        configs/qwen3/depth28_exact.yaml
 """
 
 from __future__ import annotations
@@ -46,12 +32,11 @@ import sys
 import threading
 import time
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(os.path.dirname(_HERE))
-sys.path.insert(0, _ROOT)
+import common
+from franken.config import Config
+from franken.paths import RunPaths
 
-from franken.config import Config  # noqa: E402  (repo root must reach sys.path first)
-from franken.paths import RunPaths  # noqa: E402
+_ROOT = common.ROOT
 
 _PRINT_LOCK = threading.Lock()
 
@@ -130,14 +115,15 @@ def one_experiment(
     code = _run(
         [
             sys.executable,
-            os.path.join("scripts", "qwen3", "embed_eval.py"),
+            os.path.join("scripts", "qwen3", "eval.py"),
             "--config",
             config,
             "--student-ckpt",
             ckpt,
             "--json",
             metrics_path,
-        ],
+        ]
+        + (["--tasks", tasks] if tasks else []),
         device.split(",")[0],  # scoring is single-process; don't hand it the whole DDP card set
         log,
     )
@@ -146,43 +132,29 @@ def one_experiment(
         return result | {"error": f"eval exit {code}", "log": log}
 
     with open(metrics_path) as f:
-        result |= json.load(f)
-    _say(f"{tag}: recall@{result['k']} {result['recall']:.4f}  STS-B {result['stsb_student']:.4f}")
-
-    log = os.path.join(out_dir, f"{stem}.ndcg.log")
-    ndcg_path = os.path.join(out_dir, f"{stem}.ndcg.json")
-    _say(f"{tag}: ndcg -> {log}")
-    code = _run(
-        [
-            sys.executable,
-            os.path.join("scripts", "qwen3", "retrieval_eval.py"),
-            "--config",
-            config,
-            "--student-ckpt",
-            ckpt,
-            "--json",
-            ndcg_path,
-        ]
-        + (["--tasks", tasks] if tasks else []),
-        device.split(",")[0],
-        log,
-    )
-    if code != 0 or not os.path.exists(ndcg_path):
-        _say(f"{tag}: NDCG FAILED (exit {code})\n{_tail(log)}")
-        return result | {"error": f"ndcg exit {code}", "log": log}
-
-    with open(ndcg_path) as f:
-        nd = json.load(f)
-    # By name, not `|=`: both payloads carry `k` and `config`.
+        ev = json.load(f)
+    agree, ext = ev.get("agreement", {}), ev.get("external", {}).get("macro", {})
     result |= {
-        "ndcg": nd["student_avg"],
-        "ndcg_teacher": nd["teacher_avg"],
-        "ndcg_tasks": nd["tasks"],
-        "ndcg_n": len(nd.get("macro_tasks", [])),
+        "k": ev["k"],
+        "recall": agree.get(f"recall@{ev['k']}"),
+        "embed_dist": agree.get("embed_dist"),
+        "stsb_teacher": agree.get("stsb_teacher"),
+        "stsb_student": agree.get("stsb_student"),
+        "pool": agree.get("pool"),
+        "ndcg": ext.get("student"),
+        "ndcg_teacher": ext.get("teacher"),
+        "ndcg_n": ext.get("n"),
+        "ndcg_tasks": ev.get("external", {}).get("tasks", {}),
+        "macro_pair": ev.get("corpus", {}).get("macro_pair"),
+        "macro_qrels": ev.get("corpus", {}).get("macro_qrels"),
+        "coverage_gap": ev.get("coverage_gap"),
     }
     _say(
-        f"{tag}: nDCG@10 {result['ndcg']:.4f} (teacher {result['ndcg_teacher']:.4f}, "
-        f"{result['ndcg_n']} tasks)"
+        f"{tag}: recall@{result['k']} {result['recall']:.4f}  "
+        f"nDCG@10 {result['ndcg']:.4f} (teacher {result['ndcg_teacher']:.4f})  "
+        f"coverage gap {result['coverage_gap']:+.1f}%"
+        if result.get("ndcg") and result.get("coverage_gap") is not None
+        else f"{tag}: recall@{result['k']} {result['recall']:.4f}"
     )
     return result
 
@@ -290,13 +262,13 @@ def _require_corpus_cache(cfg, config_path: str) -> None:
     """
     if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
         return
-    from franken.data.embed_corpus import _cache_path  # noqa: PLC0415  (heavy import, rare path)
+    from franken.data.embed_corpus import cache_path  # noqa: PLC0415  (heavy import, rare path)
     from franken.tasks import build_task  # noqa: PLC0415
 
     tokenizer = build_task(cfg.train.task).build_tokenizer(cfg)
     cached = os.path.join(
         _ROOT,
-        _cache_path(
+        cache_path(
             cfg.train.corpus, "train", cfg.train.corpus_size, cfg.train.max_seq_len, tokenizer
         ),
     )
@@ -305,8 +277,28 @@ def _require_corpus_cache(cfg, config_path: str) -> None:
             f"{config_path}: no corpus cache for {cfg.train.corpus} "
             f"({cfg.train.corpus_size:,} texts) at {cached}\n"
             f"Build it once before the batch, or every run rebuilds it in parallel:\n"
-            f"    uv run python scripts/qwen3/build_corpus.py --config {config_path}"
+            f"    uv run python scripts/qwen3/corpus.py --build --config {config_path}"
         )
+
+
+def _preflight(cfg, config_path: str, out_dir: str) -> None:
+    """Run the corpus gates once per corpus, before any GPU time is spent.
+
+    Pure checks -- holdout disjoint and uniform, every source loading and scoreable, corpus_size
+    still matching the measurement -- and cheap next to a distill. `--build` is deliberately not
+    passed: the build is hours, and a missing cache already fails hard above.
+    """
+    if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
+        return
+    log = os.path.join(out_dir, "corpus.log")
+    _say(f"gate: corpus -> {log}")
+    code = _run(
+        [sys.executable, os.path.join("scripts", "qwen3", "corpus.py"), "--config", config_path],
+        "",  # no GPU needed
+        log,
+    )
+    if code != 0:
+        raise SystemExit(f"corpus gates FAILED (exit {code}) -- do not train\n{_tail(log)}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -325,7 +317,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--out", default="outputs/experiments", help="logs + per-run metrics JSON")
     p.add_argument(
         "--tasks",
-        help="nDCG tasks, comma-separated (default: every task in retrieval_eval). All scored "
+        help="external nDCG tasks, comma-separated (default: all of them). All scored "
         "tasks enter the macro, so a narrower list is a different, non-comparable number.",
     )
     args = p.parse_args(argv)
@@ -335,9 +327,15 @@ def main(argv: list[str] | None = None) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     pending: queue.Queue = queue.Queue()
+    gated: set[str] = set()  # the gates check a CORPUS, so once per corpus, not per config
     for i, config in enumerate(args.configs):
         cfg = Config.from_yaml(config)  # fail on a bad config now, not 30 min into the batch
+        # Cache check first: it is instant, and a missing cache means "go build" — no point paying
+        # the probe's streaming cost only to be told that.
         _require_corpus_cache(cfg, config)
+        if not args.eval_only and cfg.train.corpus not in gated:
+            _preflight(cfg, config, out_dir)
+            gated.add(cfg.train.corpus)
         pending.put((i, config))
     results: dict[int, dict] = {}
 

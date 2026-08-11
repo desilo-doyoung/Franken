@@ -1,34 +1,10 @@
-# [6] with the corpus swapped for `multi_domain` and the cap raised to full context: same deployable
-# stack (depth 19 + quad_silu d32 + targeted penalty), 6.4x the unique text and ~3.0B token-passes
-# instead of 442M.
+# multi_domain ladder, FHE-ops arm: depth 19 + quad_silu d32 + targeted penalty.
+# Pairs with depth28_multi_domain (training-change baseline) and depth19_multi_domain_exact (layer
+# cut alone). Corpus/length/batching/schedule/seed identical across the three, so one cache serves
+# all. Length, batching and epoch derivations live in PROGRESS.md.
 #
-# Not a single-lever contrast against [6] — data volume, sequence length and step count all move
-# together. It is a capability run; matched-steps ablations are what would split them.
-#
-# max_seq_len 1024 captures 95.9% of the corpus's available tokens (132.0 real tok/text vs 137.7
-# uncapped) at 0.3% of texts truncated; 128 captured 87.4 and truncated 36.7%. 32768 was rejected —
-# +6.7% tokens for a 21,662-token worst case, 512 Dynamo shape buckets, and a clamp-free FHE
-# polynomial domain widened to cover 0.1% of the data.
-#
-# Batching is token-budgeted, not fixed: at 1024 a shuffled batch pays ~950 padded tokens per text
-# for 132 real ones. Holding tokens/batch constant instead costs ~1.4x the 128-token run for 1.51x
-# the real content, and bounds activation memory by construction.
-#
-# 2 epochs, not 3: at fixed steps unique data beats repetition (216k x 1ep 0.8364 ~= 72k x 3ep
-# 0.8360, both > 24k x 9ep 0.8274), so the budget buys unique texts.
-#
-# lr holds the project's drift invariant lr*sqrt(steps) = 7.69e-3. Estimated ~25.4k steps/epoch
-# (1.67G padded tokens / 65,536 per step) => 50.9k over 2 epochs => 7.69e-3/sqrt(50900) = 3.4e-5.
-# The trainer LOGS the real steps/epoch at startup — reconcile before trusting the schedule.
-#
-# ⚠️ Build the corpus cache BEFORE run_experiments.py:
-#     uv run python scripts/qwen3/build_corpus.py --config configs/qwen3/depth19_multi_domain.yaml
-# The runner puts one config per GPU concurrently and each would otherwise stream and tokenize
-# 11.5M texts independently.
-#
-# ⚠️ `attn_impl: sdpa_causal` is what makes 1024 affordable (no B x 16 x S x S tensor, 64x larger
-# here than at 128). A `cgf` variant CANNOT use it — approximate softmaxes need `manual` — so it
-# needs its own token_budget, measured with bench_step.py before any long run.
+# Build the cache first, or each concurrent run re-streams 9.0M texts:
+#     uv run python scripts/qwen3/corpus.py --build --config configs/qwen3/depth19_multi_domain.yaml
 
 model:
   backend: qwen3
@@ -38,13 +14,14 @@ model:
   softmax_kwargs: {}
   activation: quad_silu
   activation_kwargs: { domain: 32 }
+  # What makes 1024 affordable. A cgf variant CANNOT use it — approximate softmaxes need `manual`.
   attn_impl: sdpa_causal
 
 distill:
   beta: 1.0
   hidden_layer_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
   range_penalty: 1.0
-  # ⚠️ STUDENT indices (teacher 2 and 27), derived on English-only data at max_seq_len 128.
+  # STUDENT indices (teacher 2 and 27), derived on English-only data at max_seq_len 128.
   # Re-derive from an unpenalized multi_domain student at 1024 before trusting them.
   range_penalty_layers: [2, 18]
 
@@ -53,7 +30,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  corpus_size: 16200000 # 16.2M x 123.8 measured tok/text = 2.0B tokens/epoch (corpus_probe.py)
+  corpus_size: 9000000 # corpus.py probe: 111.3 tok/text -> 1.00B/epoch, x2 epochs = 2.00B
   output_dir: outputs
   run_name: qwen3_depth19_multi_domain
   max_seq_len: 1024
@@ -70,12 +47,10 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 3.4e-5
+    # No `lr` on purpose: the trainer derives it from the realized step count and logs it.
+    drift: 7.69e-3
     epochs: 2
-    # 16384 = the measured-good 128 seqs x 128 tokens per rank from PROGRESS.md (192/rank, i.e.
-    # 24,576 tokens, is the allocator-thrashing cliff). Measured at depth 28; depth 19 likely has
-    # headroom, so re-sweep with bench_step.py.
-    token_budget: 16384
+    token_budget: 16384 # per RANK, measured at depth 28
     max_seqs: 256
     warmup_ratio: 0.1
     weight_decay: 0.01
