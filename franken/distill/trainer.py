@@ -20,6 +20,12 @@ from franken.tasks import build_task
 PRECISIONS = ("fp32", "tf32", "bf16")
 
 
+# The tuned reference for sqrt-batch LR scaling: bs 32 / lr 2e-5, fidelity-verified at depth 24
+# (recall@10 0.9070, identical to fp32/bs8/lr1e-5). Written down once -- a config asking for `lr:
+# null` scales from here. sqrt rather than linear because the optimizer is Adam-family.
+BASE_LR, BASE_BATCH = 2e-5, 32
+
+
 def _range_penalty(preacts, domain):
     """Squared distance past +/-domain, meaned over the OUT-OF-RANGE elements only
     (averaging over all elements would let the in-range bulk dilute the gradient on
@@ -151,18 +157,23 @@ class Distiller:
                     "and recorded results would not be comparable."
                 )
 
-        # `drift` derives the LR from the realized step count. Drift goes as `lr*sqrt(steps)`, and
-        # steps depend on *padded* tokens -- unknowable until the corpus is built, so a config that
-        # hardcodes `lr` is a config that goes stale. The last ladder ran 5.6% hot exactly that way.
-        # The resolved value is logged, and the configs carry `drift` instead of `lr`.
+        # `lr: null` derives the rate by sqrt-batch scaling. Under token budgeting the batch is not
+        # a config value: it floats to fill the budget, known only once the plan exists, so
+        # a hardcoded `lr` goes stale when the corpus or the rank count moves. The last ladder ran
+        # 5.6% hot exactly that way. The resolved value is logged.
         opt_cfg = self.cfg.train.distill
         total_steps = len(loader) * opt_cfg.epochs
         lr = opt_cfg.lr
-        if opt_cfg.drift:
-            lr = opt_cfg.drift / math.sqrt(total_steps)
+        if lr is None:
+            if batch_plan is None:
+                batch = float(opt_cfg.batch_size)  # already the GLOBAL batch
+            else:
+                seqs = sum(len(b) for b in batch_plan) / max(len(batch_plan), 1)
+                batch = seqs * self.dist.world_size
+            lr = BASE_LR * math.sqrt(batch / BASE_BATCH)
             self.log(
-                f"lr {lr:.4e} = drift {opt_cfg.drift:g} / sqrt({total_steps:,} steps)"
-                f" [{len(loader):,} steps/epoch x {opt_cfg.epochs} epochs]"
+                f"lr {lr:.4e} = {BASE_LR:g} * sqrt({batch:.0f} / {BASE_BATCH})"
+                f" [sqrt-batch scaling from the tuned reference]"
             )
         optimizer = AdamW(self.student.parameters(), lr=lr, weight_decay=opt_cfg.weight_decay)
         scheduler = get_linear_schedule_with_warmup(

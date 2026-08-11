@@ -85,23 +85,21 @@ class OptimConfig:
     distillation stays at its separately-tuned bs32/lr5e-5/3ep).
     """
 
-    # Defaults from the original BERT/GLUE papers.
-    lr: float = 5e-5
+    # Defaults from the original BERT/GLUE papers. `null` instead of a number means DERIVE it by
+    # sqrt-batch scaling from the tuned reference (franken.distill.trainer.BASE_LR / BASE_BATCH),
+    # using the batch the run actually assembles -- which token-budgeted batching only knows at
+    # startup. The resolved value is logged.
+    lr: float | None = 5e-5
     epochs: int = 3
     batch_size: int = 32
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
     # Per-rank padded tokens per batch, sequence count floating to fit (franken.distill.batching).
     # Set it and `batch_size` goes unused — training AND eval batch by tokens, so one knob bounds
-    # memory everywhere. ⚠️ Per RANK, so steps/epoch (hence drift) depends on the world size,
-    # unlike `batch_size`, which is global and split by `per_rank_batch`.
+    # memory everywhere. ⚠️ Per RANK, so tokens/step and steps/epoch both scale with the world
+    # size, unlike `batch_size`, which is global and split by `per_rank_batch`.
     token_budget: int | None = None
     max_seqs: int = 256  # ceiling on sequences per batch, whatever the budget allows
-    # Target for the drift invariant `lr*sqrt(steps)`. Set it and `lr` is DERIVED at startup
-    # from the realized steps/epoch -- the only point that count is known, since it depends
-    # on padded tokens and therefore on the corpus that was actually built. The qwen3
-    # multi_domain configs set this and omit `lr`; leave it None to use `lr` verbatim.
-    drift: float | None = None
 
 
 @dataclass

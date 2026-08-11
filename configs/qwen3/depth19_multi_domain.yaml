@@ -52,8 +52,8 @@ train:
     weight_decay: 0.01
 
   distill:
-    # No `lr` on purpose: the trainer derives it from the realized step count and logs it.
-    drift: 7.69e-3
+    # null = sqrt-batch scaled from the tuned reference; the trainer logs the value.
+    lr: null
     epochs: 2
     token_budget: 16384 # per RANK, measured at depth 28
     max_seqs: 256

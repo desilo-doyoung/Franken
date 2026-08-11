@@ -6,7 +6,7 @@
 # without quality, and `depth28_control_max` proved recall keeps moving after nDCG has saturated.
 #
 # Pairs with `depth28_control_max` (0.9790): same corpus, epochs and LR schedule shape, and sqrt-batch
-# scaling holds lr*sqrt(steps) = 7.69e-3 identical across the two, so drift is matched and the gap is depth.
+# scaling holds lr ~ sqrt(batch) across the two, so the schedule is matched and the gap is depth.
 #
 #   uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
 #       configs/qwen3/depth19_max.yaml

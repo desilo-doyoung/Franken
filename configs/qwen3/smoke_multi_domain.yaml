@@ -39,7 +39,7 @@ train:
     weight_decay: 0.01
 
   distill:
-    drift: 7.69e-3 # exercises the derive-lr-from-realized-steps path
+    lr: null # exercises the sqrt-batch derivation path
     epochs: 1
     token_budget: 16384
     max_seqs: 256
