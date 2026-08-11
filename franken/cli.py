@@ -84,12 +84,12 @@ def _delegate(backend: str, script: str, argv: list[str]) -> None:
     mod.main(argv)
 
 
-def cmd_corpus(args: argparse.Namespace) -> None:
+def cmd_corpus(args: argparse.Namespace, extra: list[str]) -> None:
     cfg = _load_config(args)
     _delegate(
         cfg.model.backend,
         "corpus.py",
-        ["--config", args.config] + (["--build"] if args.build else []),
+        ["--config", args.config] + (["--build"] if args.build else []) + extra,
     )
 
 

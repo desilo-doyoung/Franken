@@ -212,11 +212,15 @@ def corpus(m: Models, split: str, names: list[str]) -> dict:
     for kind in ("pair", "qrels"):
         if group := [r for r in rows.values() if r["tag"] == kind]:
             out[f"macro_{kind}"] = _print_macro(f"MACRO-{kind}", group)
-    print("\nby domain:")
-    for domain in sorted({r["domain"] for r in rows.values()}):
-        group = [r for r in rows.values() if r["domain"] == domain]
-        dt, ds = _macro(group)
-        print(f"  {domain:<14} n={len(group)}  {dt:.4f} -> {ds:.4f}  {100 * (ds - dt) / dt:+.1f}%")
+    # Pair tasks only. Mixing in qrels tasks would fold ~96%-train-row documents into a domain
+    # average, which is the reason the macros are split in the first place.
+    pair_rows = [r for r in rows.values() if r["tag"] == "pair"]
+    if pair_rows:
+        print("\nby domain (pair tasks only):")
+        for domain in sorted({r["domain"] for r in pair_rows}):
+            group = [r for r in pair_rows if r["domain"] == domain]
+            dt, ds = _macro(group)
+            print(f"  {domain:<14} n={len(group)}  {dt:.4f} -> {ds:.4f}  {ds - dt:+.4f}")
     return out
 
 
