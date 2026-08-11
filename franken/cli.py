@@ -1,9 +1,12 @@
-"""Command-line entrypoints: train-teacher | distill | eval.
+"""Command-line entrypoints: corpus | train-teacher | distill | eval.
+
+The single-config path, start to finish. For a batch over several configs and GPUs use
+`scripts/qwen3/run_experiments.py`, which does the same steps per config and prints one table.
 
 Usage:
-    python main.py train-teacher --config configs/bert/default.yaml
-    python main.py distill       --config configs/bert/default.yaml
-    python main.py eval          --config configs/bert/default.yaml --ckpt outputs/bert/student
+    python main.py corpus  --config configs/qwen3/depth19_multi_domain.yaml [--build]
+    python main.py distill --config configs/qwen3/depth19_multi_domain.yaml
+    python main.py eval    --config configs/qwen3/depth19_multi_domain.yaml
 """
 
 import argparse
@@ -58,32 +61,52 @@ def cmd_distill(args: argparse.Namespace) -> None:
     shutdown(d.dist)
 
 
-def cmd_eval(args: argparse.Namespace) -> None:
-    # Delegate to the per-model evaluator scripts/<backend>/evaluate.py — the single
-    # evaluation implementation. It scores both splits (validation + test) and both
-    # models (teacher + student), unlike Distiller.evaluate() which is validation-only.
+# Per backend, because the two tracks score different things: MRPC is accuracy/F1 over both splits,
+# qwen3 is teacher agreement + nDCG over three suites.
+_EVALUATOR = {"bert": "evaluate.py", "qwen3": "eval.py"}
+
+
+def _delegate(backend: str, script: str, argv: list[str]) -> None:
+    """Run scripts/<backend>/<script> in-process, with its own directory importable (the qwen3
+    scripts import a sibling `common`)."""
     import importlib.util
+    import os
+    import sys
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(repo_root, "scripts", backend, script)
+    if not os.path.exists(path):
+        raise SystemExit(f"No {script} for backend {backend!r} at {path}.")
+    sys.path.insert(0, os.path.dirname(path))
+    spec = importlib.util.spec_from_file_location(f"franken_{backend}_{script}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.main(argv)
+
+
+def cmd_corpus(args: argparse.Namespace) -> None:
+    cfg = _load_config(args)
+    _delegate(
+        cfg.model.backend,
+        "corpus.py",
+        ["--config", args.config] + (["--build"] if args.build else []),
+    )
+
+
+def cmd_eval(args: argparse.Namespace) -> None:
     import os
 
     cfg = _load_config(args)  # backend name selects which model's evaluator to run
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    script = os.path.join(repo_root, "scripts", cfg.model.backend, "evaluate.py")
-    if not os.path.exists(script):
-        raise SystemExit(
-            f"No evaluator for backend {cfg.model.backend!r} at {script} "
-            "(implement scripts/<backend>/evaluate.py)."
-        )
-    spec = importlib.util.spec_from_file_location("franken_evaluate_script", script)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
+    script = _EVALUATOR.get(cfg.model.backend)
+    if not script:
+        raise SystemExit(f"No evaluator registered for backend {cfg.model.backend!r}.")
     argv = ["--config", args.config]
     if args.ckpt:  # a directory holding pytorch_model.bin, or the file itself
         ckpt = (
             os.path.join(args.ckpt, "pytorch_model.bin") if os.path.isdir(args.ckpt) else args.ckpt
         )
         argv += ["--student-ckpt", ckpt]
-    mod.main(argv)
+    _delegate(cfg.model.backend, script, argv)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,7 +114,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_config(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--config", default="configs/bert/default.yaml", help="path to YAML config")
+        # Required, not defaulted: the config is the experiment, and these commands cost hours.
+        p.add_argument("--config", required=True, help="path to YAML config")
+
+    p_corpus = sub.add_parser("corpus", help="gate + measure the corpus; --build to cache it")
+    add_config(p_corpus)
+    p_corpus.add_argument("--build", action="store_true", help="also build the cache (hours)")
+    p_corpus.set_defaults(func=cmd_corpus)
 
     p_teacher = sub.add_parser(
         "train-teacher", help="prepare the task's teacher (fine-tune if needed)"
@@ -103,9 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_config(p_distill)
     p_distill.set_defaults(func=cmd_distill)
 
-    p_eval = sub.add_parser(
-        "eval", help="score teacher + student via scripts/<backend>/evaluate.py"
-    )
+    p_eval = sub.add_parser("eval", help="score teacher + student via the backend's evaluator")
     add_config(p_eval)
     p_eval.add_argument(
         "--ckpt", help="student checkpoint dir or .bin (default: <output_dir>/student)"

@@ -15,22 +15,25 @@ source of truth. Training itself is `main.py distill`, not here.
 
 ## The whole workflow
 
-```bash
-CFG=configs/qwen3/depth19_multi_domain.yaml
-
-uv run python scripts/qwen3/corpus.py --config $CFG              # gate + measure
-uv run python scripts/qwen3/corpus.py --config $CFG --build      # after pasting corpus_size
-uv run python main.py distill --config $CFG
-uv run python scripts/qwen3/eval.py --config $CFG \
-  --student-ckpt outputs/qwen3_depth19_multi_domain/student/pytorch_model.bin
-```
-
-Or one command for a whole ladder — it runs the corpus gates once per corpus, distills each config on
-its own GPU, scores it, and prints the table:
+One command. It gates the corpus once per corpus, **builds the cache if there isn't one**, distills
+each config on its own GPU, scores all three eval suites, and prints the table:
 
 ```bash
 uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/*_multi_domain*.yaml
 ```
+
+Or step by step for a single config, via the top-level CLI:
+
+```bash
+CFG=configs/qwen3/depth19_multi_domain.yaml
+uv run python main.py corpus  --config $CFG [--build]
+uv run python main.py distill --config $CFG
+uv run python main.py eval    --config $CFG [--ckpt outputs/<run>/student]
+```
+
+`--config` is **required**, never defaulted — the config decides what is measured, these scripts cost
+minutes to hours, and a wrong default is silent. (`parity_gate` and `precision_gate` are the
+exceptions: each is only meaningful for one config, so they keep theirs.)
 
 Pass only cards you own — `--devices` becomes `CUDA_VISIBLE_DEVICES` per subprocess, and a co-tenant's
 idle GPU is not free capacity. `--ddp` instead spreads one config across all devices; the default queue
@@ -51,10 +54,11 @@ that package's README for the design.
 3. **build** (`--build`) — builds the cache, reports the realized mix off the stored `source` column,
    and **fails if the realized token count misses `TOKEN_TARGET` by >2%**.
 
-Stages 1–2 are cheap and `run_experiments.py` runs them automatically before any GPU time; `--build`
-stays opt-in because it is the hours-long one. ⚠️ Never chain `corpus.py --build && run_experiments.py`:
-an HF retry thread raises SIGABRT during interpreter finalization *after* results print, so a
-successful build can exit 134.
+`run_experiments.py` runs stages 1–2 before any GPU time and adds stage 3 automatically when the
+cache is missing, so the build is not a separate manual step. ⚠️ If you do run `--build` by hand, note
+that an HF retry thread has historically raised SIGABRT during interpreter finalization *after*
+results print, so a successful build can exit **134** — `corpus.py` exits via `os._exit` to dodge
+that, and the runner trusts the `CORPUS OK` verdict over the exit code.
 
 `TOKEN_TARGET = 2e9` lives in exactly one place (`corpus.py`). `corpus_size` is measured once and
 pasted into the config. `lr` is never in a config — `distill.drift` is, and the trainer derives `lr`

@@ -80,31 +80,30 @@ Swap ops by editing the config (`model.softmax: cgf`, `model.activation: cheb_ge
 
 ### Qwen3-Embedding track
 
-Label-free: the teacher's pooled embedding *is* the target, so there is no teacher to fine-tune. Three
-commands, in order — or `run_experiments.py`, which does all of it per config and prints one table.
+Label-free: the teacher's pooled embedding *is* the target, so there is no teacher to fine-tune.
+
+**One command, corpus to table.** It gates the corpus, builds the cache if there isn't one, distills
+each config on its own GPU, scores all three eval suites, and writes a markdown table:
 
 ```bash
-CFG=configs/qwen3/depth19_multi_domain.yaml
-
-# 1. gate + measure the corpus, then build its cache (hours; every rank must cache-hit)
-uv run python scripts/qwen3/corpus.py --config $CFG            # holdout, scoreability, corpus_size
-uv run python scripts/qwen3/corpus.py --config $CFG --build    # after pasting corpus_size
-
-# 2. distill
-uv run python main.py distill --config $CFG                    # lr derived from distill.drift
-
-# 3. score: teacher agreement + in-distribution nDCG + external nDCG, and the coverage gap
-uv run python scripts/qwen3/eval.py --config $CFG \
-  --student-ckpt outputs/qwen3_depth19_multi_domain/student/pytorch_model.bin
-
-# ... or the whole ladder, gates included, one config per GPU
 uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/*_multi_domain*.yaml
 ```
 
-`corpus.py` refuses to pass its gates if a corpus source stops loading or becomes unscoreable, and
-`--build` fails if the built corpus misses the 2B token-pass budget by >2%. Run `eval.py` with **no**
-`--student-ckpt` on a full-depth config for the self-test: the student is then the teacher, so every
-delta must read ~0.
+Or step by step for a single config:
+
+```bash
+CFG=configs/qwen3/depth19_multi_domain.yaml
+uv run python main.py corpus  --config $CFG            # holdout, scoreability, corpus_size
+uv run python main.py corpus  --config $CFG --build    # cache it (hours, CPU + network only)
+uv run python main.py distill --config $CFG            # lr derived from distill.drift
+uv run python main.py eval    --config $CFG            # agreement + corpus + external nDCG
+```
+
+`--config` is required everywhere: the config *is* the experiment, and these commands cost hours.
+The corpus gates fail if a source stops loading or becomes unscoreable, and `--build` fails if the
+built corpus misses the 2B token-pass budget by >2%, printing the `corpus_size` that would hit it.
+Run `eval` with **no** `--student-ckpt` on a full-depth config for the self-test: the student is then
+the teacher, so every delta must read ~0.
 
 ```bash
 # Op-curriculum: distill the easier op set first, then warm-start and swap in the harder op.

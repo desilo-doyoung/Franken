@@ -18,7 +18,6 @@ import os
 import sys
 import time
 
-import common
 import datasets
 from franken.config import Config
 from franken.data.embed_corpus import SPLITS, describe, mix, profile, realized_mix, source_texts
@@ -159,7 +158,7 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--config", default=common.DEFAULT_CONFIG)
+    p.add_argument("--config", required=True, help="path to the experiment YAML")
     p.add_argument("--build", action="store_true", help="also build the cache (hours)")
     args = p.parse_args(argv)
 

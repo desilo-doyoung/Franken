@@ -25,16 +25,15 @@ from franken.config import Config  # noqa: E402
 from franken.models import build_backend  # noqa: E402
 from franken.tasks import build_task  # noqa: E402
 
-# One default for every script. They used to disagree, so two scorers run with no flags compared a
-# 128-token model against a 1024-token one.
-DEFAULT_CONFIG = "configs/qwen3/depth19_multi_domain.yaml"
-
 
 def parser(doc: str, json: bool = True) -> argparse.ArgumentParser:
+    # `--config` is REQUIRED, not defaulted: the config decides what gets measured and these
+    # scripts cost minutes to hours, so a wrong default is expensive and silent. The defaults used
+    # to disagree, and two scorers run bare compared a 128-token model against a 1024-token one.
     p = argparse.ArgumentParser(
         description=doc, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--config", default=DEFAULT_CONFIG)
+    p.add_argument("--config", required=True, help="path to the experiment YAML")
     p.add_argument("--student-ckpt", default=None, help="default: identity (seeded from teacher)")
     if json:
         p.add_argument("--json", help="also dump the metrics here, for scripted runs")

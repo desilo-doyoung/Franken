@@ -253,15 +253,11 @@ def report(results: list[dict], out_dir: str) -> None:
 _PREBUILD_THRESHOLD = 100_000
 
 
-def _require_corpus_cache(cfg, config_path: str) -> None:
-    """Refuse to start a big embed batch with no corpus cache.
-
-    Runs go one per device CONCURRENTLY, and `_build_split` is per process — with no cache every
-    run streams and tokenizes the whole corpus independently (hours each at 11.5M texts). A fresh
-    remote checkout never has one: `outputs/corpus_cache` is gitignored.
+def _cache_missing(cfg) -> bool:
+    """Is the tokenized train split absent? Runs go one per device CONCURRENTLY and `_build_split`
+    is per process, so with no cache every run streams and tokenizes the whole corpus independently
+    -- hours each at 9M texts. `outputs/corpus_cache` is gitignored, so a fresh checkout has none.
     """
-    if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
-        return
     from franken.data.embed_corpus import cache_path  # noqa: PLC0415  (heavy import, rare path)
     from franken.tasks import build_task  # noqa: PLC0415
 
@@ -272,33 +268,30 @@ def _require_corpus_cache(cfg, config_path: str) -> None:
             cfg.train.corpus, "train", cfg.train.corpus_size, cfg.train.max_seq_len, tokenizer
         ),
     )
-    if not os.path.isdir(cached):
-        raise SystemExit(
-            f"{config_path}: no corpus cache for {cfg.train.corpus} "
-            f"({cfg.train.corpus_size:,} texts) at {cached}\n"
-            f"Build it once before the batch, or every run rebuilds it in parallel:\n"
-            f"    uv run python scripts/qwen3/corpus.py --build --config {config_path}"
-        )
+    return not os.path.isdir(cached)
 
 
-def _preflight(cfg, config_path: str, out_dir: str) -> None:
-    """Run the corpus gates once per corpus, before any GPU time is spent.
+def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:
+    """Gate the corpus, and build its cache if it is missing — so this script is the whole workflow.
 
-    Pure checks -- holdout disjoint and uniform, every source loading and scoreable, corpus_size
-    still matching the measurement -- and cheap next to a distill. `--build` is deliberately not
-    passed: the build is hours, and a missing cache already fails hard above.
+    The gates are pure checks (holdout, every source loading and scoreable, `corpus_size` still
+    matching the measurement) and cheap next to a distill. The build is hours, so it runs only when
+    there is nothing cached.
     """
     if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
         return
     log = os.path.join(out_dir, "corpus.log")
-    _say(f"gate: corpus -> {log}")
+    _say(f"corpus: gates{' + BUILD (hours)' if build else ''} -> {log}")
     code = _run(
-        [sys.executable, os.path.join("scripts", "qwen3", "corpus.py"), "--config", config_path],
+        [sys.executable, os.path.join("scripts", "qwen3", "corpus.py"), "--config", config_path]
+        + (["--build"] if build else []),
         "",  # no GPU needed
         log,
     )
-    if code != 0:
-        raise SystemExit(f"corpus gates FAILED (exit {code}) -- do not train\n{_tail(log)}")
+    # 134/-6 is SIGABRT from an HF retry thread during interpreter shutdown, historically AFTER the
+    # results print. corpus.py exits via os._exit to dodge it, but trust the verdict over the code.
+    if code != 0 and not (code in (134, -6) and "CORPUS OK" in _tail(log, 4)):
+        raise SystemExit(f"corpus FAILED (exit {code}) — not training\n{_tail(log)}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -327,15 +320,20 @@ def main(argv: list[str] | None = None) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     pending: queue.Queue = queue.Queue()
-    gated: set[str] = set()  # the gates check a CORPUS, so once per corpus, not per config
+    done: set[str] = set()  # the corpus step is per CORPUS, not per config
     for i, config in enumerate(args.configs):
         cfg = Config.from_yaml(config)  # fail on a bad config now, not 30 min into the batch
-        # Cache check first: it is instant, and a missing cache means "go build" — no point paying
-        # the probe's streaming cost only to be told that.
-        _require_corpus_cache(cfg, config)
-        if not args.eval_only and cfg.train.corpus not in gated:
-            _preflight(cfg, config, out_dir)
-            gated.add(cfg.train.corpus)
+        if cfg.train.corpus not in done:
+            missing = _cache_missing(cfg)
+            if args.eval_only and missing:
+                raise SystemExit(
+                    f"{config}: no corpus cache for {cfg.train.corpus} "
+                    f"({cfg.train.corpus_size:,} texts) and --eval-only will not build one.\n"
+                    f"    uv run python scripts/qwen3/corpus.py --build --config {config}"
+                )
+            if not args.eval_only:
+                _corpus(cfg, config, out_dir, build=missing)
+            done.add(cfg.train.corpus)
         pending.put((i, config))
     results: dict[int, dict] = {}
 
