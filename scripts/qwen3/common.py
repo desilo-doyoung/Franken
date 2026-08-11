@@ -153,7 +153,7 @@ def pool_digest(pool) -> str:
     return h.hexdigest()
 
 
-def _embed_pool(m: Models, model, pool, cache: str | None):
+def embed_pool(m: Models, model, pool, cache: str | None = None):
     # Validate the cache on pool CONTENT, not size: a change to how pools are built holds the count
     # at 500x5000 while swapping the documents, which once served an old pool's teacher embeddings
     # against new ids and read as +107.7% on the identity self-test.
@@ -172,8 +172,15 @@ def _embed_pool(m: Models, model, pool, cache: str | None):
 
 @torch.no_grad()
 def score(m: Models, model, pool, cache: str | None = None) -> float:
-    """Mean nDCG@K over the pool's queries. The backend L2-norms its output, so this is cosine."""
-    d_emb, q_emb = _embed_pool(m, model, pool, cache)
+    return ndcg_pool(pool, *embed_pool(m, model, pool, cache))
+
+
+def ndcg_pool(pool, d_emb, q_emb) -> float:
+    """Mean nDCG@K over the pool's queries. The backend L2-norms its output, so this is cosine.
+
+    Split from the embedding step so a caller can reuse the embeddings — per-task fidelity
+    (recall@K, embed_dist) is then free rather than a second pass over the pool.
+    """
     total = 0.0
     for i in range(0, len(pool.q_ids), 256):  # the full queries x docs matrix is needlessly big
         sims = q_emb[i : i + 256] @ d_emb.T

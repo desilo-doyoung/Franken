@@ -1,7 +1,7 @@
 """Run a batch of distillation experiments across the available GPUs and print one table.
 
 The remote workflow this exists for: pull, run it with the configs you want, copy the final block
-back. Per config: the corpus gates (once per corpus), distill, then `eval.py` (teacher agreement,
+back. Per config: the corpus gates (once per corpus), distill, then `eval.py` (teacher fidelity,
 in-distribution nDCG, external nDCG, and the coverage gap between the last two). Everything a
 decision needs lands in one markdown table for PROGRESS.md.
 
@@ -133,14 +133,14 @@ def one_experiment(
 
     with open(metrics_path) as f:
         ev = json.load(f)
-    agree, ext = ev.get("agreement", {}), ev.get("external", {}).get("macro", {})
+    fid, ext = ev.get("fidelity", {}), ev.get("external", {}).get("macro", {})
     result |= {
         "k": ev["k"],
-        "recall": agree.get(f"recall@{ev['k']}"),
-        "embed_dist": agree.get("embed_dist"),
-        "stsb_teacher": agree.get("stsb_teacher"),
-        "stsb_student": agree.get("stsb_student"),
-        "pool": agree.get("pool"),
+        "recall": fid.get(f"recall@{ev['k']}"),
+        "embed_dist": fid.get("embed_dist"),
+        "stsb_teacher": fid.get("stsb_teacher"),
+        "stsb_student": fid.get("stsb_student"),
+        "pool": fid.get("pool"),
         "ndcg": ext.get("student"),
         "ndcg_teacher": ext.get("teacher"),
         "ndcg_n": ext.get("n"),

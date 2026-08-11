@@ -1,9 +1,10 @@
 """Score a checkpoint. Three suites, one script, because the reading is a comparison across them.
 
-    agreement  recall@10 + STS-B      did the student track THIS teacher? (recall@10 selects the
-                                      checkpoint, so it is the same function the trainer used)
-    corpus     nDCG@10, in-dist       quality lost where the corpus HAS coverage (held-out rows of
-                                      the training slices, so coverage is out of the equation)
+    fidelity   recall@10 + STS-B    did the student track THIS teacher, on the selection pool?
+                                    recall@10's teacher value is 1.0 BY CONSTRUCTION: it compares
+                                    neighbourhoods against the teacher, so there is nothing to show
+    corpus     nDCG@10 + recall@10  quality AND fidelity per training slice, off one pass of
+                                    embeddings. Held-out rows, so coverage is out of the equation
     external   nDCG@10, benchmarks    quality lost in the wild -- the number to quote
 
 `external - corpus` is the coverage gap, and that subtraction is the point: a small in-distribution
@@ -30,13 +31,13 @@ import common
 import datasets
 import torch
 import torch.nn.functional as F
-from common import K, Models, _embed_texts, load, score, teacher_cache
+from common import K, Models, _embed_texts, embed_pool, load, ndcg_pool, score, teacher_cache
 from franken.data.embed_corpus import INSTRUCT, Pool, mix, pool
 from franken.tasks.embed import recall_at_k
 from scipy.stats import spearmanr
 from torch.utils.data import DataLoader
 
-SUITES = ("agreement", "corpus", "external")
+SUITES = ("fidelity", "corpus", "external")
 
 
 # --------------------------------------------------------------- external benchmarks
@@ -103,31 +104,90 @@ EXTERNAL = {
 # --------------------------------------------------------------- suites
 
 
-def _pairs(m: Models, pools: dict[str, Pool], suite: str, extra: dict | None = None) -> dict:
-    """Score teacher and student over named pools. One row per pool, teacher cached."""
+def _pairs(
+    m: Models,
+    pools: dict[str, Pool],
+    suite: str,
+    kinds: dict | None = None,
+    shapes: dict | None = None,
+) -> dict:
+    """Score teacher and student over named pools. One row per pool, teacher cached.
+
+    `shapes` says what each task actually retrieves. Without it a reader cannot tell that `gooaq` is
+    question->answer while `specter` is anchor->cited-title against a hard negative — tasks of very
+    different difficulty whose scores are not comparable to each other.
+    """
     out = {}
     for name, p in pools.items():
+        kind = (kinds or {}).get(name, "")
+        shape = (shapes or {}).get(name, "")
         if not p:
-            print(f"{name:>18} {'':>14}   no queries", flush=True)
+            print(f"{name:>18} {kind:>6}   no queries", flush=True)
             continue
         t = score(m, m.teacher, p, cache=teacher_cache(suite, name, m.cfg))
         s = score(m, m.student, p)
-        tag = (extra or {}).get(name, "")
         print(
-            f"{name:>18} {tag:>14} {len(p.q_ids):>5} {len(p.d_ids):>6} "
-            f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}%",
+            f"{name:>18} {kind:>6} {len(p.q_ids):>5} {len(p.d_ids):>6} "
+            f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}%"
+            f"   {shape}",
             flush=True,
         )
         out[name] = {"teacher": t, "student": s, "queries": len(p.q_ids), "docs": len(p.d_ids)}
-        if tag:
-            out[name]["tag"] = tag
+        if kind:
+            out[name]["tag"] = kind
+        if shape:
+            out[name]["retrieves"] = shape
     return out
 
 
-def _header(what: str) -> None:
+def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict) -> dict:
+    """Quality AND fidelity per task, off one pass of embeddings.
+
+    nDCG@K says how much retrieval quality was lost; recall@K and embed_dist say how far the
+    student's geometry moved from the teacher's ON THAT SLICE. They answer different questions and
+    the tracker has read them as a ratio, so both belong per task rather than pooled.
+
+    Free: `score` was already embedding every pool twice and discarding the vectors.
+    """
+    out = {}
+    for name, p in pools.items():
+        kind, shape = kinds.get(name, ""), shapes.get(name, "")
+        if not p:
+            print(f"{name:>18} {kind:>6}   no queries", flush=True)
+            continue
+        td, tq = embed_pool(m, m.teacher, p, teacher_cache("corpus", name, m.cfg))
+        sd, sq = embed_pool(m, m.student, p)
+        t, s = ndcg_pool(p, td, tq), ndcg_pool(p, sd, sq)
+        # The WHOLE document pool, not a fixed slice. Both columns are read across MODELS within a
+        # task, where the pool is identical for teacher and student so its size cancels; truncating
+        # would only make recall@K easier (k/(n-1) rises) and so less sensitive to damage.
+        rec = recall_at_k(sd, td, K)
+        dist = 1.0 - F.cosine_similarity(sd, td, dim=-1).mean().item()
+        print(
+            f"{name:>18} {kind:>6} {len(p.q_ids):>5} {len(p.d_ids):>6} "
+            f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}% "
+            f"{rec:>9.4f} {dist:>8.4f}   {shape}",
+            flush=True,
+        )
+        out[name] = {
+            "teacher": t,
+            "student": s,
+            "queries": len(p.q_ids),
+            "docs": len(p.d_ids),
+            "tag": kind,
+            "retrieves": shape,
+            f"recall@{K}": rec,
+            "embed_dist": dist,
+        }
+    return out
+
+
+def _header(what: str, metric: str) -> None:
+    """The metric goes in the header, always. `recall@10` here means teacher-neighbour agreement and
+    MTEB's means something else, so an unlabelled column is a number waiting to be misread."""
     print(
-        f"\n== {what} ==\n{'task':>18} {'':>14} {'q':>5} {'docs':>6} "
-        f"{'teacher':>9} {'student':>9} {'delta':>9} {'rel':>8}",
+        f"\n== {what} -- {metric} ==\n{'task':>18} {'kind':>6} {'q':>5} {'docs':>6} "
+        f"{'teacher':>9} {'student':>9} {'delta':>9} {'rel':>8}   retrieves",
         flush=True,
     )
 
@@ -146,12 +206,13 @@ def _print_macro(label: str, rows: list[dict]) -> dict:
     return {"teacher": t, "student": s, "n": len(rows)}
 
 
-def agreement(m: Models) -> dict:
+def fidelity(m: Models) -> dict:
     """Teacher agreement on the corpus's own held-out pool, plus STS-B as a labelled anchor.
 
-    recall@10 is ALREADY relative to the teacher -- 1.0 is the ceiling, so quote it raw. It comes
-    from `franken.tasks.embed.recall_at_k`, the same function that selected the checkpoint, and is
-    only comparable at a fixed pool size. `embed_dist` misranks it and is logging only.
+    recall@10 is ALREADY relative to the teacher -- feeding it the teacher gives exactly 1.0, so the
+    ceiling is definitional and there is no teacher column to print. Quote it raw. It comes from
+    `franken.tasks.embed.recall_at_k`, the same function that selected the checkpoint, so this is
+    the number that chose it; comparable only at a fixed pool size. `embed_dist` misranks: logging.
     """
     data = m.task.datasets(m.tokenizer, m.cfg, splits=("validation",))
     ds = data["validation"].with_format("torch", columns=m.task.torch_columns())
@@ -174,14 +235,21 @@ def agreement(m: Models) -> dict:
         stsb[who] = spearmanr(F.cosine_similarity(a, b, dim=-1).numpy(), ds_sts["label"]).statistic
 
     out = {
+        "metric": f"recall@{K} (teacher-neighbour agreement), embed_dist, STS-B spearman",
         "pool": s_emb.size(0),
         f"recall@{K}": recall_at_k(s_emb, t_emb, K),
         "embed_dist": 1.0 - F.cosine_similarity(s_emb, t_emb, dim=-1).mean().item(),
         "stsb_teacher": stsb["teacher"],
         "stsb_student": stsb["student"],
     }
-    print(f"\n== agreement ({out['pool']} held-out texts) ==")
-    print(f"  recall@{K}     {out[f'recall@{K}']:.4f}   (teacher's top-{K} neighbours also found)")
+    print(
+        f"\n== agreement: {out['pool']} held-out corpus texts -- recall@{K} vs THIS teacher "
+        f"(not MTEB's recall) =="
+    )
+    print(
+        f"  recall@{K}     {out[f'recall@{K}']:.4f}   of the teacher's top-{K} neighbours found;"
+        f" teacher = 1.0 by construction"
+    )
     print(f"  embed_dist    {out['embed_dist']:.6f}   (per-vector; logging only, it misranks)")
     print(
         f"  STS-B         teacher {stsb['teacher']:.4f}  student {stsb['student']:.4f}  "
@@ -198,14 +266,32 @@ def corpus(m: Models, split: str, names: list[str]) -> dict:
     CORE-macro mistake.
     """
     sources = {s.name: s for s in mix(m.cfg.train.corpus)}
-    _header(f"corpus ({m.cfg.train.corpus}, split={split})")
+    print(
+        f"\n== corpus: held-out rows of {m.cfg.train.corpus}, split={split} ==\n"
+        f"   quality = nDCG@{K} (teacher/student/delta/rel);  fidelity = recall@{K} + embed_dist\n"
+        f"   both over the task's whole doc pool. Read across MODELS: `docs` differs per task and\n"
+        f"   both metrics are pool-size dependent, so task-to-task is not comparable\n"
+        f"{'task':>18} {'kind':>6} {'q':>5} {'docs':>6} {'teacher':>9} {'student':>9} "
+        f"{'delta':>9} {'rel':>8} {f'recall@{K}':>9} {'dist':>8}   retrieves",
+        flush=True,
+    )
     pools = {n: pool(sources[n], split, m.cfg.train.corpus) for n in names}
     kinds = {n: ("qrels" if sources[n].qrels else "pair") for n in names}
-    rows = _pairs(m, pools, "corpus", extra=kinds)
+    # For a qrels source the row holds no pair, so the adapter's shape describes the corpus text
+    # rather than the eval task — which is real judged queries run against it.
+    shapes = {
+        n: (
+            "judged query -> gold passage"
+            if sources[n].qrels
+            else getattr(sources[n].adapt, "shape", "")
+        )
+        for n in names
+    }
+    rows = _corpus_rows(m, pools, kinds, shapes)
     for n, r in rows.items():
         r["domain"] = sources[n].domain
 
-    out: dict = {"sources": rows}
+    out: dict = {"metric": f"ndcg@{K}", "sources": rows}
     if not rows:
         return out
     print()
@@ -216,7 +302,7 @@ def corpus(m: Models, split: str, names: list[str]) -> dict:
     # average, which is the reason the macros are split in the first place.
     pair_rows = [r for r in rows.values() if r["tag"] == "pair"]
     if pair_rows:
-        print("\nby domain (pair tasks only):")
+        print(f"\nby domain (pair tasks only, nDCG@{K}):")
         for domain in sorted({r["domain"] for r in pair_rows}):
             group = [r for r in pair_rows if r["domain"] == domain]
             dt, ds = _macro(group)
@@ -231,9 +317,14 @@ def external(m: Models, names: list[str]) -> dict:
     The macro is EVERY scored task. Two tasks ("CORE") read the depth-19 cut at +0.4% where five
     put it at -16.0%, inverting the ratio column too -- it reversed the conclusion, not the value.
     """
-    _header("external benchmarks")
-    rows = _pairs(m, {n: EXTERNAL[n]() for n in names}, "external")
-    out: dict = {"tasks": rows}
+    _header("external benchmarks", f"nDCG@{K}")
+    rows = _pairs(
+        m,
+        {n: EXTERNAL[n]() for n in names},
+        "external",
+        shapes=dict.fromkeys(names, "judged query -> gold document"),
+    )
+    out: dict = {"metric": f"ndcg@{K}", "tasks": rows}
     if rows:
         print()
         out["macro"] = _print_macro("MACRO", list(rows.values()))
@@ -268,8 +359,8 @@ def main(argv: list[str] | None = None) -> None:
     datasets.disable_progress_bars()
     m = load(args)
     result: dict = {"config": args.config, "student_ckpt": args.student_ckpt, "k": K}
-    if "agreement" in suites:
-        result["agreement"] = agreement(m)
+    if "fidelity" in suites:
+        result["fidelity"] = fidelity(m)
     if "corpus" in suites:
         result["corpus"] = corpus(m, args.split, names)
     if "external" in suites:

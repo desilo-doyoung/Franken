@@ -28,6 +28,7 @@ def pair(a: str, b: str) -> Callable[[dict], Record | None]:
             return None
         return Record(query=query, positives=(doc,) if doc else ())
 
+    adapt.shape = f"{a} -> {b}"
     return adapt
 
 
@@ -38,6 +39,9 @@ def triplet(row) -> Record | None:
     if not (query or pos or neg):
         return None
     return Record(query=query, positives=(pos,) if pos else (), negatives=(neg,) if neg else ())
+
+
+triplet.shape = "anchor -> positive (+hard negative)"
 
 
 def marco(row) -> Record | None:
@@ -53,6 +57,9 @@ def marco(row) -> Record | None:
     return Record(query=query, positives=positives, negatives=negatives)
 
 
+marco.shape = "web query -> selected passage (+9 near-misses)"
+
+
 def titled(row) -> Record | None:
     """A corpus dump: title + body, no query, so the source MUST declare `Qrels`. Space, not ". ",
     matching the f"{title} {text}" shape `eval.py` builds every external document with."""
@@ -60,6 +67,9 @@ def titled(row) -> Record | None:
     if len(text) < _MIN_DOC:
         return None
     return Record(docs=(f"{title} {text}" if title else text,))
+
+
+titled.shape = "no pair in the row -- needs Qrels"
 
 
 def paragraphs(row) -> Record | None:
@@ -75,6 +85,9 @@ def paragraphs(row) -> Record | None:
     if len(paras) == 1:
         return Record(docs=(paras[0],))
     return Record(query=paras[0], positives=(paras[1],), docs=tuple(paras[2:]))
+
+
+paragraphs.shape = "paragraph 1 -> paragraph 2 of the same article"
 
 
 def wikitext(row) -> Record | None:
@@ -96,4 +109,8 @@ def marco_side(kind: str) -> Callable[[dict], Record | None]:
         texts = tuple(p.strip() for p in row["passages"]["passage_text"] if p.strip())
         return Record(docs=texts) if texts else None
 
+    adapt.shape = f"no pair in the row -- {kind} side only"
     return adapt
+
+
+wikitext.shape = "no pair in the row -- smoke only"
