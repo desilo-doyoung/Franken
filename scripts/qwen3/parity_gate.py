@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import argparse
 import math
-import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
+import common  # noqa: F401  -- puts the repo root on sys.path; must precede any `franken` import
 import torch
 import torch.nn.functional as F
 from franken.config import Config

@@ -17,6 +17,7 @@ import os
 import sys
 import time
 
+import common  # noqa: F401  -- puts the repo root on sys.path; must precede any `franken` import
 import datasets
 from franken.config import Config
 from franken.data.embed_corpus import (

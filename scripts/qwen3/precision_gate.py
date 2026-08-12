@@ -10,17 +10,13 @@ out of the autocast region.
 """
 
 import argparse
-import os
-import sys
 
+import common  # noqa: F401  -- puts the repo root on sys.path; must precede any `franken` import
 import torch
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
-from franken.config import Config  # noqa: E402
-from franken.models import build_backend  # noqa: E402
-from franken.tasks import build_task  # noqa: E402
-from franken.tasks.embed import recall_at_k  # noqa: E402
+from franken.config import Config
+from franken.models import build_backend
+from franken.tasks import build_task
+from franken.tasks.embed import recall_at_k
 
 # A bf16 teacher must move the targets by MORE than the comparison band, otherwise the
 # "teacher stays fp32" rule is decoration rather than a real constraint.
