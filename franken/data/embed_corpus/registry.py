@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 
 from franken.data.embed_corpus import adapters
-from franken.data.embed_corpus.spec import Record
+from franken.data.embed_corpus.spec import WEB_SEARCH, Record
 
 
 @dataclass(frozen=True)
@@ -42,8 +42,15 @@ class Source:
     key: str | None = None
     hf_split: str = "train"  # the single upstream split to draw from; unused when key is None
     split_map: Mapping[str, str] = field(default_factory=dict)  # ours -> upstream, when key is None
-    prefix_query: bool = False
+    # Task description for the query-side instruction; None leaves the query bare. Baked into the
+    # cached corpus text, so changing it needs a `build._CACHE_VERSION` bump.
+    instruct: str | None = None
     qrels: Qrels | None = None
+    # False where the gold is one arbitrary member of an equally valid set (a sibling paragraph, a
+    # related title): the unpromoted siblings sit in the pool as unjudged false negatives, so nDCG
+    # scores an arbitrary tie-break. Such a source still yields pairs -- recall@10 and the split
+    # guarantee both need them -- so this governs REPORTING only, not `corpus.py`'s gate.
+    scores_ndcg: bool = True
 
 
 _WIKI_LANGS = ("zh", "ja", "ar", "ru", "es")  # scripts that move the teacher activation range
@@ -58,7 +65,7 @@ _MULTI_DOMAIN = [
         "v2.1",
         adapters.marco,
         0.209,
-        prefix_query=True,
+        instruct=WEB_SEARCH,
     ),
     # `titled`, not a pair: nq packs 35.3 passages per article, so keyed on `_id` the title
     # straddles splits 60.7% of the time and leaks the query side. Scored on judgements instead.
@@ -84,6 +91,8 @@ _MULTI_DOMAIN = [
         hf_split="corpus",
         qrels=Qrels("BeIR/hotpotqa-qrels"),
     ),
+    # `paragraphs` promotes one sibling to gold and sends the rest to `docs`, where they become
+    # unjudged false negatives -- so nDCG here scores which arbitrary sibling won. Fidelity only.
     Source(
         "wiki_en",
         "english_prose",
@@ -92,6 +101,7 @@ _MULTI_DOMAIN = [
         adapters.paragraphs,
         0.06,
         key="id",
+        scores_ndcg=False,
     ),
     # Informal prose: the `fiqa` domain, -13.5% at depth 19.
     Source(
@@ -141,6 +151,8 @@ _MULTI_DOMAIN = [
         0.08,
         key="abstract",
     ),
+    # Title -> *a* related title: many papers are equally related, so the promoted one is arbitrary.
+    # Teacher 0.2921 is the symptom, not the criterion -- the shape is.
     Source(
         "specter",
         "science",
@@ -149,6 +161,7 @@ _MULTI_DOMAIN = [
         adapters.triplet,
         0.03,
         key="anchor",
+        scores_ndcg=False,
     ),
     # CSN is library functions; the instruction sets are problem -> solution, i.e. APPS's task shape
     # without being APPS, so they close that genre gap while `code_apps` stays a clean canary.
@@ -189,6 +202,7 @@ _MULTI_DOMAIN = [
         adapters.paragraphs,
         0.026,
         key="id",
+        scores_ndcg=False,  # same arbitrary-sibling gold as wiki_en
     )
     for lang in _WIKI_LANGS
 ]
@@ -227,7 +241,7 @@ PRESETS: dict[str, list[Source]] = {
             "v1.1",
             adapters.marco_side("query"),
             0.2,
-            prefix_query=True,
+            instruct=WEB_SEARCH,
         ),
         Source(
             "msmarco_passage",

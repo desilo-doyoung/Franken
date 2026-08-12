@@ -15,13 +15,14 @@ import datasets
 
 from franken.data.embed_corpus.build import records
 from franken.data.embed_corpus.registry import Source
-from franken.data.embed_corpus.spec import INSTRUCT, eval_pair, split_of
+from franken.data.embed_corpus.spec import eval_pair, instruct, split_of
 
 QUERIES, DOCS = 500, 5_000
 
 # Bump alongside an adapter change: pools are text, so a cleaning edit invalidates them.
+# v2: SPLIT_PCT 2/2 -> 1/4 moves pool membership; per-source `instruct`.
 _CACHE_DIR = "outputs/corpus_pool_cache"
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2
 
 
 @dataclass
@@ -77,9 +78,9 @@ def _from_pairs(src: Source, split: str, n_queries: int, n_docs: int) -> Pool:
             if len(pool.q_ids) < n_queries:
                 qid = f"q{len(pool.q_ids)}"
                 pool.q_ids.append(qid)
-                # Prefixed only where the corpus prefixes this source, so the eval matches training
-                # in format as well as content.
-                pool.q_texts.append(INSTRUCT.format(query) if src.prefix_query else query)
+                # The source's own instruction, so the eval matches training in format as well as
+                # content -- a query the student never saw prefixed must not arrive prefixed here.
+                pool.q_texts.append(instruct(src.instruct, query))
                 # `force`: a gold must be in the pool even once the doc cap is reached, else the
                 # query is unanswerable and scores 0 for a reason that is not the model.
                 pool.qrels[qid] = {docs.add(g, force=True): 1.0 for g in golds}
@@ -111,7 +112,7 @@ def _from_qrels(src: Source, split: str, n_queries: int, n_docs: int) -> Pool:
         if qid in rel and len(q_ids) < n_queries:
             text = row["text"].strip()
             q_ids.append(qid)
-            q_texts.append(INSTRUCT.format(text) if src.prefix_query else text)
+            q_texts.append(instruct(src.instruct, text))
     wanted = {pid for qid in q_ids for pid in rel[qid]}
 
     # Stream the corpus rather than download it whole (BeIR/nq is 2.68M documents), and run the

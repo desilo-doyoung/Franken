@@ -8,8 +8,11 @@
 a small in-distribution deficit with a large external one means the fix is data; both large means
 it is capacity and more data will not help.
 
+Validation selects, test reports: the corpus suite defaults to `--split test` because validation is
+what `Distiller.train` scores recall@10 on to pick the checkpoint.
+
     uv run python scripts/qwen3/eval.py --student-ckpt outputs/<run>/student/pytorch_model.bin
-    uv run python scripts/qwen3/eval.py --suite corpus --split test        # touched once
+    uv run python scripts/qwen3/eval.py --suite corpus --split validation  # what selection saw
     uv run python scripts/qwen3/eval.py --config configs/qwen3/depth28_multi_domain.yaml
 
 With no --student-ckpt the student is seeded from the teacher, so at FULL depth every delta reads
@@ -26,7 +29,7 @@ import datasets
 import torch
 import torch.nn.functional as F
 from common import K, Models, _embed_texts, embed_pool, load, ndcg_pool, score, teacher_cache
-from franken.data.embed_corpus import INSTRUCT, Pool, mix, pool
+from franken.data.embed_corpus import Pool, instruct, mix, pool
 from franken.tasks.embed import recall_at_k
 from scipy.stats import spearmanr
 from torch.utils.data import DataLoader
@@ -37,7 +40,7 @@ SUITES = ("fidelity", "corpus", "external")
 # --------------------------------------------------------------- external benchmarks
 
 
-def _assemble(corpus, queries, qrels_rows, id_field: str) -> Pool:
+def _assemble(corpus, queries, qrels_rows, id_field: str, task: str) -> Pool:
     qrels: dict[str, dict[str, float]] = {}
     for r in qrels_rows:
         rel = float(r["score"])  # XPQA stores it as a string
@@ -49,7 +52,7 @@ def _assemble(corpus, queries, qrels_rows, id_field: str) -> Pool:
     for r in queries:
         if (qid := str(r[id_field])) in qrels:
             q_ids.append(qid)
-            q_texts.append(INSTRUCT.format(r["text"].strip()))
+            q_texts.append(instruct(task, r["text"].strip()))
 
     # document = title + text, and documents take no instruction prefix.
     d_ids = [str(x) for x in corpus[id_field]]
@@ -58,17 +61,18 @@ def _assemble(corpus, queries, qrels_rows, id_field: str) -> Pool:
     return Pool(d_ids=d_ids, d_texts=d_texts, q_ids=q_ids, q_texts=q_texts, qrels=qrels)
 
 
-def _beir(repo: str) -> Pool:
+def _beir(repo: str, task: str) -> Pool:
     """BEIR/MTEB layout: corpus(_id,title,text), queries(_id,text), qrels in "default"/"test"."""
     return _assemble(
         datasets.load_dataset(repo, "corpus", split="corpus"),
         datasets.load_dataset(repo, "queries", split="queries"),
         datasets.load_dataset(repo, "default", split="test"),
         "_id",
+        task,
     )
 
 
-def _xpqa(pair: str) -> Pool:
+def _xpqa(pair: str, task: str) -> Pool:
     """XPQA layout: one config per language pair, everything in split "test", `id` not `_id`."""
     repo = "mteb/XPQARetrieval"
     return _assemble(
@@ -76,6 +80,7 @@ def _xpqa(pair: str) -> Pool:
         datasets.load_dataset(repo, f"{pair}-queries", split="test"),
         datasets.load_dataset(repo, f"{pair}-qrels", split="test"),
         "id",
+        task,
     )
 
 
@@ -84,14 +89,38 @@ def _xpqa(pair: str) -> Pool:
 # which rules out the obvious picks -- the MS MARCO / NQ / HotpotQA benchmarks (the corpus takes
 # 27 / 10 / 7% of those very corpora), CoIR's CodeSearchNet and `cosqa` (CodeSearchNet-derived, as
 # is the corpus), and MIRACL / Mr.TyDi (Wikipedia-derived).
+#
+#
+# (loader, instruction). Each task names what IT retrieves -- one web-search string over all five
+# was the previous state and is wrong for four of them. The instruction is separate from the loader
+# so `instruct_gate.py` can rebuild the same pool under a different one.
 EXTERNAL = {
-    "nfcorpus": partial(_beir, "mteb/nfcorpus"),  # 3.6k docs, biomedical, GRADED rel (0-2)
-    "scifact": partial(_beir, "mteb/scifact"),  # 5.2k docs, claim verification, binary
-    "fiqa": partial(_beir, "mteb/fiqa"),  # 58k docs / 1.7k q, informal web prose
-    "xpqa_cmn": partial(_xpqa, "cmn-cmn"),  # 1.7k docs / 824 q, zh = best-covered language
+    # 3.6k docs, biomedical, GRADED rel (0-2)
+    "nfcorpus": (
+        partial(_beir, "mteb/nfcorpus"),
+        "Given a medical question, retrieve documents that best answer it",
+    ),
+    # 5.2k docs, claim verification, binary
+    "scifact": (
+        partial(_beir, "mteb/scifact"),
+        "Given a scientific claim, retrieve documents that support or refute the claim",
+    ),
+    # 58k docs / 1.7k q, informal web prose
+    "fiqa": (
+        partial(_beir, "mteb/fiqa"),
+        "Given a financial question, retrieve user replies that best answer the question",
+    ),
+    # 1.7k docs / 824 q, zh = best-covered language
+    "xpqa_cmn": (
+        partial(_xpqa, "cmn-cmn"),
+        "Given a product question, retrieve passages that answer the question",
+    ),
     # Scores the code slice. It read 0.0797 at max_seq_len 128 purely because 92.8% of its QUERIES
     # overflowed; at 1024 they fit. Confirm the teacher clears that floor before trusting it.
-    "code_apps": partial(_beir, "CoIR-Retrieval/apps"),
+    "code_apps": (
+        partial(_beir, "CoIR-Retrieval/apps"),
+        "Given a programming problem, retrieve the code that solves it",
+    ),
 }
 
 
@@ -123,11 +152,14 @@ def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes: dict | None = 
     return out
 
 
-def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict) -> dict:
+def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict, ndcg: dict) -> dict:
     """Quality AND fidelity per task, off one pass of embeddings (free: `score` already embedded
     every pool twice and threw the vectors away). nDCG@K is quality lost; recall@K and embed_dist
     are how far the student's geometry moved ON THAT SLICE. Different questions, read as a ratio,
-    so both belong per task rather than pooled."""
+    so both belong per task rather than pooled.
+
+    `ndcg` is `Source.scores_ndcg`: blank rather than caveated where the gold is arbitrary, because
+    a printed number gets read as one."""
     out = {}
     for name, p in pools.items():
         kind, shape = kinds.get(name, ""), shapes.get(name, "")
@@ -136,27 +168,31 @@ def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict) -
             continue
         td, tq = embed_pool(m, m.teacher, p, teacher_cache("corpus", name, m.cfg))
         sd, sq = embed_pool(m, m.student, p)
-        t, s = ndcg_pool(p, td, tq), ndcg_pool(p, sd, sq)
         # The WHOLE doc pool: read across MODELS within a task, so pool size cancels, and
         # truncating would only make recall@K easier (k/(n-1) rises) and less sensitive to damage.
         rec = recall_at_k(sd, td, K)
         dist = 1.0 - F.cosine_similarity(sd, td, dim=-1).mean().item()
-        print(
-            f"{name:>18} {kind:>6} {len(p.q_ids):>5} {len(p.d_ids):>6} "
-            f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}% "
-            f"{rec:>9.4f} {dist:>8.4f}   {shape}",
-            flush=True,
-        )
-        out[name] = {
-            "teacher": t,
-            "student": s,
+        row = {
             "queries": len(p.q_ids),
             "docs": len(p.d_ids),
             "tag": kind,
             "retrieves": shape,
             f"recall@{K}": rec,
             "embed_dist": dist,
+            "scores_ndcg": ndcg.get(name, True),
         }
+        if row["scores_ndcg"]:
+            t, s = ndcg_pool(p, td, tq), ndcg_pool(p, sd, sq)
+            row |= {"teacher": t, "student": s}
+            quality = f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}%"
+        else:
+            quality = f"{'-':>9} {'-':>9} {'-':>9} {'-':>8}"
+        print(
+            f"{name:>18} {kind:>6} {len(p.q_ids):>5} {len(p.d_ids):>6} {quality} "
+            f"{rec:>9.4f} {dist:>8.4f}   {shape}",
+            flush=True,
+        )
+        out[name] = row
     return out
 
 
@@ -264,7 +300,8 @@ def corpus(m: Models, split: str, names: list[str]) -> dict:
         )
         for n in names
     }
-    rows = _corpus_rows(m, pools, kinds, shapes)
+    ndcg = {n: sources[n].scores_ndcg for n in names}
+    rows = _corpus_rows(m, pools, kinds, shapes, ndcg)
     for n, r in rows.items():
         r["domain"] = sources[n].domain
 
@@ -272,12 +309,20 @@ def corpus(m: Models, split: str, names: list[str]) -> dict:
     if not rows:
         return out
     print()
+    # Every macro is over scored tasks only -- a suppressed task has no nDCG to average.
+    scored = [r for r in rows.values() if r["scores_ndcg"]]
+    if blind := [n for n, r in rows.items() if not r["scores_ndcg"]]:
+        share = sum(sources[n].weight for n in blind)
+        print(
+            f"nDCG not scored ({len(blind)}, {share:.0%} of the corpus): {', '.join(blind)}\n"
+            f"  gold is one arbitrary member of an equally valid set; read their recall@{K}.",
+        )
     for kind in ("pair", "qrels"):
-        if group := [r for r in rows.values() if r["tag"] == kind]:
+        if group := [r for r in scored if r["tag"] == kind]:
             out[f"macro_{kind}"] = _print_macro(f"MACRO-{kind}", group)
     # Pair tasks only. Mixing in qrels tasks would fold ~96%-train-row documents into a domain
     # average, which is the reason the macros are split in the first place.
-    pair_rows = [r for r in rows.values() if r["tag"] == "pair"]
+    pair_rows = [r for r in scored if r["tag"] == "pair"]
     if pair_rows:
         print(f"\nby domain (pair tasks only, nDCG@{K}):")
         for domain in sorted({r["domain"] for r in pair_rows}):
@@ -297,7 +342,7 @@ def external(m: Models, names: list[str]) -> dict:
     _header("external benchmarks", f"nDCG@{K}")
     rows = _pairs(
         m,
-        {n: EXTERNAL[n]() for n in names},
+        {n: EXTERNAL[n][0](EXTERNAL[n][1]) for n in names},
         "external",
         shapes=dict.fromkeys(names, "judged query -> gold document"),
     )
@@ -313,7 +358,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--suite", default=",".join(SUITES), help=f"comma-separated: {', '.join(SUITES)}"
     )
-    p.add_argument("--split", default="validation", choices=("validation", "test"))
+    # test, not validation: validation selects the checkpoint (`Distiller.train` -> recall@10), so
+    # reporting there would score the split that picked the model. Selection never reads test.
+    p.add_argument("--split", default="test", choices=("validation", "test"))
     p.add_argument("--sources", default="", help="corpus suite: subset of the mix; default all")
     p.add_argument(
         "--tasks", default=",".join(EXTERNAL), help="external suite: subset; default all"

@@ -5,17 +5,29 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
-# Task-specific by design (the model card recommends tailoring it, worth 1-5%). MS MARCO is web
-# search, so this is its matching instruction.
-INSTRUCT = (
-    "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:{}"
-)
+# The wire format, verified against this checkpoint's `config_sentence_transformers.json` rather
+# than model-card prose: no space after `Query:`. Only the task description varies per source, so
+# the format lives here once and nobody re-types the colon.
+_INSTRUCT_FMT = "Instruct: {task}\nQuery:{query}"
+
+# Task descriptions. Tailoring is worth 1-5% per the model card, and one string reused across
+# unrelated tasks is the defect this replaces -- so a source names the task it actually retrieves.
+WEB_SEARCH = "Given a web search query, retrieve relevant passages that answer the query"
+
+
+def instruct(task: str | None, query: str) -> str:
+    """Wrap a query in its task instruction. `None` means an unprefixed query: correct for a
+    symmetric task, where there is no query/document asymmetry to instruct."""
+    return _INSTRUCT_FMT.format(task=task, query=query) if task else query
+
 
 SPLITS = ("train", "validation", "test")
 
 # Per split, NOT cumulative bounds: the previous `VAL_PCT, TEST_PCT = 2, 4` read as a 4% test split
-# and was really 2%. Small because eval needs ~5k documents and most sources over-supply 2-50x.
-SPLIT_PCT = {"validation": 2, "test": 2}
+# and was really 2%. Validation only ever draws `build.VAL_POOL` (500) texts for checkpoint
+# selection, so 1% is ~50x what it needs; test fills 500x5000 retrieval pools per source and at 2%
+# three sources could not (codefeedback 2,900 / glaive_code 2,726 / stackexchange 4,365 docs).
+SPLIT_PCT = {"validation": 1, "test": 4}
 
 
 def split_of(key: str) -> str:
@@ -38,8 +50,8 @@ class Record:
     docs: tuple[str, ...] = ()  # corpus text forming no pair
 
 
-def corpus_texts(rec: Record, prefix_query: bool) -> list[str]:
-    q = [INSTRUCT.format(rec.query) if prefix_query else rec.query] if rec.query else []
+def corpus_texts(rec: Record, task: str | None) -> list[str]:
+    q = [instruct(task, rec.query)] if rec.query else []
     return q + [*rec.positives, *rec.negatives, *rec.docs]
 
 

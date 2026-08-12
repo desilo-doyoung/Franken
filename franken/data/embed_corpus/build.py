@@ -23,8 +23,10 @@ from franken.data.embed_corpus.spec import Record, corpus_texts, eval_pair, spli
 # that answered it. Manual rather than a content digest, which would discard an hours-long build
 # on a cosmetic edit; the cost is that forgetting to bump serves stale text silently.
 # v5: one Record per row (adapter rewrite); marco emits positives before negatives.
+# v6: SPLIT_PCT 2/2 -> 1/4 (split membership is baked in, not part of the key); per-source
+#     `instruct` replaces `prefix_query`.
 _CACHE_DIR = "outputs/corpus_cache"
-_CACHE_VERSION = 5
+_CACHE_VERSION = 6
 
 # Shard-order shuffling does the global mixing, so the buffer stays small — a big one only adds
 # download latency, and the assembled corpus is shuffled anyway.
@@ -58,7 +60,7 @@ def records(src: Source, split: str) -> Iterator[Record]:
 def source_texts(src: Source, split: str, n: int) -> list[str]:
     out: list[str] = []
     for rec in records(src, split):
-        out += corpus_texts(rec, src.prefix_query)
+        out += corpus_texts(rec, src.instruct)
         if len(out) >= n:
             break
     return out[:n]
@@ -181,7 +183,7 @@ def profile(
         try:
             texts, pairs = [], 0
             for rec in records(src, split):
-                texts += corpus_texts(rec, src.prefix_query)
+                texts += corpus_texts(rec, src.instruct)
                 pairs += eval_pair(rec) is not None
                 if len(texts) >= n:
                     break

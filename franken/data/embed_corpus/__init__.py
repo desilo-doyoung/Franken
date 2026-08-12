@@ -16,17 +16,18 @@ from franken.data.embed_corpus.build import (
 )
 from franken.data.embed_corpus.evalset import Pool, pool
 from franken.data.embed_corpus.registry import Qrels, Source, mix
-from franken.data.embed_corpus.spec import INSTRUCT, SPLITS, Record
+from franken.data.embed_corpus.spec import SPLITS, WEB_SEARCH, Record, instruct
 
 __all__ = [
-    "INSTRUCT",
     "SPLITS",
+    "WEB_SEARCH",
     "Pool",
     "Qrels",
     "Record",
     "Source",
     "cache_path",
     "describe",
+    "instruct",
     "load_embed_corpus",
     "mix",
     "pool",
