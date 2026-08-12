@@ -25,14 +25,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch
-from datasets import load_dataset
 from franken.config import Config
-from franken.data.mrpc import compute_metrics
+from franken.data.mrpc import compute_metrics, load_mrpc
 from franken.models import build_backend
 from franken.paths import RunPaths
 from franken.tasks import build_task
 from torch.utils.data import DataLoader
-from transformers import DataCollatorWithPadding
 
 
 @torch.no_grad()
@@ -50,23 +48,16 @@ def evaluate_split(model, backend, task, dl: DataLoader, device: torch.device) -
 
 
 def build_loaders(tokenizer, task, splits, max_seq_len, batch_size):
-    ds = load_dataset("nyu-mll/glue", "mrpc")
-    ds = ds.map(
-        lambda b: tokenizer(
-            b["sentence1"], b["sentence2"], truncation=True, max_length=max_seq_len
-        ),
-        batched=True,
-    )
-    collator = DataCollatorWithPadding(tokenizer)
+    data = load_mrpc(tokenizer, max_seq_len, splits=tuple(splits))
     cols = task.torch_columns()
     loaders = {}
     for split in splits:
         # Guard: a split with only -1 labels is unlabeled (can't score locally).
-        if set(ds[split].unique("label")) == {-1}:
+        if set(data[split].unique("label")) == {-1}:
             print(f"[skip] split '{split}' has no public labels (all -1).")
             continue
-        d = ds[split].with_format("torch", columns=cols)
-        loaders[split] = DataLoader(d, batch_size=batch_size, collate_fn=collator)
+        d = data[split].with_format("torch", columns=cols)
+        loaders[split] = DataLoader(d, batch_size=batch_size, collate_fn=data["collator"])
     return loaders
 
 
@@ -108,7 +99,6 @@ def main(argv: list[str] | None = None) -> None:
         student.load_state_dict(torch.load(sc, map_location=device))
         models["student"] = student.to(device)
 
-    # Print table.
     print(f"\n{'model':10s}{'split':13s}{'accuracy':>10s}{'f1':>9s}")
     print("-" * 42)
     for name, model in models.items():

@@ -1,5 +1,5 @@
-"""Periodic progress lines for long distillation runs, which otherwise emit one line per epoch —
-hours of silence in which a healthy run is indistinguishable from a hung one."""
+"""Periodic progress lines for long runs, which otherwise emit one line per epoch -- hours of
+silence in which a healthy run is indistinguishable from a hung one."""
 
 import time
 
@@ -10,11 +10,10 @@ LOG_EVERY = 50
 
 
 class ProgressLogger:
-    # Not a tqdm bar: this output lands in a redirected log file, where tqdm's carriage returns
-    # collapse into one unreadable line.
-    def __init__(self, total_steps, world_size, device, log, enabled=True, every=LOG_EVERY):
+    # Not tqdm: this lands in a redirected log file, where carriage returns collapse into one line.
+    def __init__(self, total_steps, world_size, device, log, enabled=True):
         self.total_steps, self.world_size, self.log = total_steps, world_size, log
-        self.enabled, self.every = enabled, every
+        self.enabled, self.every = enabled, LOG_EVERY
         self.step_i = 0
         self._loss = torch.zeros((), device=device)
         self._tokens = torch.zeros((), device=device)

@@ -1,10 +1,5 @@
-"""Task interface.
-
-A ``Task`` owns everything about *what* is being learned, independent of the model
-family: the tokenizer, the dataset/collator, the batch->forward-kwargs mapping, the
-distillation loss, the checkpoint-selection metric, and whether the teacher needs
-fine-tuning at all. Swapping self-distillation for a fine-tuned downstream task is a
-``Task`` swap with no ``ModelBackend`` change.
+"""Task interface: everything about *what* is being learned, independent of the model family. So
+swapping self-distillation for a fine-tuned downstream task needs no ``ModelBackend`` change.
 """
 
 from __future__ import annotations
@@ -54,12 +49,8 @@ class Task(ABC):
         split: str = "validation",
         teacher: nn.Module | None = None,
     ) -> dict:
-        """Evaluate ``model`` on ``split``; return a metrics dict containing the
-        key returned by ``select_metric``.
-
-        ``teacher`` is supplied by callers that have one (``Distiller`` holds both
-        models). Tasks scored against labels ignore it; label-free tasks whose metric
-        *is* teacher agreement (embedding self-distillation) require it."""
+        """Metrics dict containing ``select_metric``'s key. Tasks scored against labels ignore
+        ``teacher``; label-free tasks whose metric *is* teacher agreement require it."""
 
     def train_teacher(self, cfg: Config) -> str | None:
         """Fine-tune and save a teacher if the task needs one; return its path.

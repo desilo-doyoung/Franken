@@ -1,14 +1,9 @@
-"""Qwen3-Embedding backend: the from-scratch Qwen3 student + HF Qwen3 teacher.
+"""Qwen3-Embedding backend: the from-scratch ``Qwen3Model`` student (RMSNorm, RoPE, GQA with
+QK-norm, SwiGLU MLP) against the frozen HF ``AutoModel`` backbone as teacher.
 
-Builds the from-scratch ``Qwen3Model`` student (RMSNorm, RoPE, GQA attention with
-QK-norm, SwiGLU MLP; softmax/activation injected from ``franken.ops``), seeds it
-from the HF teacher via ``init_student_from_teacher`` (name-matched, strided for
-depth reduction), and loads the frozen HF ``AutoModel`` backbone as teacher.
-
-The distillation output contract is the *pooled sentence embedding*: Qwen3-Embedding
-pools the **last non-pad token** of the final hidden state and L2-normalizes it.
-Both models are pooled here by the same code path, so the task's loss only ever
-compares like with like.
+The output contract is the *pooled sentence embedding*: Qwen3-Embedding pools the last non-pad
+token of the final hidden state and L2-normalizes. Both models go through the same pooling code
+here, so the task's loss only ever compares like with like.
 """
 
 from __future__ import annotations
@@ -19,9 +14,7 @@ from torch import nn
 from transformers import AutoModel
 
 from franken.config import Config
-from franken.distill.layer_map import resolve_layer_map
 from franken.models.base import ModelBackend
-from franken.models.qwen3.loader import init_student_from_teacher
 from franken.models.qwen3.model import Qwen3Model
 
 
@@ -40,6 +33,8 @@ def _last_token_pool(last_hidden: torch.Tensor, attention_mask: torch.Tensor | N
 
 
 class Qwen3Backend(ModelBackend):
+    layer_marker = "layers."
+
     def build_student(self, cfg: Config) -> nn.Module:
         return Qwen3Model(cfg.model)
 
@@ -53,14 +48,6 @@ class Qwen3Backend(ModelBackend):
         model.eval()
         model.requires_grad_(False)
         return model
-
-    def seed_student(self, student: nn.Module, teacher: nn.Module, cfg: Config) -> None:
-        layer_map = resolve_layer_map(
-            teacher.config.num_hidden_layers,
-            cfg.model.num_hidden_layers,
-            cfg.distill.hidden_layer_map,
-        )
-        init_student_from_teacher(student, teacher.state_dict(), layer_map)
 
     def forward(self, model: nn.Module, inputs: dict) -> dict:
         out = model(**inputs)

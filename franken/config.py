@@ -1,10 +1,6 @@
-"""Configuration schema for Franken.
-
-Experiments are declarative: a single YAML file selects the student depth, the
-swappable ops (softmax / activation) and their kwargs, the distillation loss
-weights, and the training hyperparameters. Nothing about the three
-customizations (layer reduction, softmax approximation, polynomial activation)
-requires code edits.
+"""Configuration schema. One YAML picks depth, ops, loss weights and hyperparameters, so none of
+the three customizations (layer reduction, softmax approximation, polynomial activation) needs a
+code edit.
 """
 
 from __future__ import annotations
@@ -17,27 +13,15 @@ import yaml
 
 @dataclass
 class ModelConfig:
-    """Model-agnostic student knobs shared by every backend: which backend builds
-    the model, the depth-reduction lever, and the swappable ops.
+    """Backend-agnostic knobs. Architecture dims live in a per-backend subclass (BertModelConfig,
+    Qwen3ModelConfig) picked by ``backend`` at load time; only depth + ops vary per experiment."""
 
-    Backend-specific architecture (widths, vocab, dropout, ...) lives in a
-    per-backend subclass under that model's package — e.g.
-    ``franken.models.bert.config.BertModelConfig`` and
-    ``franken.models.qwen3.config.Qwen3ModelConfig``. Each from-scratch student
-    hardcodes its dims as subclass defaults (matching the checkpoint it loads
-    weights from); only depth + ops vary per experiment. The concrete subclass is
-    chosen by ``backend`` when the config loads (see ``_model_config_cls``)."""
+    backend: str = "bert"  # franken.models registry
 
-    # Which model backend builds/runs the model (franken.models registry).
-    # "bert" = the from-scratch BERT student; "qwen3" = Qwen3-Embedding.
-    backend: str = "bert"
-
-    # Depth-reduction lever: number of student layers (< teacher for FHE). Strided
-    # teacher->student init fills these from the teacher (see resolve_layer_map).
+    # Depth-reduction lever. Strided teacher->student init fills these (see resolve_layer_map).
     num_hidden_layers: int = 6
 
-    # Swappable ops: a registry name + optional construction kwargs.
-    # Resolved via franken.ops.build_softmax / build_activation.
+    # Registry names + construction kwargs; see franken.ops.
     softmax: str = "exact"
     softmax_kwargs: dict[str, Any] = field(default_factory=dict)
     activation: str = "exact"
@@ -58,46 +42,33 @@ class DistillConfig:
     temperature: float = 2.0
     # None -> auto uniform-stride map computed from teacher/student depths.
     hidden_layer_map: list[int] | None = None
-    # How the per-layer hidden term is measured: "mse" (raw) | "relative" (divided by the teacher
-    # layer's own mean square). Raw MSE lets large-activation layers own the gradient — measured on
-    # Qwen3, per-layer scale spans 11,085x and the FINAL layer, which produces the embedding, gets
-    # only 2.7% of the weight despite the worst relative error. "relative" equalizes layers and
-    # rescales the term to O(0.1), which is what makes `beta` a meaningful knob.
+    # "mse" (raw) | "relative" (per-layer, normalized by the teacher layer's own mean square).
+    # Raw MSE lets large-activation layers own the gradient -- see distill.loss for the numbers.
     hidden_loss: str = "mse"
-    # Squash-penalty weight: keeps FFN pre-activations inside a polynomial
-    # activation's valid domain (e.g. cheb_gelu) so the bare poly is FHE-safe at
-    # inference. 0 = off; ignored for ops without a bounded domain (e.g. exact).
+    # Squash-penalty weight keeping FFN pre-activations inside a polynomial activation's domain,
+    # so the bare poly is FHE-safe at inference. 0 = off; ignored for ops with no domain.
     range_penalty: float = 0.0
-    # Which STUDENT layers the range penalty applies to. None = all of them.
-    # Constraining a layer costs accuracy, so penalize only the layers that are actually
-    # wide: measured on Qwen3, 27 of 28 layers sit inside +-24 on their own while one
-    # outlier layer reaches ~300, and penalizing all 28 to fix that one cost 8.2 recall
-    # points. Measure with scripts/qwen3/act_range.py before choosing.
+    # Which STUDENT layers the penalty applies to; None = all. Constraining a layer costs accuracy:
+    # on Qwen3, 27 of 28 sit inside +-24 while one outlier hits ~300, and penalizing all 28 to fix
+    # that one cost 8.2 recall points. Measure with scripts/qwen3/act_range.py first.
     range_penalty_layers: list[int] | None = None
 
 
 @dataclass
 class OptimConfig:
-    """Optimization hyperparameters for a single training run.
+    """One training run's hyperparameters. Teacher and distill get separate blocks so they tune
+    independently."""
 
-    Teacher fine-tuning and student distillation each get their own block so
-    they can be tuned independently (e.g. a low-lr / high-epoch teacher while
-    distillation stays at its separately-tuned bs32/lr5e-5/3ep).
-    """
-
-    # Defaults from the original BERT/GLUE papers. `null` instead of a number means DERIVE it by
-    # sqrt-batch scaling from the tuned reference (franken.distill.trainer.BASE_LR / BASE_BATCH),
-    # using the batch the run actually assembles -- which token-budgeted batching only knows at
-    # startup. The resolved value is logged.
+    # `null` = DERIVE by sqrt-batch scaling from trainer.BASE_LR/BASE_BATCH, using the batch the
+    # run actually assembles (token budgeting only knows it at startup). Resolved value is logged.
     lr: float | None = 5e-5
     epochs: int = 3
     batch_size: int = 32
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
-    # Per-rank padded tokens per batch, sequence count floating to fit (franken.distill.batching).
-    # Set it and `batch_size` goes unused — training AND eval batch by tokens, so one knob bounds
-    # memory everywhere. ⚠️ Per RANK, so tokens/step and steps/epoch both scale with the world
-    # size, unlike `batch_size`, which is global and split by `per_rank_batch`.
+    # Padded tokens per batch, sequence count floating to fit; set it and `batch_size` goes unused.
+    # ⚠️ Per RANK, so tokens/step and steps/epoch scale with world size -- unlike `batch_size`,
+    # which is global and divided by it.
     token_budget: int | None = None
     max_seqs: int = 256  # ceiling on sequences per batch, whatever the budget allows
 
@@ -107,38 +78,30 @@ class TrainConfig:
     teacher_model: str = "google-bert/bert-base-uncased"
     teacher_ckpt: str | None = None
     output_dir: str = "outputs"
-    # Which task drives data/tokenizer/loss/metric/teacher-training (franken.tasks
-    # registry). "mrpc" = GLUE MRPC classification; "embed" = embedding self-distill.
+    # Drives data/tokenizer/loss/metric/teacher-training (franken.tasks registry).
     task: str = "mrpc"
-    # Corpus for the label-free embedding task (franken.data.embed_corpus registry):
-    # a named preset, not a dataset id, so a mix stays one config value. Ignored by
-    # tasks that bring their own data (MRPC). corpus_size = training examples to take.
+    # A named preset, not a dataset id, so a mix stays one config value (franken.data.embed_corpus).
+    # Ignored by tasks bringing their own data (MRPC).
     corpus: str = "smoke"
     corpus_size: int = 2000
-    # Output namespace under output_dir: outputs/<run_name or model.backend>/...
-    # None -> namespace by the model backend (e.g. outputs/bert/, outputs/qwen3/).
-    # Set it to carve a specific experiment its own subtree.
+    # Output namespace: outputs/<run_name or model.backend>/... None = namespace by backend.
     run_name: str | None = None
     max_seq_len: int = 128
     seed: int = 42
     device: str = "cuda"
-    # Distillation loop only; evaluation is forced back to fp32. "fp32" | "tf32" (TF32 matmuls,
-    # fp32 storage) | "bf16" (tf32 plus autocast around the student forward and loss). The
-    # teacher never enters the autocast region -- see franken.distill.trainer._autocast.
+    # Distillation loop only; eval is forced back to fp32. "fp32" | "tf32" | "bf16" (tf32 plus
+    # autocast over the student forward + loss). The teacher never enters autocast (trainer).
     precision: str = "fp32"
 
     # torch.compile student + teacher for training; eval stays eager (see trainer.evaluate).
     compile: bool = False
 
-    # Per-run optimization blocks (see OptimConfig).
     teacher: OptimConfig = field(default_factory=OptimConfig)
     distill: OptimConfig = field(default_factory=OptimConfig)
 
 
 @dataclass
 class Config:
-    """Root config aggregating the three sections."""
-
     model: ModelConfig = field(default_factory=ModelConfig)
     distill: DistillConfig = field(default_factory=DistillConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -161,11 +124,7 @@ class Config:
 
 
 def _model_config_cls(backend: str) -> type[ModelConfig]:
-    """Resolve the per-backend ModelConfig subclass for a ``backend`` name.
-
-    Lazy-imported to avoid a config<->models import cycle (the model packages import
-    this module). Each from-scratch backend declares its architecture dims in a
-    subclass; a backend with no subclass falls back to the agnostic base."""
+    # Lazy imports: the model packages import this module, so a top-level import would cycle.
     if backend == "bert":
         from franken.models.bert.config import BertModelConfig
 
@@ -178,7 +137,6 @@ def _model_config_cls(backend: str) -> type[ModelConfig]:
 
 
 def _build(dc_type: type, values: dict[str, Any]):
-    """Instantiate a dataclass from a dict, ignoring unknown keys."""
     known = {f.name for f in fields(dc_type)}
     unknown = set(values) - known
     if unknown:
@@ -187,12 +145,7 @@ def _build(dc_type: type, values: dict[str, Any]):
 
 
 def _build_train(values: dict[str, Any]) -> TrainConfig:
-    """Build TrainConfig, resolving the nested teacher/distill OptimConfig blocks.
-
-    The plain ``_build`` can't descend into nested dataclasses (it would store the
-    sub-dicts verbatim), so pop those two blocks, build each as an OptimConfig, then
-    assemble TrainConfig from the remaining flat keys.
-    """
+    # `_build` can't descend into nested dataclasses, so build the two OptimConfig blocks first.
     values = dict(values)
     teacher = _build(OptimConfig, values.pop("teacher", {}))
     distill = _build(OptimConfig, values.pop("distill", {}))

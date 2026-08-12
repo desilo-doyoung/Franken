@@ -27,27 +27,25 @@ class BertSelfAttention(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, attention_mask: torch.Tensor = None
     ) -> torch.Tensor:
-        B, S, H = hidden_states.size()  # Batch size, Sequence length, Hidden size
+        B, S, H = hidden_states.size()
 
         def _split_heads(x):
-            return x.view(B, S, self.num_heads, self.head_dim).transpose(
-                1, 2
-            )  # (B, num_heads, S, head_dim)
+            return x.view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
 
         q = _split_heads(self.query(hidden_states))
         k = _split_heads(self.key(hidden_states))
         v = _split_heads(self.value(hidden_states))
 
-        scores = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim**0.5)  # (B, num_heads, S, S)
+        scores = torch.matmul(q, k.transpose(-1, -2)) / (self.head_dim**0.5)
 
         # The softmax op applies the additive mask itself (exact adds it; the
         # CGF approx needs the raw scores + a binary mask, not -inf-added scores).
         probs = self.softmax(scores, mask=attention_mask, dim=-1)
         probs = self.dropout(probs)
-        context = torch.matmul(probs, v)  # (B, num_heads, S, head_dim)
-        context = context.transpose(1, 2).contiguous().view(B, S, H)  # (B, S, H)
+        context = torch.matmul(probs, v)
+        context = context.transpose(1, 2).contiguous().view(B, S, H)
 
-        # return probs for distillation purposes
+        # probs is unused today; kept plumbed so attention-map distillation stays a loss change.
         return context, probs
 
 

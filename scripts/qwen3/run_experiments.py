@@ -1,20 +1,17 @@
 """Run a batch of distillation experiments across the available GPUs and print one table.
 
-The remote workflow this exists for: pull, run it with the configs you want, copy the final block
-back. Per config: the corpus gates (once per corpus), distill, then `eval.py` (teacher fidelity,
-in-distribution nDCG, external nDCG, and the coverage gap between the last two). Everything a
-decision needs lands in one markdown table for PROGRESS.md.
+Per config: corpus gates (once per corpus), distill, then `eval.py`. Everything a decision needs
+lands in one markdown table for PROGRESS.md. Numbers come from each scorer's `--json`, never
+scraped from prose, so a reworded print cannot corrupt the table; a crashed run degrades to one
+FAILED row with its log tail.
 
-Numbers come from each scorer's `--json`, never scraped from prose, so a reworded print cannot
-corrupt the table; a crashed run degrades to one FAILED row with its log tail. Configs are a work
-queue over the given cards, so N configs cost ceil(N/devices) slots even when runs differ in
-length. Pass only cards you actually own -- a co-tenant's idle GPU is not free capacity.
+Configs are a work queue over the given cards, so N configs cost ceil(N/devices) slots. Pass only
+cards you actually own -- a co-tenant's idle GPU is not free capacity. `--ddp` switches the other
+way: one config at a time over ALL devices. The queue maximizes throughput; DDP maximizes what a
+SINGLE run can absorb.
 
-`--ddp` switches the other way: one config at a time, spread over ALL devices via torchrun. The
-queue maximizes throughput; DDP maximizes what a SINGLE run can absorb.
-
-Under `token_budget` the budget is PER RANK, so tokens/step scale with the device count and
-steps/epoch is data-dependent -- the trainer logs the real count at startup and derives lr from it.
+⚠️ `token_budget` is PER RANK, so tokens/step scales with the device count and steps/epoch is
+data-dependent -- the trainer logs the real count at startup and derives lr from it.
 
 Usage:
     uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/depth19*.yaml
@@ -66,11 +63,8 @@ def _trace(path: str) -> list[str]:
 
 
 def _distill_cmd(config: str, nproc: int) -> list[str]:
-    """`main.py distill` directly, or under torchrun for DDP.
-
-    Launched as `-m torch.distributed.run` rather than the `torchrun` console script so the
-    ranks inherit exactly this interpreter — on a remote box the bare `torchrun` on PATH is
-    often a different venv's."""
+    # `-m torch.distributed.run` rather than the `torchrun` console script, so the ranks inherit
+    # exactly this interpreter -- on a remote box the bare `torchrun` on PATH is often another venv.
     argv = ["main.py", "distill", "--config", config]
     if nproc > 1:
         return [sys.executable, "-m", "torch.distributed.run", f"--nproc_per_node={nproc}", *argv]
@@ -160,8 +154,8 @@ def one_experiment(
 
 
 def report(results: list[dict], out_dir: str) -> None:
-    """Print the summary and save it. Terminal scrollback is not storage — a remote batch has to
-    leave a durable artifact, or a closed ssh session loses the only copy of an hour of GPU time."""
+    # Saved as well as printed: scrollback is not storage, and a closed ssh session would lose the
+    # only copy of an hour of GPU time.
     ok = [r for r in results if not r.get("error")]
     out: list[str] = []
 
@@ -254,10 +248,8 @@ _PREBUILD_THRESHOLD = 100_000
 
 
 def _cache_missing(cfg) -> bool:
-    """Is the tokenized train split absent? Runs go one per device CONCURRENTLY and `_build_split`
-    is per process, so with no cache every run streams and tokenizes the whole corpus independently
-    -- hours each at 9M texts. `outputs/corpus_cache` is gitignored, so a fresh checkout has none.
-    """
+    # Runs go one per device CONCURRENTLY and `_build_split` is per process, so with no cache every
+    # run tokenizes the whole corpus independently -- hours each at 9M texts.
     from franken.data.embed_corpus import cache_path  # noqa: PLC0415  (heavy import, rare path)
     from franken.tasks import build_task  # noqa: PLC0415
 
@@ -272,12 +264,8 @@ def _cache_missing(cfg) -> bool:
 
 
 def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:
-    """Gate the corpus, and build its cache if it is missing — so this script is the whole workflow.
-
-    The gates are pure checks (holdout, every source loading and scoreable, `corpus_size` still
-    matching the measurement) and cheap next to a distill. corpus.py itself decides whether the
-    cache needs building; `build` here only says so in the log line.
-    """
+    # Gates (holdout, every source loading and scoreable, corpus_size still matching) are pure
+    # checks, cheap next to a distill. corpus.py decides whether to build; `build` only logs it.
     if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
         return
     log = os.path.join(out_dir, "corpus.log")

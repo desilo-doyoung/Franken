@@ -1,31 +1,19 @@
 """Op-curriculum (progressive op-replacement) distillation.
 
-Stage A: distill the student with the *easier* op set (config-A) from the
-         teacher-strided init -> a strong single-distortion student.
-Stage B: warm-start from Stage A's weights, switch to the *harder* op set
-         (config-B), and keep distilling.
+Stage A distils with the *easier* op set from the strided init; Stage B warm-starts from those
+weights (by name, strict=False) and switches to the harder op set, so the model absorbs one
+approximation at a time. The configs may differ in ANY op -- nothing here is softmax-specific.
 
-The two configs may differ in *any* op — a softmax approximation, a polynomial
-activation, or whatever op is added later; nothing here is softmax-specific.
-(Example: A = quad + exact softmax, B = quad + cgf softmax.)
-
-This differs from TinyBERT/MPCFormer two-stage KD (which stages *loss targets*
-with all ops live throughout, ~ what beta=10 already does). Here we stage *which
-ops are active*, so the model absorbs one approximation at a time. Weights
-transfer by name (strict=False): the shared backbone warm-starts, and any params
-a new op introduces are left at their init and reported.
+Unlike TinyBERT/MPCFormer two-stage KD, which stages *loss targets* with all ops live throughout
+(~ what beta=10 already does), this stages *which ops are active*. Verified on MRPC test:
+quad+cgf 0.845 single-stage -> 0.873 staged, with Stage B's gentle defaults (lr 3e-5, 8 epochs,
+below the configs' 5e-5) so absorbing the new op does not wash out the Stage A init.
 
 Usage:
     python scripts/stage_distill.py \
         --config-a configs/bert/quad_fhe.yaml \
         --config-b configs/bert/quad_cgf_fhe.yaml \
-        --stagea-dir outputs/bert/stageA_quad \
-        --stageb-dir outputs/bert/stageB_quad_cgf \
         [--skip-stagea] [--stageb-lr 3e-5] [--stageb-epochs 8]
-
-Stage B defaults to a gentle warm-start (lr 3e-5, 8 epochs), below the configs'
-5e-5, so absorbing the new op doesn't wash out the Stage A init. Verified (MRPC
-test): quad+cgf 0.845 (single-stage) -> 0.873 (staged).
 """
 
 from __future__ import annotations
@@ -66,21 +54,8 @@ def main() -> None:
         action="store_true",
         help="reuse an existing Stage A checkpoint in --stagea-dir",
     )
-    p.add_argument(
-        "--stageb-lr",
-        type=float,
-        default=3e-5,
-        help="Stage B LR (default 3e-5: a gentle warm-start below the "
-        "configs' 5e-5, so absorbing the new op doesn't wash out "
-        "the Stage A init; pass the config-B value to disable)",
-    )
-    p.add_argument(
-        "--stageb-epochs",
-        type=int,
-        default=8,
-        help="Stage B epochs (default 8: the warm-started student needs "
-        "fewer epochs than a cold start to adapt to the new op)",
-    )
+    p.add_argument("--stageb-lr", type=float, default=3e-5, help="Stage B LR")
+    p.add_argument("--stageb-epochs", type=int, default=8, help="Stage B epochs")
     args = p.parse_args()
 
     # Output dirs default to the run-namespaced base (flat when run_name is unset,

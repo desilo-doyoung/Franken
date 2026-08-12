@@ -140,8 +140,6 @@ class MrpcTask(Task):
         return compute_metrics(logits.argmax(dim=-1).numpy(), labels.numpy())
 
     def train_teacher(self, cfg: Config) -> str | None:
-        """Fine-tune the HF sequence-classification teacher on MRPC (exact ops),
-        saving to RunPaths(cfg).teacher and restoring the best eval_loss checkpoint."""
         tok = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
         data = load_mrpc(tok, max_seq_len=cfg.train.max_seq_len)
         model = AutoModelForSequenceClassification.from_pretrained(

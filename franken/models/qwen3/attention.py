@@ -52,12 +52,10 @@ class Qwen3Attention(nn.Module):
         position_embeddings: torch.Tensor,
         attention_mask: torch.Tensor = None,
     ) -> torch.Tensor:
-        B, S, H = hidden_states.size()  # Batch size, Sequence length, Hidden size
+        B, S, H = hidden_states.size()
 
         def _split_heads(x, num_heads):
-            return x.view(B, S, num_heads, self.head_dim).transpose(
-                1, 2
-            )  # (B, num_heads, S, head_dim)
+            return x.view(B, S, num_heads, self.head_dim).transpose(1, 2)
 
         q = self.q_norm(_split_heads(self.q_proj(hidden_states), self.num_heads))
         k = self.k_norm(_split_heads(self.k_proj(hidden_states), self.num_kv_heads))

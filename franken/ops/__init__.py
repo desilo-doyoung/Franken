@@ -1,10 +1,5 @@
-"""Swappable ops — the flexibility mechanism.
-
-``ModelConfig.softmax`` / ``ModelConfig.activation`` are just names (+ optional
-kwargs) resolved here into ``nn.Module`` instances. Attention / FFN modules
-receive the built module and never hardcode ``F.softmax`` / ``F.gelu``, so
-swapping in an HE-friendly approximation is a config change. Add a new op = add
-one class and one dict entry.
+"""Swappable ops: ``ModelConfig.softmax``/``activation`` are names resolved here into modules,
+so attention/FFN never hardcode ``F.softmax``/``F.gelu``. Add an op = one class + one dict entry.
 """
 
 from __future__ import annotations
@@ -30,16 +25,10 @@ class ExactSoftmax(nn.Module):
 
 
 class CGFSoftmax(nn.Module):
-    """CGF softmax (HE-friendly): approximate log-sum-exp by its 2nd-order
-    cumulant, so ``softmax_i ~= exp(x_i - mu - var/2 - log n_vis)`` with mu/var
-    over visible positions (binary mask). Only masked multiply/add/square/exp —
-    no ciphertext division or max-subtraction. Unnormalized by design;
-    distillation adapts to it.
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.kwargs = kwargs
+    """HE-friendly: log-sum-exp approximated by its 2nd-order cumulant, so
+    ``softmax_i ~= exp(x_i - mu - var/2 - log n_vis)`` over visible positions. Only masked
+    mul/add/square/exp — no ciphertext division or max-subtraction. Unnormalized by design;
+    distillation adapts to it."""
 
     def forward(self, scores, mask=None, dim=-1):
         m = (mask == 0).to(scores.dtype) if mask is not None else torch.ones_like(scores)
@@ -62,17 +51,13 @@ class ExactGELU(nn.Module):
 
 
 class ChebyshevGELU(nn.Module):
-    """GELU as a single Chebyshev polynomial on ``u = x / domain``, fit once over
-    ``[-domain, domain]`` (a fixed function -> task-independent, no refit). The
-    Chebyshev basis keeps intermediates in ``[-1, 1]`` -> FHE-stable (the monomial
-    basis' ``x**k`` would explode); FHE eval is Paterson-Stockmeyer at mult-depth
-    ~``ceil(log2 degree)``.
+    """GELU as one Chebyshev polynomial on ``u = x / domain``; the basis keeps intermediates in
+    ``[-1, 1]`` (the monomial ``x**k`` would explode). FHE mult-depth ~``ceil(log2 degree)``.
 
-    ⚠️ Outside ``[-domain, domain]`` the polynomial explodes. Training clamps the
-    input to ``[-1, 1]`` (scaffold, so init doesn't NaN on the teacher's ~±150
-    outliers); inference does NOT clamp (min/max is costly in FHE), so the bare
-    poly is safe only while activations stay in-domain — an empirical, per-dataset
-    property to verify, NOT a guarantee. Widen ``domain`` (costs depth) for margin.
+    ⚠️ Outside ``[-domain, domain]`` the polynomial explodes. Training clamps ``u`` (scaffold, so
+    init doesn't NaN on the teacher's ~±150 outliers); inference does NOT clamp — min/max is costly
+    in FHE — so safety is an empirical, per-dataset property to VERIFY, not a guarantee. Widening
+    ``domain`` buys margin at the cost of depth.
     """
 
     def __init__(self, degree: int = 52, domain: float = 32.0, **kwargs):
@@ -90,9 +75,8 @@ class ChebyshevGELU(nn.Module):
         self.register_buffer("coef", torch.tensor(coef, dtype=torch.float32))
 
     def _eval_poly(self, u):
-        """``sum_k c_k T_k(u)``, basis built by ``T_k = 2 T_{k//2} T_{k-k//2} - T_|.|``
-        at mult-depth ``ceil(log2 degree)``. (FHE would use Paterson-Stockmeyer:
-        same depth, ~2*sqrt(degree) mults vs the ~degree here.)"""
+        # sum_k c_k T_k(u), basis by T_k = 2 T_{k//2} T_{k-k//2} - T_|.|. FHE would use
+        # Paterson-Stockmeyer: same depth, ~2*sqrt(degree) mults vs the ~degree here.
         c = self.coef
         n = c.numel() - 1
         T = [torch.ones_like(u)]  # T_0
@@ -116,17 +100,12 @@ class ChebyshevGELU(nn.Module):
 
 
 class QuadGELU(nn.Module):
-    """MPCFormer's quadratic GELU replacement: ``0.125 x^2 + 0.25 x + 0.5``. A
-    degree-2 activation (FHE mult-depth 1) evaluated everywhere — NOT a
-    domain-limited approximation, so it never explodes. But the ``x^2`` term
-    amplifies large activations, so (a) its output range is ~5x wider than exact
-    GELU (a dynamic-range cost for FHE, not bounded by this op), and (b) it needs
-    heavy hidden-state alignment to train — a plain single-stage KD (beta=1) gets
-    stuck; set a large ``distill.beta`` (e.g. 10). See configs/bert/quad.yaml.
+    """MPCFormer's ``0.125 x^2 + 0.25 x + 0.5``. Degree 2 everywhere (FHE mult-depth 1), so unlike
+    a Chebyshev fit it never explodes — but ``x^2`` amplifies, leaving the output range ~5x wider
+    than exact GELU, and it needs heavy hidden-state alignment: beta=1 gets stuck, use beta~10.
 
-    ``domain`` (optional): if set, it's exposed so ``distill.range_penalty`` squashes
-    pre-activations into ``[-domain, domain]`` during training, bounding the output to
-    ~``0.125*domain^2`` (the FHE dynamic-range lever). None = unbounded output."""
+    ``domain`` only exposes the op to ``distill.range_penalty``, bounding output to
+    ~``0.125*domain^2``. None = unbounded."""
 
     def __init__(self, domain: float | None = None, **kwargs):
         super().__init__()
@@ -142,29 +121,21 @@ class ExactSiLU(nn.Module):
 
 
 class QuadSiLU(nn.Module):
-    """``a x^2 + b x + c`` fitted to **SiLU** — same FHE cost as ``quad`` (one ciphertext
-    square, mult-depth 1), but 4.2x lower approximation error, because ``quad`` is
-    MPCFormer's fit to *GELU* and is not even a good one there (``quad(0) = 0.5`` where
-    SiLU(0) = 0). Coefficients are free in FHE, so there is no accuracy/cost tradeoff to
-    make: fitting the right function is a pure win.
+    """``a x^2 + b x + c`` fitted to **SiLU**: same FHE cost as ``quad`` (mult-depth 1) at 4.2x
+    lower error, because ``quad`` fits *GELU* and isn't even good there (``quad(0)=0.5``,
+    SiLU(0)=0). Coefficients are free in FHE, so fitting the right function is a pure win.
 
-    Defaults are a least-squares fit weighted by the **measured** gate_proj distribution of
-    Qwen3-Embedding-0.6B restricted to ``|x| <= 16`` (38M real pre-activation samples;
-    bulk RMSE 0.222 vs 0.924 for ``quad``). Fit only where the mass is AND only inside the
-    domain ``range_penalty`` enforces — a fit over the full observed range (max 319) is
-    dragged into a nearly-linear shape by the tails and gets *worse* in the bulk.
+    Defaults: least-squares over the **measured** Qwen3-Embedding-0.6B gate_proj distribution on
+    ``|x| <= 16`` (38M samples; bulk RMSE 0.222 vs 0.924 for ``quad``). Fitting the full observed
+    range (max 319) is dragged nearly-linear by the tails and gets *worse* in the bulk. The fit
+    domain is insensitive though — RMSE 0.221/0.222/0.292 on ``|x| <= 8/16/32`` — so no refit is
+    needed when the deployed ``domain`` moves inside that band.
 
-    Like ``quad`` this is degree 2 everywhere, so it never explodes outside the domain (a
-    Chebyshev fit would). ⚠️ **``domain`` is therefore a purely FHE-side requirement — output
-    dynamic range — and can only COST accuracy**, since ``distill.range_penalty`` spends model
-    capacity forcing activations somewhere they do not naturally go. Set it from the ciphertext
-    scale budget, not from anything measured here, and prefer the loosest value the scheme
-    tolerates. Unpenalized, real data drives the output to ~9000 under either fit (the input
-    tails dominate, not the coefficients); the penalty bounds it to ~``a*domain^2``.
-
-    The *fit* domain is a separate concept and is insensitive over the plausible range: bulk
-    RMSE is 0.221 / 0.222 / 0.292 fitting on ``|x| <= 8 / 16 / 32``, so these coefficients do
-    not need refitting if the deployed ``domain`` changes within that band.
+    ⚠️ Degree 2 everywhere, so it never explodes: ``domain`` is a purely FHE-side output-range
+    requirement and can only COST accuracy, since ``range_penalty`` spends capacity forcing
+    activations where they do not naturally go. Set it from the ciphertext scale budget and prefer
+    the loosest the scheme tolerates. Unpenalized, real data drives output to ~9000 under either
+    fit (input tails dominate, not coefficients); the penalty bounds it to ~``a*domain^2``.
     """
 
     def __init__(

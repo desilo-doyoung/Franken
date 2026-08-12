@@ -13,9 +13,7 @@ class BertPooler(nn.Module):
         self.activation = nn.Tanh()
 
     def forward(self, hidden_states):
-        first_token_tensor = hidden_states[
-            :, 0
-        ]  # pool the first token (CLS token) from the hidden states
+        first_token_tensor = hidden_states[:, 0]  # CLS
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
         return pooled_output

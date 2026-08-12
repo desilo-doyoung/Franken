@@ -22,13 +22,12 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch
-from datasets import load_dataset
 from franken.config import Config
+from franken.data.mrpc import load_mrpc
 from franken.models import build_backend
 from franken.paths import RunPaths
 from franken.tasks import build_task
 from torch.utils.data import DataLoader
-from transformers import DataCollatorWithPadding
 
 
 @torch.no_grad()
@@ -53,13 +52,11 @@ def main() -> None:
     student.load_state_dict(torch.load(sc, map_location=device))
     student = student.to(device).eval()
 
-    # Model-agnostic access to the FFN pre-activation modules and activation ops.
     pre_modules = backend.ffn_preact_modules(student)
     act_modules = backend.activation_ops(student)
     n_layers = len(pre_modules)
     domain = getattr(act_modules[0], "domain", None) if act_modules else None
 
-    # Capture pre-activations (FFN dense out) and post-activations (act op out) per layer.
     preacts = {i: [] for i in range(n_layers)}
     postacts = {i: [] for i in range(n_layers)}
     hooks = []
@@ -75,21 +72,14 @@ def main() -> None:
             )
         )
 
-    ds = load_dataset("nyu-mll/glue", "mrpc")
-    ds = ds.map(
-        lambda b: tokenizer(
-            b["sentence1"], b["sentence2"], truncation=True, max_length=cfg.train.max_seq_len
-        ),
-        batched=True,
-    )
-    collator = DataCollatorWithPadding(tokenizer)
+    data = load_mrpc(tokenizer, cfg.train.max_seq_len, splits=tuple(args.splits))
     cols = task.torch_columns()
 
     for split in args.splits:
-        if set(ds[split].unique("label")) == {-1}:
+        if set(data[split].unique("label")) == {-1}:
             continue
-        d = ds[split].with_format("torch", columns=cols)
-        dl = DataLoader(d, batch_size=args.batch_size, collate_fn=collator)
+        d = data[split].with_format("torch", columns=cols)
+        dl = DataLoader(d, batch_size=args.batch_size, collate_fn=data["collator"])
         for batch in dl:
             batch = {k: v.to(device) for k, v in batch.items()}
             backend.forward(student, task.model_inputs(batch))
@@ -137,7 +127,6 @@ def main() -> None:
         print(f"domain = {domain}  ->  pre-acts {verdict} (|max| {all_pre_max:.2f} {rel} {domain})")
         print(f"quad output budget 0.125*D^2 = {0.125 * domain**2:.1f}  (teacher GELU |max| = 143)")
 
-    # Histogram of all pre-activations pooled across layers.
     import matplotlib
 
     matplotlib.use("Agg")

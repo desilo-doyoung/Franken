@@ -20,17 +20,15 @@ from franken.tasks import build_task
 PRECISIONS = ("fp32", "tf32", "bf16")
 
 
-# The tuned reference for sqrt-batch LR scaling: bs 32 / lr 2e-5, fidelity-verified at depth 24
-# (recall@10 0.9070, identical to fp32/bs8/lr1e-5). Written down once -- a config asking for `lr:
-# null` scales from here. sqrt rather than linear because the optimizer is Adam-family.
+# Reference for sqrt-batch LR scaling (`lr: null`): bs32/lr2e-5, fidelity-verified at depth 24
+# (recall@10 0.9070, identical to fp32/bs8/lr1e-5). sqrt not linear because Adam-family.
 BASE_LR, BASE_BATCH = 2e-5, 32
 
 
 def _range_penalty(preacts, domain):
-    """Squared distance past +/-domain, meaned over the OUT-OF-RANGE elements only
-    (averaging over all elements would let the in-range bulk dilute the gradient on
-    the rare outliers). Pulls FFN pre-activations into the polynomial op's valid
-    domain so the deployed bare poly is FHE-safe. Training-only. None if all in range."""
+    """Squared distance past +/-domain, meaned over the OUT-OF-RANGE elements only -- averaging
+    over all of them would let the in-range bulk dilute the gradient on the rare outliers.
+    Training-only; None if everything is in range."""
     terms = []
     for x in preacts:
         # fp32 always: a tail statistic, and bf16's coarse grid up there shifts it +7.6%.
@@ -43,9 +41,8 @@ def _range_penalty(preacts, domain):
 
 
 def _apply_precision(precision: str) -> None:
-    """Arithmetic for the training loop; evaluation stays fp32. TF32 lowers the precision of the
-    *teacher's targets* too, not just the student's math, so check a run against an fp32 reference
-    before trusting the speedup. bf16 additionally opens an autocast region (see _autocast)."""
+    # Training loop only; eval stays fp32. TF32 lowers the *teacher's targets* too, not just the
+    # student's math, so check against an fp32 reference before trusting the speedup.
     if precision not in PRECISIONS:
         raise ValueError(f"Unknown precision {precision!r}; use {' | '.join(PRECISIONS)}")
     if precision in ("tf32", "bf16"):
@@ -54,14 +51,14 @@ def _apply_precision(precision: str) -> None:
 
 
 def _autocast(precision: str):
-    """Autocast region for the STUDENT forward + loss only. Never the teacher: it makes the
-    targets, and a bf16 teacher shifts them 0.0076 recall@10, ~2x the comparison band."""
+    # STUDENT forward + loss only. Never the teacher: it makes the targets, and a bf16 teacher
+    # shifts them 0.0076 recall@10, ~2x the comparison band.
     return torch.autocast("cuda", dtype=torch.bfloat16) if precision == "bf16" else nullcontext()
 
 
 def _maybe_compile(model, cfg: Config):
-    """Compiled callable for training. Callers keep the eager module too: its state_dict has no
-    `_orig_mod.` prefix, and eval must stay eager (see evaluate)."""
+    # Callers keep the eager module too: its state_dict has no `_orig_mod.` prefix, and eval must
+    # stay eager (see evaluate).
     return torch.compile(model) if cfg.train.compile else model
 
 
@@ -80,10 +77,8 @@ class Distiller:
         self.tokenizer = None
 
     def log(self, *args):
-        """Rank 0 only: run_experiments.py parses these lines, so N ranks would emit N rows.
-
-        Flushed: stdout is block-buffered when redirected to a log file, so an unflushed
-        print leaves `tail -f` empty for the whole run."""
+        # Rank 0 only (run_experiments.py parses these lines), and flushed -- stdout is
+        # block-buffered into a log file, so an unflushed print leaves `tail -f` empty all run.
         if self.dist.is_main:
             print(*args, flush=True)
 
@@ -145,10 +140,9 @@ class Distiller:
 
         loader = build_loader(0)
 
-        # DistributedSampler pads the index list to divide evenly, so steps-per-epoch happens to
-        # match single-process arithmetic rather than being guaranteed to. Assert it: a mismatch
-        # silently rescales the LR schedule and invalidates every comparison. `shard` gives the
-        # token-budgeted path the same guarantee by construction.
+        # DistributedSampler pads to divide evenly, so matching single-process steps/epoch is a
+        # happy accident, not a guarantee -- and a mismatch silently rescales the LR schedule.
+        # (`shard` gives the token-budgeted path the same guarantee by construction.)
         if self.dist.enabled and batch_plan is None:
             expected = -(-len(train_data) // opt.batch_size)
             if len(loader) != expected:
@@ -157,16 +151,14 @@ class Distiller:
                     "and recorded results would not be comparable."
                 )
 
-        # `lr: null` derives the rate by sqrt-batch scaling. Under token budgeting the batch is not
-        # a config value: it floats to fill the budget, known only once the plan exists, so
-        # a hardcoded `lr` goes stale when the corpus or the rank count moves. The last ladder ran
-        # 5.6% hot exactly that way. The resolved value is logged.
-        opt_cfg = self.cfg.train.distill
-        total_steps = len(loader) * opt_cfg.epochs
-        lr = opt_cfg.lr
+        # `lr: null` derives the rate by sqrt-batch scaling. Under token budgeting the batch floats
+        # to fill the budget and is only known once the plan exists, so a hardcoded `lr` goes stale
+        # when the corpus or rank count moves -- the last ladder ran 5.6% hot exactly that way.
+        total_steps = len(loader) * opt.epochs
+        lr = opt.lr
         if lr is None:
             if batch_plan is None:
-                batch = float(opt_cfg.batch_size)  # already the GLOBAL batch
+                batch = float(opt.batch_size)  # already the GLOBAL batch
             else:
                 seqs = sum(len(b) for b in batch_plan) / max(len(batch_plan), 1)
                 batch = seqs * self.dist.world_size
@@ -175,16 +167,13 @@ class Distiller:
                 f"lr {lr:.4e} = {BASE_LR:g} * sqrt({batch:.0f} / {BASE_BATCH})"
                 f" [sqrt-batch scaling from the tuned reference]"
             )
-        optimizer = AdamW(self.student.parameters(), lr=lr, weight_decay=opt_cfg.weight_decay)
+        optimizer = AdamW(self.student.parameters(), lr=lr, weight_decay=opt.weight_decay)
         scheduler = get_linear_schedule_with_warmup(
-            optimizer, int(total_steps * self.cfg.train.distill.warmup_ratio), total_steps
+            optimizer, int(total_steps * opt.warmup_ratio), total_steps
         )
 
-        # Range penalty (FHE): pull FFN pre-activations into the activation op's
-        # valid domain so the deployed bare polynomial never sees out-of-range
-        # inputs. Engages only for ops that expose `domain` (e.g. cheb_gelu); each
-        # FFN pre-activation is read off via a forward hook. Module paths come from
-        # the backend so this is model-agnostic.
+        # Range penalty (FHE): pull FFN pre-activations, read via forward hooks on backend-supplied
+        # modules, into the activation op's domain. Engages only for ops exposing `domain`.
         penalty_weight = self.cfg.distill.range_penalty
         acts = self.backend.activation_ops(self.student)
         first_act = acts[0] if acts else None
@@ -196,8 +185,8 @@ class Distiller:
                 if module.training:
                     preacts.append(out)
 
-            # Hook only the layers being penalized. Constraining a layer costs accuracy, so
-            # the default (all layers) is usually the wrong choice — see range_penalty_layers.
+            # Hook only the penalized layers: constraining one costs accuracy, so the default
+            # (all of them) is usually wrong -- see range_penalty_layers.
             mods = self.backend.ffn_preact_modules(self.student)
             which = self.cfg.distill.range_penalty_layers
             if which is None:
@@ -220,19 +209,17 @@ class Distiller:
         best = float("-inf") if higher_is_better else float("inf")
         best_state = None
 
-        # Baseline before any update: the student starts from teacher weights, so "did
-        # training help?" is only answerable against it. Not a checkpoint candidate.
+        # Baseline before any update: the student starts from teacher weights, so "did training
+        # help?" is only answerable against it. Not a checkpoint candidate.
         self.log(f"init: {self.evaluate()}")
 
         self.student.train()
-
-        # Training-loop arithmetic (evaluation stays fp32 whatever this is).
         _apply_precision(self.cfg.train.precision)
 
         # Training only; self.student/self.teacher stay eager for evaluate() and the save.
-        # DDP wraps first: compiling the wrapper lets Dynamo's DDPOptimizer split the graph so
-        # gradient allreduce overlaps backward. The other order emits one fused graph whose
-        # grads all become ready at once, exposing the full ~2.4 GB of comms.
+        # DDP wraps FIRST: compiling the wrapper lets Dynamo's DDPOptimizer split the graph so
+        # allreduce overlaps backward. The other order fuses one graph whose grads all become
+        # ready at once, exposing the full ~2.4 GB of comms.
         student = self.student
         if self.dist.enabled:
             student = DistributedDataParallel(
@@ -245,14 +232,13 @@ class Distiller:
             total_steps, self.dist.world_size, self.device, self.log, self.dist.is_main
         )
 
-        for epoch in range(self.cfg.train.distill.epochs):
+        for epoch in range(opt.epochs):
             if sampler is not None:
                 sampler.set_epoch(epoch)
             if batch_plan is not None and epoch:
                 loader = build_loader(epoch)
-            # Mean range penalty over the epoch. Logged because it is the only visible evidence that
-            # the penalty is doing anything: it should fall as pre-activations are squashed into the
-            # op's domain. Verify the end state with scripts/qwen3/act_range.py on the checkpoint.
+            # Mean penalty over the epoch: the only visible evidence it is doing anything (it should
+            # fall). Verify the end state with scripts/qwen3/act_range.py on the checkpoint.
             penalties = []
             for batch in loader:
                 batch = {k: v.to(self.device) for k, v in batch.items()}
@@ -287,15 +273,12 @@ class Distiller:
             # after DDP's allreduce, so scoring on every rank would compute the same numbers.
             if self.dist.is_main:
                 metrics = self.evaluate()
-                # Select on the task's headline metric (max F1 for MRPC; min distance for
-                # embedding self-distill). The student is deterministic, so the argmax/argmin
-                # is stable run-to-run.
                 value = metrics[metric_name]
                 improved = value > best if higher_is_better else value < best
                 if improved:
                     best = value
-                    # Clone off-device: state_dict() returns live references that the
-                    # next optimizer.step() would mutate in place.
+                    # Clone off-device: state_dict() hands back live references that the next
+                    # optimizer.step() would mutate in place.
                     best_state = {
                         k: v.detach().cpu().clone() for k, v in self.student.state_dict().items()
                     }
@@ -315,24 +298,23 @@ class Distiller:
             graphs = torch._dynamo.utils.counters["stats"]["unique_graphs"]
             self.log(f"dynamo unique_graphs: {graphs}")
 
-        # Only rank 0 tracked `best`, so only rank 0's student is the selected checkpoint --
-        # and only rank 0 saves it. Teardown happens in cli.cmd_distill, after that save:
-        # destroy_process_group is itself collective, so tearing down here would race the save.
+        # Only rank 0 tracked `best`, so only rank 0 holds and saves the selected checkpoint.
+        # Teardown happens in cli.cmd_distill after that save: destroy_process_group is collective,
+        # so tearing down here would race it.
         if best_state is not None:
             self.student.load_state_dict(best_state)
 
     @torch.no_grad()
     def evaluate(self):
-        # Always fp32, whatever the training precision. `allow_tf32` is a *global* flag, so
-        # without this the per-epoch metrics would inherit it while the `init:` baseline —
-        # measured before it is set — would not, leaving them incomparable and making
-        # checkpoint selection precision-dependent.
+        # Always fp32. `allow_tf32` is GLOBAL, so without this the per-epoch metrics inherit it
+        # while the `init:` baseline -- measured before it is set -- does not, leaving the two
+        # incomparable and checkpoint selection precision-dependent.
         tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         try:
-            # Eager on purpose: a compiled callable would add a graph per precision state and
-            # per train/eval toggle.
+            # Eager on purpose: compiling would add a graph per precision state and train/eval
+            # toggle.
             return self.task.evaluate(
                 self.backend, self.student, self.tokenizer, self.cfg, teacher=self.teacher
             )

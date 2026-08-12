@@ -203,8 +203,6 @@ def _normalized(sources: list[Source]) -> list[Source]:
 # Scoreable mixes only — this is what the gates and the eval iterate.
 MIXES: dict[str, list[Source]] = {"multi_domain": _normalized(_MULTI_DOMAIN)}
 
-DOMAINS = {s.name: s.domain for mix in MIXES.values() for s in mix}
-
 # Buildable presets. `smoke` is a pipeline proof, never a result, so it sits outside MIXES rather
 # than weakening the scoreability rule for everything else.
 PRESETS: dict[str, list[Source]] = {

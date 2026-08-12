@@ -1,17 +1,13 @@
-"""Token-budgeted batching: fit the batch to the input, instead of the input to the batch.
+"""Token-budgeted batching: fit the batch to the input, not the input to the batch.
 
-``DataCollatorWithPadding`` pads to the batch maximum, so a fixed sequence count pays for whatever
-the batch's longest member does not use. Measured on ``multi_domain`` @1024: 132 real tokens per
-text, ~950 padded under shuffled batches of 128, i.e. 14% efficiency. Holding *tokens* per batch
-constant instead gives ~139 padded (95%), turning ~7x into ~1.1x.
+Padding to the batch maximum means a fixed sequence count pays for what the longest member does not
+use: on `multi_domain` @1024, 132 real tokens per text against ~950 padded (14% efficiency).
+Holding *tokens* constant gives ~139 padded (95%), turning ~7x into ~1.1x, and bounds activation
+memory by construction -- no micro-batch to size, no gradient accumulation.
 
-It also bounds activation memory by construction -- a batch of 1024-token texts simply holds fewer
-of them -- so there is no worst-case micro-batch to size and no gradient accumulation to add.
-
-Widths are the raw batch maximum, not rounded to a bucket. Rounding to 64 was tried to hold Dynamo's
-shape count down and cost ~19% in padding for nothing: the first run measured `unique_graphs` 8 --
-two per DDP bucket, i.e. a static graph then a dynamic one -- so `automatic_dynamic_shapes` had
-already generalized over shapes and the bucketing was redundant.
+Widths are the raw batch maximum, not bucketed. Rounding to 64 cost ~19% padding for nothing:
+`unique_graphs` measured 8 (two per DDP bucket), so `automatic_dynamic_shapes` had already
+generalized over shapes.
 """
 
 from __future__ import annotations

@@ -1,11 +1,6 @@
-"""Embedding self-distillation: match a pretrained embedding teacher, no labels.
-
-The teacher is the pretrained checkpoint (no fine-tune), and the target is its pooled
-embedding, so the "task" is agreement with the teacher rather than any downstream
-objective. Data is plain text from a corpus preset (``franken.data.embed_corpus``);
-the backend owns pooling, so this module never sees hidden-state layout.
-
-Pairs with the Qwen3 backend, but nothing here is Qwen3-specific.
+"""Embedding self-distillation: match a pretrained teacher's pooled embedding, no labels, so the
+"task" is agreement with the teacher rather than any downstream objective. The backend owns
+pooling, so nothing here sees hidden-state layout or is Qwen3-specific.
 """
 
 from __future__ import annotations
@@ -36,20 +31,14 @@ _RECALL_KEY = f"recall@{RECALL_K}"
 
 
 def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = RECALL_K) -> float:
-    """Fraction of each text's top-k teacher neighbours that the student also retrieves.
+    """Fraction of each text's top-k teacher neighbours the student also retrieves -- *relative*
+    similarity, which is how an embedding model is actually used. This is THE selection metric;
+    per-vector agreement (``embed_dist`` = 1-cos) is logging only, because uniform shrinkage keeps
+    cosine high while destroying the ranking and a global rotation does the reverse. Lives here,
+    not in the eval script, so training-time selection and end-of-run scoring cannot drift.
 
-    This is what an embedding model is actually used through — *relative* similarity — and it
-    is why per-vector agreement (``embed_dist`` = 1-cos) is not enough on its own: uniform
-    shrinkage of the near/far spread keeps cosine high while destroying the ranking, and a
-    global rotation does the reverse. Measured to disagree with ``embed_dist`` repeatedly, so
-    this is the selection metric and ``embed_dist`` is logging only.
-
-    Rows must be L2-normed (the backend's pooled output is), so ``x @ x.T`` is cosine.
-    Defined here rather than in the eval script so training-time selection and end-of-run
-    scoring cannot drift apart.
-
-    Only comparable at a FIXED pool size. Difficulty is set by ``k/(n-1)``, not by the model, so at
-    identical per-vector damage this measures 1.000 at n=11, 0.110 at n=500 and 0.039 at n=5000.
+    ⚠️ Comparable only at a FIXED pool size: difficulty is ``k/(n-1)``, so identical per-vector
+    damage reads 1.000 at n=11, 0.110 at n=500, 0.039 at n=5000. Rows must be L2-normed.
     """
     ss, st = student @ student.T, teacher @ teacher.T
     # Mask self-similarity, else every row's nearest neighbour is itself and both models
@@ -65,15 +54,12 @@ def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = RECALL_K)
 class EmbeddingDistillLoss(nn.Module):
     """``(1 - cos)`` on the pooled embedding + ``beta`` * masked hidden MSE.
 
-    The embedding term is Reimers & Gurevych (2020) sentence-embedding distillation.
-    They minimize MSE between student and teacher embeddings; on L2-normed vectors
-    ``MSE == 2 - 2cos``, so cosine is the same objective with a bounded, readable scale.
-    The hidden term is TinyBERT / Patient-KD layerwise matching, reusing the shared
-    ``masked_mse_loss`` + ``resolve_layer_map`` — it earns its place when the student is
-    structurally different from the teacher (reduced depth), and ``beta: 0`` turns it off.
+    Embedding term is Reimers & Gurevych (2020): they minimize MSE, and on L2-normed vectors
+    ``MSE == 2 - 2cos``, so cosine is the same objective on a bounded, readable scale. Hidden term
+    is TinyBERT/Patient-KD layerwise matching, which earns its place once the student is
+    structurally different (reduced depth); ``beta: 0`` turns it off.
 
-    No CE / logit-KL here: there are no labels and no logits, which is why
-    ``DistillConfig.alpha`` and ``temperature`` go unused by this task.
+    No CE / logit-KL: no labels and no logits, which is why ``alpha``/``temperature`` go unused.
     """
 
     def __init__(self, cfg: DistillConfig):
@@ -110,21 +96,10 @@ class EmbedSelfDistillTask(Task):
 
     def build_tokenizer(self, cfg: Config) -> Any:
         tok = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
-        # Right padding — the tokenizer's default, pinned for consistency, NOT correctness.
-        # Padding side does not change the embeddings: `model.py` (and HF) build position_ids
-        # as a plain arange, so left padding shifts every real token's RoPE position by the
-        # pad count — but RoPE is *relative*, attention depends only on position differences,
-        # and a constant shift cancels. Verified: same text alone vs batched with a much
-        # longer neighbour gives cosine 1.0 under either side, for teacher and student.
-        # (The model card recommends left; it makes no difference here.) EXCEPT under
+        # Pinned for consistency, not correctness: RoPE is *relative*, so left padding's constant
+        # position shift cancels (verified cosine 1.0 alone vs batched, both models). EXCEPT under
         # attn_impl "sdpa_causal", which drops the pad mask and needs pads AFTER real tokens.
         tok.padding_side = "right"
-        if getattr(cfg.model, "attn_impl", "manual") == "sdpa_causal":
-            if tok.padding_side != "right":
-                raise ValueError(
-                    "attn_impl 'sdpa_causal' drops the padding mask and requires right "
-                    f"padding, got {tok.padding_side!r}."
-                )
         return tok
 
     def datasets(self, tokenizer: Any, cfg: Config, splits=("train", "validation")) -> dict:
@@ -157,9 +132,8 @@ class EmbedSelfDistillTask(Task):
         return total, {"embed": embed.detach(), "hidden": hidden.detach()}
 
     def select_metric(self) -> tuple[str, bool]:
-        # Deliberately NOT the quantity the loss minimizes. There are no labels, so "best"
-        # means "closest to the teacher", but per-vector closeness (what the loss and
-        # `embed_dist` measure) is not what the model is used through — see `recall_at_k`.
+        # Deliberately NOT what the loss minimizes: per-vector closeness is not how the model is
+        # used -- see `recall_at_k`.
         return (_RECALL_KEY, True)
 
     @torch.no_grad()
@@ -171,15 +145,12 @@ class EmbedSelfDistillTask(Task):
                 "EmbedSelfDistillTask.evaluate needs `teacher`: the metric is agreement with "
                 "the teacher, so there is nothing to score against without it."
             )
-        # Only the split being scored: the training corpus is irrelevant here, and rebuilding it
-        # once per epoch is pure wall-clock (minutes per call at corpus_size 216k).
+        # Only the scored split: rebuilding the training corpus per epoch is minutes at 216k.
         data = self.datasets(tokenizer, cfg, splits=(split,))
         ds = data[split].with_format("torch", columns=self.torch_columns())
-        # Batched the same way training is, so one knob bounds memory everywhere: a fixed sequence
-        # count at max_seq_len 1024 puts the whole 500-row pool in one batch, and the returned
-        # per-layer hidden states make that ~20 GB. Safe to differ from training's batching —
-        # dynamic padding perturbs embeddings across batch compositions at only ~5e-7 (recall@10 is
-        # *bit-identical* at eval batch 8/16/32/64; only `embed_dist` moves, in its 8th decimal).
+        # Batched like training, so one knob bounds memory everywhere (a fixed sequence count at
+        # max_seq_len 1024 puts the whole 500-row pool in one ~20 GB batch). Safe to differ from
+        # training: recall@10 is bit-identical at eval batch 8/16/32/64, only embed_dist moves.
         opt = cfg.train.distill
         if opt.token_budget:
             lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(

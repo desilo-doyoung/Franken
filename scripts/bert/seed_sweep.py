@@ -1,27 +1,16 @@
-"""Seed sweep: find the best teacher seed, then the best student seed on top of it.
+"""Seed sweep: best teacher seed, then the best student seed on top of it. Selection is on
+*validation* throughout; test scores are reported at the end for information only.
 
-Two-phase, coupled sweep with clean *validation* selection (no test leakage):
+  1. Teacher phase — fine-tune per seed, select LOWEST validation CE (best-calibrated soft targets
+     distil into the stronger student). CE is computed here directly, dodging the transformers 5.13
+     `eval_loss` 2x-logging quirk.
+  2. Student phase — freeze that teacher, distil per seed, select highest validation F1. Each run
+     already restores its own best-val-F1 epoch inside Distiller.train().
 
-  1. Teacher phase  — fine-tune the teacher for each candidate seed and score it
-     on MRPC validation. Select the seed with the lowest validation cross-entropy
-     (CE computed here directly, so the transformers 5.13 `eval_loss` 2x-logging
-     quirk is irrelevant). Lowest val CE == best-calibrated soft targets, which
-     PROGRESS.md shows distil into the stronger student.
-  2. Student phase  — freeze the single best teacher and distil a student for each
-     candidate seed (each run already restores its own best-val-F1 epoch inside
-     Distiller.train()). Select the seed with the highest validation F1.
-
-The winning student is exported to <student-out>/pytorch_model.bin (what
-scripts/bert/evaluate.py + scripts/bert/act_range.py load) and <student-out>/model.safetensors
-(portable single-file export for other environments). Test scores are reported at
-the end for information only — they never drive selection.
-
-Parallelism: the candidate seeds are split across the given --gpus and each chunk
-runs in its own single-GPU worker subprocess (CUDA_VISIBLE_DEVICES pinned per
-worker). Single-GPU workers avoid HF Trainer DataParallel — which would change the
-effective batch size and break the student's bit-reproducibility. A barrier between
-the two phases keeps selection global: one best teacher across ALL seeds, then one
-best student across ALL seeds.
+Seeds are split across --gpus, one single-GPU worker subprocess per chunk: that avoids HF Trainer
+DataParallel, which would change the effective batch size and break bit-reproducibility. A barrier
+between the phases keeps selection global. The winner is exported to <student-out>/ as both
+pytorch_model.bin and model.safetensors.
 
 Usage:
     # Orchestrate across GPUs 2 and 3 (default):
@@ -45,13 +34,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 import torch
 import torch.nn.functional as F
 from franken.config import Config
-from franken.data.mrpc import compute_metrics
+from franken.data.mrpc import compute_metrics, load_mrpc
 from franken.distill.trainer import Distiller
 from franken.models import build_backend
 from franken.tasks import build_task
 from safetensors.torch import save_file
 from torch.utils.data import DataLoader
-from transformers import DataCollatorWithPadding
 
 
 # --------------------------------------------------------------------------- utils
@@ -150,18 +138,9 @@ def cmd_teacher_worker(args: argparse.Namespace) -> None:
 def score_student_split(
     student, tokenizer, split: str, max_seq_len: int, device, backend, task
 ) -> dict:
-    """Score a student on an arbitrary MRPC split (used for the test split, which
-    load_mrpc does not expose). Mirrors scripts/bert/evaluate.py's tokenization."""
-    import datasets
-
-    ds = datasets.load_dataset("nyu-mll/glue", "mrpc")[split]
-    ds = ds.map(
-        lambda b: tokenizer(
-            b["sentence1"], b["sentence2"], truncation=True, max_length=max_seq_len
-        ),
-        batched=True,
-    ).with_format("torch", columns=task.torch_columns())
-    dl = DataLoader(ds, batch_size=64, collate_fn=DataCollatorWithPadding(tokenizer))
+    data = load_mrpc(tokenizer, max_seq_len, splits=(split,))
+    ds = data[split].with_format("torch", columns=task.torch_columns())
+    dl = DataLoader(ds, batch_size=64, collate_fn=data["collator"])
     student.eval()
     preds, labels = [], []
     for batch in dl:

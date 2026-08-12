@@ -1,25 +1,19 @@
-"""Score a checkpoint. Three suites, one script, because the reading is a comparison across them.
+"""Score a checkpoint. Three suites in one script, because the reading is a comparison across them.
 
-    fidelity   recall@10 + STS-B    did the student track THIS teacher, on the selection pool?
-                                    recall@10's teacher value is 1.0 BY CONSTRUCTION: it compares
-                                    neighbourhoods against the teacher, so there is nothing to show
-    corpus     nDCG@10 + recall@10  quality AND fidelity per training slice, off one pass of
-                                    embeddings. Held-out rows, so coverage is out of the equation
-    external   nDCG@10, benchmarks    quality lost in the wild -- the number to quote
+    fidelity   recall@10 + STS-B    did the student track THIS teacher on the selection pool?
+    corpus     nDCG@10 + recall@10  quality AND fidelity per training slice, held-out rows
+    external   nDCG@10 benchmarks   quality lost in the wild -- the number to quote
 
-`external - corpus` is the coverage gap, and that subtraction is the point: a small in-distribution
-deficit with a large external one means the fix is data; both large means it is capacity and more
-data will not help. Printed at the bottom.
-
-Scoring machinery is in `common.py` and pool construction in `franken.data.embed_corpus.evalset`;
-this file is the task table, the three suites and the report.
+`external - corpus` is the coverage gap, printed at the bottom, and that subtraction is the point:
+a small in-distribution deficit with a large external one means the fix is data; both large means
+it is capacity and more data will not help.
 
     uv run python scripts/qwen3/eval.py --student-ckpt outputs/<run>/student/pytorch_model.bin
     uv run python scripts/qwen3/eval.py --suite corpus --split test        # touched once
     uv run python scripts/qwen3/eval.py --config configs/qwen3/depth28_multi_domain.yaml
 
-With no --student-ckpt the student is seeded from the teacher, so at FULL depth every delta reads ~0
--- the self-test. Below full depth it is an untrained truncation and reads ~-100%.
+With no --student-ckpt the student is seeded from the teacher, so at FULL depth every delta reads
+~0 -- the self-test. Below full depth it is an untrained truncation and reads ~-100%.
 """
 
 from __future__ import annotations
@@ -104,51 +98,36 @@ EXTERNAL = {
 # --------------------------------------------------------------- suites
 
 
-def _pairs(
-    m: Models,
-    pools: dict[str, Pool],
-    suite: str,
-    kinds: dict | None = None,
-    shapes: dict | None = None,
-) -> dict:
-    """Score teacher and student over named pools. One row per pool, teacher cached.
-
-    `shapes` says what each task actually retrieves. Without it a reader cannot tell that `gooaq` is
-    question->answer while `specter` is anchor->cited-title against a hard negative — tasks of very
-    different difficulty whose scores are not comparable to each other.
+def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes: dict | None = None) -> dict:
+    """Score teacher and student over named pools, one row each, teacher cached. `shapes` says what
+    a task retrieves -- without it a reader cannot tell that `gooaq` is question->answer while
+    `specter` is anchor->cited-title against a hard negative, difficulties that are not comparable.
     """
     out = {}
     for name, p in pools.items():
-        kind = (kinds or {}).get(name, "")
         shape = (shapes or {}).get(name, "")
         if not p:
-            print(f"{name:>18} {kind:>6}   no queries", flush=True)
+            print(f"{name:>18} {'':>6}   no queries", flush=True)
             continue
         t = score(m, m.teacher, p, cache=teacher_cache(suite, name, m.cfg))
         s = score(m, m.student, p)
         print(
-            f"{name:>18} {kind:>6} {len(p.q_ids):>5} {len(p.d_ids):>6} "
+            f"{name:>18} {'':>6} {len(p.q_ids):>5} {len(p.d_ids):>6} "
             f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}%"
             f"   {shape}",
             flush=True,
         )
         out[name] = {"teacher": t, "student": s, "queries": len(p.q_ids), "docs": len(p.d_ids)}
-        if kind:
-            out[name]["tag"] = kind
         if shape:
             out[name]["retrieves"] = shape
     return out
 
 
 def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict) -> dict:
-    """Quality AND fidelity per task, off one pass of embeddings.
-
-    nDCG@K says how much retrieval quality was lost; recall@K and embed_dist say how far the
-    student's geometry moved from the teacher's ON THAT SLICE. They answer different questions and
-    the tracker has read them as a ratio, so both belong per task rather than pooled.
-
-    Free: `score` was already embedding every pool twice and discarding the vectors.
-    """
+    """Quality AND fidelity per task, off one pass of embeddings (free: `score` already embedded
+    every pool twice and threw the vectors away). nDCG@K is quality lost; recall@K and embed_dist
+    are how far the student's geometry moved ON THAT SLICE. Different questions, read as a ratio,
+    so both belong per task rather than pooled."""
     out = {}
     for name, p in pools.items():
         kind, shape = kinds.get(name, ""), shapes.get(name, "")
@@ -158,9 +137,8 @@ def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict) -
         td, tq = embed_pool(m, m.teacher, p, teacher_cache("corpus", name, m.cfg))
         sd, sq = embed_pool(m, m.student, p)
         t, s = ndcg_pool(p, td, tq), ndcg_pool(p, sd, sq)
-        # The WHOLE document pool, not a fixed slice. Both columns are read across MODELS within a
-        # task, where the pool is identical for teacher and student so its size cancels; truncating
-        # would only make recall@K easier (k/(n-1) rises) and so less sensitive to damage.
+        # The WHOLE doc pool: read across MODELS within a task, so pool size cancels, and
+        # truncating would only make recall@K easier (k/(n-1) rises) and less sensitive to damage.
         rec = recall_at_k(sd, td, K)
         dist = 1.0 - F.cosine_similarity(sd, td, dim=-1).mean().item()
         print(
@@ -183,8 +161,8 @@ def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict) -
 
 
 def _header(what: str, metric: str) -> None:
-    """The metric goes in the header, always. `recall@10` here means teacher-neighbour agreement and
-    MTEB's means something else, so an unlabelled column is a number waiting to be misread."""
+    # The metric always goes in the header: `recall@10` here means teacher-neighbour agreement,
+    # MTEB's means something else, so an unlabelled column is a number waiting to be misread.
     print(
         f"\n== {what} -- {metric} ==\n{'task':>18} {'kind':>6} {'q':>5} {'docs':>6} "
         f"{'teacher':>9} {'student':>9} {'delta':>9} {'rel':>8}   retrieves",
@@ -209,10 +187,9 @@ def _print_macro(label: str, rows: list[dict]) -> dict:
 def fidelity(m: Models) -> dict:
     """Teacher agreement on the corpus's own held-out pool, plus STS-B as a labelled anchor.
 
-    recall@10 is ALREADY relative to the teacher -- feeding it the teacher gives exactly 1.0, so the
-    ceiling is definitional and there is no teacher column to print. Quote it raw. It comes from
-    `franken.tasks.embed.recall_at_k`, the same function that selected the checkpoint, so this is
-    the number that chose it; comparable only at a fixed pool size. `embed_dist` misranks: logging.
+    recall@10 is ALREADY teacher-relative -- feeding it the teacher gives exactly 1.0, so there is
+    no teacher column to print. It comes from the same `recall_at_k` that selected the checkpoint,
+    so this is the number that chose it; comparable only at a fixed pool size.
     """
     data = m.task.datasets(m.tokenizer, m.cfg, splits=("validation",))
     ds = data["validation"].with_format("torch", columns=m.task.torch_columns())
@@ -259,11 +236,10 @@ def fidelity(m: Models) -> dict:
 
 
 def corpus(m: Models, split: str, names: list[str]) -> dict:
-    """nDCG@10 on held-out rows of the training slices, so corpus coverage is out of the equation.
+    """nDCG@10 on held-out rows of the training slices, so coverage is out of the equation.
 
-    Two macros, deliberately not one: a qrels-derived task's gold documents are ~96% likely to be
-    train rows, so only its distractors are held out. Averaging that into a clean headline is the
-    CORE-macro mistake.
+    Two macros, deliberately not one: a qrels task's golds are ~96% likely to be train rows, so
+    only its distractors are held out. Averaging that into a clean headline is the CORE mistake.
     """
     sources = {s.name: s for s in mix(m.cfg.train.corpus)}
     print(
@@ -314,7 +290,7 @@ def external(m: Models, names: list[str]) -> dict:
     """nDCG@10 against ground-truth judgements. NOT comparable to the published MTEB table: task
     subset, the config's own max_seq_len (the FHE condition) vs MTEB's 512, one generic instruction.
 
-    The macro is EVERY scored task. Two tasks ("CORE") read the depth-19 cut at +0.4% where five
+    ⚠️ The macro is EVERY scored task. Two tasks ("CORE") read the depth-19 cut at +0.4% where five
     put it at -16.0%, inverting the ratio column too -- it reversed the conclusion, not the value.
     """
     _header("external benchmarks", f"nDCG@{K}")
