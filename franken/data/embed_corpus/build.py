@@ -25,8 +25,9 @@ from franken.data.embed_corpus.spec import Record, corpus_texts, eval_pair, spli
 # v5: one Record per row (adapter rewrite); marco emits positives before negatives.
 # v6: SPLIT_PCT 2/2 -> 1/4 (split membership is baked in, not part of the key); per-source
 #     `instruct` replaces `prefix_query`.
+# v7: instructions adopted on 6 asymmetric sources, so their stored query text changed.
 _CACHE_DIR = "outputs/corpus_cache"
-_CACHE_VERSION = 6
+_CACHE_VERSION = 7
 
 # Shard-order shuffling does the global mixing, so the buffer stays small — a big one only adds
 # download latency, and the assembled corpus is shuffled anyway.

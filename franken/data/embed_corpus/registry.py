@@ -104,6 +104,8 @@ _MULTI_DOMAIN = [
         scores_ndcg=False,
     ),
     # Informal prose: the `fiqa` domain, -13.5% at depth 19.
+    # Google-sourced questions -> 51-430 char snippet answers, i.e. web search outright, and the
+    # gate agrees: WEB_SEARCH beat a vaguer question->answer string by +0.0156.
     Source(
         "gooaq",
         "informal",
@@ -112,6 +114,7 @@ _MULTI_DOMAIN = [
         adapters.pair("question", "answer"),
         0.1,
         key="question",
+        instruct=WEB_SEARCH,
     ),
     Source(
         "eli5",
@@ -121,6 +124,7 @@ _MULTI_DOMAIN = [
         adapters.pair("question", "answer"),
         0.03,
         key="question",
+        instruct="Given a forum question, retrieve a detailed explanation that answers it",
     ),
     Source(
         "stackexchange",
@@ -133,6 +137,7 @@ _MULTI_DOMAIN = [
     ),
     # Partial eval contamination, bounded by the sampling rate (~4% of pubmed, ~2% of s2orc):
     # pubmed overlaps nfcorpus's domain, s2orc is scifact's source. `fiqa` is the clean check.
+    # The query side is a TITLE, not a question.
     Source(
         "pubmed",
         "science",
@@ -141,7 +146,12 @@ _MULTI_DOMAIN = [
         adapters.pair("title", "content"),
         0.06,
         key="PMID",
+        instruct="Given the title of a biomedical article, retrieve its abstract",
     ),
+    # NOT "citation sentence -> cited abstract": the card pairs an abstract with "an excerpt or
+    # passage from a cited paper", and both sides measure ~217 / ~280 tokens. Abstract -> abstract
+    # is SYMMETRIC, so there is no query side to instruct -- and the gate agrees, -0.0088 for the
+    # web string, the only negative among the corpus sources.
     Source(
         "s2orc",
         "science",
@@ -172,7 +182,10 @@ _MULTI_DOMAIN = [
         "python",
         adapters.pair("func_documentation_string", "whole_func_string"),
         0.04,
+        instruct="Given a function's docstring, retrieve the function that implements it",
     ),
+    # "solution", not "code": both cards say the answer is code PLUS explanatory prose, so an
+    # instruction naming code alone describes the wrong artifact.
     Source(
         "codefeedback",
         "code",
@@ -181,6 +194,7 @@ _MULTI_DOMAIN = [
         adapters.pair("query", "answer"),
         0.015,
         key="query",
+        instruct="Given a programming task, retrieve the solution that implements it",
     ),
     Source(
         "glaive_code",
@@ -190,6 +204,7 @@ _MULTI_DOMAIN = [
         adapters.pair("question", "answer"),
         0.013,
         key="question",
+        instruct="Given a programming question, retrieve the answer that explains how to solve it",
     ),
 ] + [
     # `datasets` 5.0 removed script loaders, killing miracl/mr-tydi/MLDR; wikipedia is

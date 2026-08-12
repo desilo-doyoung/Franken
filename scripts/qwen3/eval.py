@@ -29,7 +29,7 @@ import datasets
 import torch
 import torch.nn.functional as F
 from common import K, Models, _embed_texts, embed_pool, load, ndcg_pool, score, teacher_cache
-from franken.data.embed_corpus import Pool, instruct, mix, pool
+from franken.data.embed_corpus import WEB_SEARCH, Pool, instruct, mix, pool
 from franken.tasks.embed import recall_at_k
 from scipy.stats import spearmanr
 from torch.utils.data import DataLoader
@@ -91,32 +91,31 @@ def _xpqa(pair: str, task: str) -> Pool:
 # is the corpus), and MIRACL / Mr.TyDi (Wikipedia-derived).
 #
 #
-# (loader, instruction). Each task names what IT retrieves -- one web-search string over all five
-# was the previous state and is wrong for four of them. The instruction is separate from the loader
-# so `instruct_gate.py` can rebuild the same pool under a different one.
+# (loader, instruction). EVERY query is instructed -- that asymmetry (instruction on the query,
+# `"document": ""`) is the model's contract, and stripping it measures symmetric similarity instead
+# of retrieval. Which string is per task, chosen by `instruct_gate.py` on the TEACHER column; the
+# deltas below are vs the generic WEB_SEARCH string it replaced.
 EXTERNAL = {
-    # 3.6k docs, biomedical, GRADED rel (0-2)
+    # 3.6k docs, biomedical, GRADED rel (0-2). +0.0110 over web.
     "nfcorpus": (
         partial(_beir, "mteb/nfcorpus"),
         "Given a medical question, retrieve documents that best answer it",
     ),
-    # 5.2k docs, claim verification, binary
-    "scifact": (
-        partial(_beir, "mteb/scifact"),
-        "Given a scientific claim, retrieve documents that support or refute the claim",
-    ),
-    # 58k docs / 1.7k q, informal web prose
+    # 5.2k docs, claim verification, binary. A claim-specific string measured -0.0024: keep web.
+    "scifact": (partial(_beir, "mteb/scifact"), WEB_SEARCH),
+    # 58k docs / 1.7k q, informal web prose. +0.0048 over web -- at the noise floor, kept because
+    # it is eval-only and positive.
     "fiqa": (
         partial(_beir, "mteb/fiqa"),
         "Given a financial question, retrieve user replies that best answer the question",
     ),
-    # 1.7k docs / 824 q, zh = best-covered language
-    "xpqa_cmn": (
-        partial(_xpqa, "cmn-cmn"),
-        "Given a product question, retrieve passages that answer the question",
-    ),
-    # Scores the code slice. It read 0.0797 at max_seq_len 128 purely because 92.8% of its QUERIES
-    # overflowed; at 1024 they fit. Confirm the teacher clears that floor before trusting it.
+    # 1.7k docs / 824 q, zh = best-covered language. A product-specific string measured -0.0269,
+    # the worst candidate in the gate: keep web.
+    "xpqa_cmn": (partial(_xpqa, "cmn-cmn"), WEB_SEARCH),
+    # Scores the code slice. The web string COSTS 0.0734 here (0.6623 vs 0.7357 bare) -- calling an
+    # APPS problem statement a web search query actively misdirects. This recovers 0.0694 of that
+    # while keeping the query instructed; bare buys the last 0.0040 by dropping the asymmetry, which
+    # is not a trade worth making when the point is to measure retrieval.
     "code_apps": (
         partial(_beir, "CoIR-Retrieval/apps"),
         "Given a programming problem, retrieve the code that solves it",
