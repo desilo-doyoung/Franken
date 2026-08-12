@@ -104,8 +104,11 @@ _MULTI_DOMAIN = [
         scores_ndcg=False,
     ),
     # Informal prose: the `fiqa` domain, -13.5% at depth 19.
-    # Google-sourced questions -> 51-430 char snippet answers, i.e. web search outright, and the
-    # gate agrees: WEB_SEARCH beat a vaguer question->answer string by +0.0156.
+    # Every instructed source carries WEB_SEARCH, measured rather than assumed: task-matching
+    # strings written from the dataset cards came in at +0.0017 to -0.0067 against it, i.e. noise or
+    # worse, on all seven. The model keys on the canonical string it was trained with, not on
+    # semantic fit -- so tailoring is only worth it where it beat web by more than the ~0.005 floor,
+    # which happened on exactly two EXTERNAL tasks (see eval.EXTERNAL) and no corpus source.
     Source(
         "gooaq",
         "informal",
@@ -124,7 +127,7 @@ _MULTI_DOMAIN = [
         adapters.pair("question", "answer"),
         0.03,
         key="question",
-        instruct="Given a forum question, retrieve a detailed explanation that answers it",
+        instruct=WEB_SEARCH,  # a forum-question string measured -0.0067
     ),
     Source(
         "stackexchange",
@@ -146,7 +149,7 @@ _MULTI_DOMAIN = [
         adapters.pair("title", "content"),
         0.06,
         key="PMID",
-        instruct="Given the title of a biomedical article, retrieve its abstract",
+        instruct=WEB_SEARCH,
     ),
     # NOT "citation sentence -> cited abstract": the card pairs an abstract with "an excerpt or
     # passage from a cited paper", and both sides measure ~217 / ~280 tokens. Abstract -> abstract
@@ -182,10 +185,8 @@ _MULTI_DOMAIN = [
         "python",
         adapters.pair("func_documentation_string", "whole_func_string"),
         0.04,
-        instruct="Given a function's docstring, retrieve the function that implements it",
+        instruct=WEB_SEARCH,
     ),
-    # "solution", not "code": both cards say the answer is code PLUS explanatory prose, so an
-    # instruction naming code alone describes the wrong artifact.
     Source(
         "codefeedback",
         "code",
@@ -194,7 +195,7 @@ _MULTI_DOMAIN = [
         adapters.pair("query", "answer"),
         0.015,
         key="query",
-        instruct="Given a programming task, retrieve the solution that implements it",
+        instruct=WEB_SEARCH,
     ),
     Source(
         "glaive_code",
@@ -204,7 +205,7 @@ _MULTI_DOMAIN = [
         adapters.pair("question", "answer"),
         0.013,
         key="question",
-        instruct="Given a programming question, retrieve the answer that explains how to solve it",
+        instruct=WEB_SEARCH,
     ),
 ] + [
     # `datasets` 5.0 removed script loaders, killing miracl/mr-tydi/MLDR; wikipedia is

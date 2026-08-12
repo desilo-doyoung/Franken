@@ -93,8 +93,9 @@ def _xpqa(pair: str, task: str) -> Pool:
 #
 # (loader, instruction). EVERY query is instructed -- that asymmetry (instruction on the query,
 # `"document": ""`) is the model's contract, and stripping it measures symmetric similarity instead
-# of retrieval. Which string is per task, chosen by `instruct_gate.py` on the TEACHER column; the
-# deltas below are vs the generic WEB_SEARCH string it replaced.
+# of retrieval. WEB_SEARCH is the default; a task-specific string is kept ONLY where a teacher-only
+# sweep measured it beating web by more than the ~0.005 floor -- two of five here, none of the 18
+# corpus sources. Deltas in the qwen3 tracker; the sweep script is `git log -- scripts/qwen3`.
 EXTERNAL = {
     # 3.6k docs, biomedical, GRADED rel (0-2). +0.0110 over web.
     "nfcorpus": (
@@ -103,12 +104,9 @@ EXTERNAL = {
     ),
     # 5.2k docs, claim verification, binary. A claim-specific string measured -0.0024: keep web.
     "scifact": (partial(_beir, "mteb/scifact"), WEB_SEARCH),
-    # 58k docs / 1.7k q, informal web prose. +0.0048 over web -- at the noise floor, kept because
-    # it is eval-only and positive.
-    "fiqa": (
-        partial(_beir, "mteb/fiqa"),
-        "Given a financial question, retrieve user replies that best answer the question",
-    ),
+    # 58k docs / 1.7k q, informal web prose. A finance-specific string measured +0.0048, on the
+    # noise floor: not enough to justify a second string.
+    "fiqa": (partial(_beir, "mteb/fiqa"), WEB_SEARCH),
     # 1.7k docs / 824 q, zh = best-covered language. A product-specific string measured -0.0269,
     # the worst candidate in the gate: keep web.
     "xpqa_cmn": (partial(_xpqa, "cmn-cmn"), WEB_SEARCH),
