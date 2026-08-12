@@ -184,6 +184,7 @@ def _print_macro(label: str, rows: list[dict]) -> dict:
     return {"teacher": t, "student": s, "n": len(rows)}
 
 
+@torch.no_grad()
 def fidelity(m: Models) -> dict:
     """Teacher agreement on the corpus's own held-out pool, plus STS-B as a labelled anchor.
 

@@ -73,7 +73,9 @@ def load(args) -> Models:
     backend.seed_student(student, teacher, cfg)
     if args.student_ckpt:
         student.load_state_dict(torch.load(args.student_ckpt, map_location="cpu"))
-    student = student.to(device).eval()
+    # requires_grad_(False), not just eval(): these scripts only score. Without it a scorer that
+    # forgets no_grad retains an autograd graph per batch and OOMs on the accumulation loop.
+    student = student.to(device).eval().requires_grad_(False)
 
     depth, teacher_depth = cfg.model.num_hidden_layers, teacher.config.num_hidden_layers
     if not args.student_ckpt and depth != teacher_depth:
