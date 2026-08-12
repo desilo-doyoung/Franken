@@ -9,7 +9,7 @@
 # `git show a3636dc:configs/qwen3/depth19_multi_domain.yaml` if the two need comparing.
 #
 # Build the cache first, or each concurrent run re-streams 9.0M texts:
-#     uv run python scripts/qwen3/corpus.py --build --config configs/qwen3/depth19_multi_domain.yaml
+#     uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_multi_domain.yaml
 
 model:
   backend: qwen3
@@ -34,7 +34,10 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  corpus_size: 9000000 # corpus.py probe: 111.3 tok/text -> 1.00B/epoch, x2 epochs = 2.00B
+  # Probe said 111.3 tok/text; the built corpus realized 107.7, so this spends 1.94B, not 2B.
+  # Left as-is on purpose: 9,300,000 would hit 2.00B but is a different cache key, and every
+  # rung of this ladder shares this one. Change it only when starting a fresh ladder.
+  corpus_size: 9000000
   output_dir: outputs
   # Distinct from the targeted-penalty era: a result under the bare name means [2, 18].
   run_name: qwen3_depth19_multi_domain_allpen

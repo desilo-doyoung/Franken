@@ -1,14 +1,13 @@
 """The corpus workflow: verify the holdout, measure the mix, build the cache.
 
 One script because the three stages always run in this order, on the same mix, each gating the next.
-`check` and `measure` run by default; `--build` adds the third, opt-in because it takes hours and
-because `measure` prints a `corpus_size` you paste into the config first.
+The cache is built when it is missing — hours, but the alternative is every rank building its own —
+and reported when it is not.
 
 Measurement lives in `franken.data.embed_corpus` (`profile`, `describe`, `realized_mix`); this file
 is argument parsing, tables and the pass/fail verdict.
 
     uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_multi_domain.yaml
-    uv run python scripts/qwen3/corpus.py --config ... --build      # config already up to date
 """
 
 from __future__ import annotations
@@ -20,11 +19,18 @@ import time
 
 import datasets
 from franken.config import Config
-from franken.data.embed_corpus import SPLITS, describe, mix, profile, realized_mix, source_texts
+from franken.data.embed_corpus import (
+    SPLITS,
+    cache_path,
+    describe,
+    mix,
+    profile,
+    realized_mix,
+    source_texts,
+)
 from franken.tasks import build_task
 
 TOKEN_TARGET = 2e9  # token-passes per run; the only place this budget is written down
-TOLERANCE = 0.02  # realized-vs-target slack before the build is an error
 SAMPLE = 300  # texts per source for the length profile
 HOLDOUT_SAMPLE = 100  # texts per split per source, for the overlap check
 
@@ -112,18 +118,25 @@ def measure(cfg, sources, tokenizer) -> tuple[bool, int]:
     return not (failed or blind), size
 
 
-def build(cfg, task, tokenizer, sources) -> bool:
-    """Build and cache, then enforce the budget on the ARTIFACT rather than on a pasted estimate.
+def build(cfg, task, tokenizer, sources) -> None:
+    """Build and cache if needed, then report what the artifact holds.
 
     Every rank re-streams independently otherwise — hours at 9M texts — so they must all cache-hit.
-    The token check is the only place a stale `corpus_size` gets caught: a ladder once ran 5.6% hot
-    because a corrected estimate never reached the config that consumed it.
+    The token count is a report, not a gate: `corpus_size` is converted from the budget through a
+    `tok/text` estimated on SAMPLE texts per source, whose standard error is about the size of the
+    few percent it lands off 2B, and a run near the budget is a fine run. It is still the only place
+    a stale `corpus_size` shows up, so it prints on cache hits too — a number that only appears on
+    the build that made the corpus says nothing on the reruns that reuse it.
     """
     cap = cfg.train.max_seq_len
-    print(f"\nbuilding {cfg.train.corpus} size={cfg.train.corpus_size:,} max_seq_len={cap}\n")
+    cached = os.path.isdir(
+        cache_path(cfg.train.corpus, "train", cfg.train.corpus_size, cap, tokenizer)
+    )
+    verb = "loading" if cached else "BUILDING (hours)"
+    print(f"\n{verb} {cfg.train.corpus} size={cfg.train.corpus_size:,} max_seq_len={cap}\n")
     start = time.time()
     data = task.datasets(tokenizer, cfg)
-    print(f"\nbuilt in {(time.time() - start) / 60:.1f} min\n")
+    print(f"\nready in {(time.time() - start) / 60:.1f} min\n")
 
     stats = {s: describe(data[s], cap) for s in ("train", "validation")}
     for split, st in stats.items():
@@ -145,13 +158,10 @@ def build(cfg, task, tokenizer, sources) -> bool:
     passes = stats["train"].tokens * epochs
     off = passes / TOKEN_TARGET - 1
     print(f"\ntoken-passes at {epochs} epochs: {passes:,} (target {TOKEN_TARGET:,.0f}, {off:+.1%})")
-    if abs(off) > TOLERANCE:
-        print(
-            f"\nBUDGET MISS beyond {TOLERANCE:.0%}: set corpus_size {cfg.train.corpus_size:,} -> "
-            f"{round(cfg.train.corpus_size / (1 + off) / 1e5) * 100_000:,} and rebuild."
-        )
-        return False
-    return True
+    print(
+        f"corpus_size {cfg.train.corpus_size:,} spends that; "
+        f"{round(cfg.train.corpus_size / (1 + off) / 1e5) * 100_000:,} would spend the target"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -159,7 +169,6 @@ def main(argv: list[str] | None = None) -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--config", required=True, help="path to the experiment YAML")
-    p.add_argument("--build", action="store_true", help="also build the cache (hours)")
     args = p.parse_args(argv)
 
     datasets.disable_progress_bars()
@@ -174,10 +183,10 @@ def main(argv: list[str] | None = None) -> None:
     if ok and size and size != cfg.train.corpus_size:
         print(
             f"\nconfig corpus_size {cfg.train.corpus_size:,} != measured {size:,} "
-            f"({cfg.train.corpus_size / size - 1:+.1%}) — update it before building."
+            f"({cfg.train.corpus_size / size - 1:+.1%}) — the config's value is what gets built."
         )
-    if ok and args.build:
-        ok = build(cfg, task, tokenizer, sources)
+    if ok:
+        build(cfg, task, tokenizer, sources)
 
     print(f"\n{'CORPUS OK' if ok else 'CORPUS FAILED — do not train'}\n")
     # os._exit, not SystemExit: an HF retry thread aborts during interpreter *finalization*

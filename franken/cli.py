@@ -4,7 +4,7 @@ The single-config path, start to finish. For a batch over several configs and GP
 `scripts/qwen3/run_experiments.py`, which does the same steps per config and prints one table.
 
 Usage:
-    python main.py corpus  --config configs/qwen3/depth19_multi_domain.yaml [--build]
+    python main.py corpus  --config configs/qwen3/depth19_multi_domain.yaml
     python main.py distill --config configs/qwen3/depth19_multi_domain.yaml
     python main.py eval    --config configs/qwen3/depth19_multi_domain.yaml
 """
@@ -86,11 +86,7 @@ def _delegate(backend: str, script: str, argv: list[str]) -> None:
 
 def cmd_corpus(args: argparse.Namespace, extra: list[str]) -> None:
     cfg = _load_config(args)
-    _delegate(
-        cfg.model.backend,
-        "corpus.py",
-        ["--config", args.config] + (["--build"] if args.build else []) + extra,
-    )
+    _delegate(cfg.model.backend, "corpus.py", ["--config", args.config] + extra)
 
 
 def cmd_eval(args: argparse.Namespace, extra: list[str]) -> None:
@@ -117,9 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
         # Required, not defaulted: the config is the experiment, and these commands cost hours.
         p.add_argument("--config", required=True, help="path to YAML config")
 
-    p_corpus = sub.add_parser("corpus", help="gate + measure the corpus; --build to cache it")
+    p_corpus = sub.add_parser("corpus", help="gate + measure the corpus, caching it if needed")
     add_config(p_corpus)
-    p_corpus.add_argument("--build", action="store_true", help="also build the cache (hours)")
     p_corpus.set_defaults(func=cmd_corpus)
 
     p_teacher = sub.add_parser(

@@ -35,7 +35,7 @@ Or step by step for a single config, via the top-level CLI:
 
 ```bash
 CFG=configs/qwen3/depth19_multi_domain.yaml
-uv run python main.py corpus  --config $CFG [--build]
+uv run python main.py corpus  --config $CFG
 uv run python main.py distill --config $CFG
 uv run python main.py eval    --config $CFG [--ckpt outputs/<run>/student]
 ```
@@ -101,19 +101,24 @@ that package's README for the design.
    sources are disjoint by construction.
 2. **measure** — every source loads, every source is scoreable, and `tok/text` is *measured*, printing
    the `corpus_size` to paste. The documented precedent is a 15% miss on an estimated mean.
-3. **build** (`--build`) — builds the cache, reports the realized mix off the stored `source` column,
-   and **fails if the realized token count misses `TOKEN_TARGET` by >2%**.
+3. **build** — builds the cache if it is missing, reports the realized mix off the stored `source`
+   column, and reports the realized token count against `TOKEN_TARGET`.
 
-`run_experiments.py` runs stages 1–2 before any GPU time and adds stage 3 automatically when the
-cache is missing, so the build is not a separate manual step. ⚠️ If you do run `--build` by hand, note
-that an HF retry thread has historically raised SIGABRT during interpreter finalization *after*
+Stage 3 does **not** gate. `corpus_size` converts the budget through a `tok/text` sampled from
+`SAMPLE` texts per source, and that estimate's standard error is roughly the same couple of percent
+the build lands off 2B — so a gate there rejects noise. It is a number to read, not a verdict, and it
+prints on a cache hit as well as on a build: a corpus is reused across runs, and one that only
+reported on the run that created it went unexamined on every run after.
+
+`run_experiments.py` runs all three stages before any GPU time, so the build is not a separate manual
+step. ⚠️ An HF retry thread has historically raised SIGABRT during interpreter finalization *after*
 results print, so a successful build can exit **134** — `corpus.py` exits via `os._exit` to dodge
 that, and the runner trusts the `CORPUS OK` verdict over the exit code.
 
 `TOKEN_TARGET = 2e9` lives in exactly one place (`corpus.py`). `corpus_size` is measured once and
 pasted into the config. `lr` is never in a config — `distill.drift` is, and the trainer derives `lr`
 from the realized step count. A ladder once ran 5.6% hot because a corrected estimate never reached
-the config that consumed it.
+the config that consumed it — which is what the stage-3 report is for.
 
 ## `eval.py` — three suites, and the subtraction between two of them
 

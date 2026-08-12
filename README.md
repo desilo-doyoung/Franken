@@ -94,8 +94,8 @@ Or step by step for a single config:
 
 ```bash
 CFG=configs/qwen3/depth19_multi_domain.yaml
-uv run python main.py corpus  --config $CFG            # holdout, scoreability, corpus_size
-uv run python main.py corpus  --config $CFG --build    # cache it (hours, CPU + network only)
+uv run python main.py corpus  --config $CFG            # holdout, scoreability, corpus_size,
+                                                       # caching it if absent (hours, CPU + network)
 uv run python main.py distill --config $CFG            # lr derived from distill.drift
 uv run python main.py eval    --config $CFG            # agreement + corpus + external nDCG
 ```
@@ -105,8 +105,9 @@ On a fresh machine, smoke-test the setup first — `scripts/qwen3/README.md` has
 teacher depth with exact ops, so `eval` with no `--student-ckpt` must read every delta as `0.0000`.
 
 `--config` is required everywhere: the config *is* the experiment, and these commands cost hours.
-The corpus gates fail if a source stops loading or becomes unscoreable, and `--build` fails if the
-built corpus misses the 2B token-pass budget by >2%, printing the `corpus_size` that would hit it.
+The corpus gates fail if a source stops loading or becomes unscoreable. The realized token-pass count
+is reported against the 2B budget but does not gate: `corpus_size` is derived from a sampled
+`tok/text`, so landing a few percent off is expected rather than wrong.
 Run `eval` with **no** `--student-ckpt` on a full-depth config for the self-test: the student is then
 the teacher, so every delta must read ~0.
 

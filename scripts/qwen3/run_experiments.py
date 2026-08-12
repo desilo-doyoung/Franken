@@ -275,16 +275,15 @@ def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:
     """Gate the corpus, and build its cache if it is missing — so this script is the whole workflow.
 
     The gates are pure checks (holdout, every source loading and scoreable, `corpus_size` still
-    matching the measurement) and cheap next to a distill. The build is hours, so it runs only when
-    there is nothing cached.
+    matching the measurement) and cheap next to a distill. corpus.py itself decides whether the
+    cache needs building; `build` here only says so in the log line.
     """
     if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
         return
     log = os.path.join(out_dir, "corpus.log")
     _say(f"corpus: gates{' + BUILD (hours)' if build else ''} -> {log}")
     code = _run(
-        [sys.executable, os.path.join("scripts", "qwen3", "corpus.py"), "--config", config_path]
-        + (["--build"] if build else []),
+        [sys.executable, os.path.join("scripts", "qwen3", "corpus.py"), "--config", config_path],
         "",  # no GPU needed
         log,
     )
@@ -329,7 +328,7 @@ def main(argv: list[str] | None = None) -> None:
                 raise SystemExit(
                     f"{config}: no corpus cache for {cfg.train.corpus} "
                     f"({cfg.train.corpus_size:,} texts) and --eval-only will not build one.\n"
-                    f"    uv run python scripts/qwen3/corpus.py --build --config {config}"
+                    f"    uv run python scripts/qwen3/corpus.py --config {config}"
                 )
             if not args.eval_only:
                 _corpus(cfg, config, out_dir, build=missing)
