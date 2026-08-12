@@ -81,9 +81,21 @@ def one_experiment(
 ) -> dict:
     stem = os.path.splitext(os.path.basename(config))[0]
     tag = f"[gpu{device}] {stem}"
-    ckpt = RunPaths(Config.from_yaml(config)).student_bin()
+    cfg = Config.from_yaml(config)
+    ckpt = RunPaths(cfg).student_bin()
     nproc = len(device.split(",")) if ddp else 1
-    result = {"stem": stem, "config": config, "device": device, "minutes": None, "trace": []}
+    # depth/ops come from the config, not the scorer: they label the run, and `report` needs them
+    # for every row including a FAILED one.
+    result = {
+        "stem": stem,
+        "config": config,
+        "device": device,
+        "minutes": None,
+        "trace": [],
+        "depth": cfg.model.num_hidden_layers,
+        "softmax": cfg.model.softmax,
+        "activation": cfg.model.activation,
+    }
     if nproc > 1:
         result["world_size"] = nproc
 
