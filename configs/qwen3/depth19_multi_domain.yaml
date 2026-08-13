@@ -57,7 +57,7 @@ train:
   distill:
     # null = sqrt-batch scaled from the tuned reference; the trainer logs the value.
     lr: null
-    epochs: 2
+    epochs: 3
     token_budget: 16384 # per RANK, measured at depth 28
     max_seqs: 256
     warmup_ratio: 0.1
