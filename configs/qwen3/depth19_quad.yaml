@@ -56,9 +56,8 @@ train:
     weight_decay: 0.01
 
   distill:
-    # null = sqrt-batch scaled from the tuned reference; the trainer logs the value.
-    lr: null
-    epochs: 3
+    lr: 3.4e-5
+    epochs: 2
     token_budget: 16384 # per RANK, measured at depth 28
     max_seqs: 256
     warmup_ratio: 0.1

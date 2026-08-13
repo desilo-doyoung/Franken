@@ -23,6 +23,9 @@ PRECISIONS = ("fp32", "tf32", "bf16")
 # Reference for sqrt-batch LR scaling (`lr: null`): bs32/lr2e-5, fidelity-verified at depth 24
 # (recall@10 0.9070, identical to fp32/bs8/lr1e-5). sqrt not linear because Adam-family.
 BASE_LR, BASE_BATCH = 2e-5, 32
+# Cap on `warmup_ratio`: warmup covers early-Adam instability, which is a fixed number of steps, not
+# a share of the run -- uncapped, changing `epochs` moves it and the two runs stop being comparable.
+MAX_WARMUP_STEPS = 2000
 
 
 def _range_penalty(preacts, domain):
@@ -168,9 +171,9 @@ class Distiller:
                 f" [sqrt-batch scaling from the tuned reference]"
             )
         optimizer = AdamW(self.student.parameters(), lr=lr, weight_decay=opt.weight_decay)
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer, int(total_steps * opt.warmup_ratio), total_steps
-        )
+        warmup = min(int(total_steps * opt.warmup_ratio), MAX_WARMUP_STEPS)
+        self.log(f"schedule: {total_steps:,} steps, {warmup:,} warmup")
+        scheduler = get_linear_schedule_with_warmup(optimizer, warmup, total_steps)
 
         # Range penalty (FHE): pull FFN pre-activations, read via forward hooks on backend-supplied
         # modules, into the activation op's domain. Engages only for ops exposing `domain`.
