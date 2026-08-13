@@ -6,7 +6,7 @@ promoted to fp32 and `residual + hidden` promotes fp32+bf16 -> fp32, so the resi
 with the two things that would silently break it: RoPE staying fp32, and the teacher staying
 out of the autocast region.
 
-    uv run python scripts/qwen3/precision_gate.py --config configs/qwen3/depth28_exact.yaml
+    uv run python scripts/qwen3/precision_gate.py --config configs/qwen3/gate_precision.yaml
 """
 
 import argparse
@@ -97,7 +97,7 @@ def check_teacher_exclusion(backend, teacher, task, cfg, device):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="configs/qwen3/depth28_exact.yaml")
+    p.add_argument("--config", default="configs/qwen3/gate_precision.yaml")
     args = p.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)

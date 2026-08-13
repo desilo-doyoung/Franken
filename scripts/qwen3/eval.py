@@ -13,7 +13,7 @@ what `Distiller.train` scores recall@10 on to pick the checkpoint.
 
     uv run python scripts/qwen3/eval.py --student-ckpt outputs/<run>/student/pytorch_model.bin
     uv run python scripts/qwen3/eval.py --suite corpus --split validation  # what selection saw
-    uv run python scripts/qwen3/eval.py --config configs/qwen3/depth28_multi_domain.yaml
+    uv run python scripts/qwen3/eval.py --config configs/qwen3/depth28_exact.yaml
 
 With no --student-ckpt the student is seeded from the teacher, so at FULL depth every delta reads
 ~0 -- the self-test. Below full depth it is an untrained truncation and reads ~-100%.

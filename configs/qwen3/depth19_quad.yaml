@@ -1,15 +1,16 @@
 # multi_domain ladder, FHE-ops arm: depth 19 + quad_silu d32 + range penalty on EVERY layer.
-# Pairs with depth28_multi_domain (training-change baseline) and depth19_multi_domain_exact (layer
-# cut alone). Corpus/length/batching/schedule/seed identical across the three, so one cache serves
-# all. Length, batching and epoch derivations live in PROGRESS.md.
+# Pairs with depth28_exact (setup baseline) and depth19_exact (layer cut alone). Corpus, length,
+# batching, schedule and seed are identical across the three, so one cache serves all and each
+# consecutive pair differs by exactly one lever. Derivations live in PROGRESS.md.
 #
 # Penalising every layer is the WORST CASE for activation cost, not the deployable recipe: it asks how
 # much the polynomial activation can cost when no layer is left free. The targeted variant
 # (range_penalty_layers: [2, 18]) measured 8.2 recall points cheaper at depth 28 — recover it with
-# `git show a3636dc:configs/qwen3/depth19_multi_domain.yaml` if the two need comparing.
+# `git show a3636dc:configs/qwen3/depth19_multi_domain.yaml`, which is this file's pre-rename path
+# and is what git needs at that commit.
 #
 # Build the cache first, or each concurrent run re-streams 9.0M texts:
-#     uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_multi_domain.yaml
+#     uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_quad.yaml
 
 model:
   backend: qwen3
@@ -40,7 +41,7 @@ train:
   corpus_size: 9000000
   output_dir: outputs
   # Distinct from the targeted-penalty era: a result under the bare name means [2, 18].
-  run_name: qwen3_depth19_multi_domain_allpen
+  run_name: qwen3_depth19_quad
   max_seq_len: 1024
   seed: 42
   device: cuda

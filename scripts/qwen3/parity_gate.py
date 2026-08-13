@@ -6,7 +6,7 @@ later FHE measurement assumes that gap is zero when the ops are exact.
 Fails by design on FHE configs (cgf / polynomial activation); it's an exact-op gate.
 
 Usage:
-    uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/exact.yaml
+    uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/gate_parity.yaml
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ PROBE_TEXTS = [
 @torch.no_grad()
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="configs/qwen3/exact.yaml")
+    p.add_argument("--config", default="configs/qwen3/gate_parity.yaml")
     args = p.parse_args()
 
     cfg = Config.from_yaml(args.config)

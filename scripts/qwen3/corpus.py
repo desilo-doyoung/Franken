@@ -7,7 +7,7 @@ and reported when it is not.
 Measurement lives in `franken.data.embed_corpus` (`profile`, `describe`, `realized_mix`); this file
 is argument parsing, tables and the pass/fail verdict.
 
-    uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_multi_domain.yaml
+    uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_quad.yaml
 """
 
 from __future__ import annotations

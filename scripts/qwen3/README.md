@@ -21,9 +21,9 @@ each config on its own GPU, scores all three eval suites, and prints the table:
 ```bash
 # depth28 FIRST under --ddp: it is the control, and --ddp finishes it before spending on the rest.
 uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
-  configs/qwen3/depth28_multi_domain.yaml \
-  configs/qwen3/depth19_multi_domain_exact.yaml \
-  configs/qwen3/depth19_multi_domain.yaml
+  configs/qwen3/depth28_exact.yaml \
+  configs/qwen3/depth19_exact.yaml \
+  configs/qwen3/depth19_quad.yaml
 ```
 
 ⚠️ `distill.token_budget` is **per rank**, so the `multi_domain` configs are calibrated for **4 ranks**
@@ -34,7 +34,7 @@ comparable to the recorded ladder.
 Or step by step for a single config, via the top-level CLI:
 
 ```bash
-CFG=configs/qwen3/depth19_multi_domain.yaml
+CFG=configs/qwen3/depth19_quad.yaml
 uv run python main.py corpus  --config $CFG
 uv run python main.py distill --config $CFG
 uv run python main.py eval    --config $CFG [--ckpt outputs/<run>/student]
@@ -56,10 +56,10 @@ Four checks, ~30 min total, before committing hours. Each one fails loudly and l
 
 ```bash
 DEV=2                                    # a card you own
-CFG=configs/qwen3/depth19_multi_domain.yaml
+CFG=configs/qwen3/depth19_quad.yaml
 
 # 1. env, CUDA, model download, and the student still bit-equal to the teacher  (~2 min)
-uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/exact.yaml
+uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/gate_parity.yaml
 
 # 2. the real corpus gates: all 18 sources load, all are scoreable, tok/text measured (~40 min,
 #    and its HF downloads are exactly the ones the real build reuses, so this is not wasted)
@@ -67,12 +67,12 @@ uv run python main.py corpus --config $CFG
 
 # 3. the whole pipeline on 1/450th of the data: build -> distill -> checkpoint  (~10 min)
 CUDA_VISIBLE_DEVICES=$DEV uv run python main.py distill \
-  --config configs/qwen3/smoke_multi_domain.yaml
+  --config configs/qwen3/smoke.yaml
 
 # 4. eval plumbing, with a known right answer: smoke is full depth + exact ops, so with no
 #    --student-ckpt the student IS the teacher and every delta must be exactly 0.0000  (~10 min)
 CUDA_VISIBLE_DEVICES=$DEV uv run python main.py eval \
-  --config configs/qwen3/smoke_multi_domain.yaml \
+  --config configs/qwen3/smoke.yaml \
   --suite corpus,external --sources gooaq,specter --tasks nfcorpus
 ```
 
@@ -80,7 +80,7 @@ CUDA_VISIBLE_DEVICES=$DEV uv run python main.py eval \
 # 5. only if the real run will use --ddp: exercise the collective path too (~10 min). A
 #    single-GPU smoke cannot catch a DDP deadlock, and `token_budget` is PER RANK.
 CUDA_VISIBLE_DEVICES=0,1 uv run python -m torch.distributed.run --nproc_per_node=2 \
-  main.py distill --config configs/qwen3/smoke_multi_domain.yaml
+  main.py distill --config configs/qwen3/smoke.yaml
 ```
 
 Step 4 is the one to read carefully: **any non-zero delta means the eval is broken**, not that the

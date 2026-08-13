@@ -1,0 +1,53 @@
+# Default config for scripts/qwen3/precision_gate.py: asserts the residual stream stays fp32 under
+# bf16 autocast (all 29 hidden entries, plus RoPE cos/sin), which is what makes bf16 safe for the
+# hidden-MSE term. Full depth + exact ops, so the student is mathematically the teacher.
+#
+# ⚠️ Was `depth28_exact.yaml` — the baseline of the batch-384 "matched FHE batch", whose five sibling
+# configs were deleted 2026-08-13 (`git show 4a5c12e:configs/qwen3/`). That name now belongs to the
+# ladder control, which is a DIFFERENT config: multi_domain @1024, not `mixed` @128. Recorded results
+# under the old name live in PROGRESS and are not reproducible from this file.
+#
+# Still on the old recipe (`mixed`, 2.1M texts, seq 128, batch 512 / lr 8.0e-5) because the bf16
+# assertion is about dtypes, not data — but it means running this builds a corpus nothing else uses.
+
+model:
+  backend: qwen3
+  num_hidden_layers: 28
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  beta: 1.0
+  hidden_layer_map: null # identity at full depth
+  range_penalty: 0.0
+
+train:
+  teacher_model: Qwen/Qwen3-Embedding-0.6B
+  teacher_ckpt: null
+  task: embed
+  corpus: mixed
+  corpus_size: 2100000 # saturates the corpus: 1,575,039 texts, cached
+  output_dir: outputs
+  run_name: qwen3_gate_precision
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+  precision: bf16
+  compile: true
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 8.0e-5 # 2e-5 * sqrt(512/32); holds lr*sqrt(steps) = 7.69e-3, unchanged from batch 384
+    epochs: 3
+    batch_size: 512 # 128/rank on 4 cards = the measured H100 throughput peak
+    warmup_ratio: 0.1
+    weight_decay: 0.01

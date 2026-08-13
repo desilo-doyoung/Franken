@@ -1,37 +1,36 @@
-# [1/5] Baseline of the matched FHE batch: full depth, exact ops. Everything else in the batch is this
-# config with one lever changed, so its cost is read against this row, not against the teacher alone.
-#
-# Distinct from depth28_control_max, which recorded 0.9790 at batch 128 — kept as-is so that number stays
-# reproducible. This one carries the shared recipe and is the re-anchor for the batch-512 era.
-#
-# Shared recipe: 1,575,039 texts x 3ep, batch 512 (128/rank), lr 8.0e-5, bf16.
-# NB the recorded [1]-[6] results were produced at batch 384 / lr 6.93e-5 — see PROGRESS.
-#   [1] depth28_exact_max  [2] depth19_max  [3] quad_silu_nopen_max
-#   [4] quad_silu_d32_max  [5] depth19_quad_silu_d32_max
+# multi_domain ladder, baseline arm: full teacher depth, exact ops, no penalty.
+# The student is mathematically the teacher, so this measures the TRAINING change alone (new corpus,
+# 1024 tokens, token-budgeted batching). Anything that drops here is the setup, not the architecture,
+# and invalidates the other two arms. Also the config to run the identity self-tests under.
+# See depth19_quad.yaml for the shared setup.
 
 model:
   backend: qwen3
-  num_hidden_layers: 28
+  num_hidden_layers: 28 # full teacher depth — no reduction in the baseline
 
   softmax: exact
   softmax_kwargs: {}
   activation: silu
   activation_kwargs: {}
+  attn_impl: sdpa_causal
 
 distill:
   beta: 1.0
-  hidden_layer_map: null # identity at full depth
+  hidden_layer_map: null # null -> auto uniform stride; identity at 28
   range_penalty: 0.0
 
 train:
   teacher_model: Qwen/Qwen3-Embedding-0.6B
   teacher_ckpt: null
   task: embed
-  corpus: mixed
-  corpus_size: 2100000 # saturates the corpus: 1,575,039 texts, cached
+  corpus: multi_domain
+  # Probe said 111.3 tok/text; the built corpus realized 107.7, so this spends 1.94B, not 2B.
+  # Left as-is on purpose: 9,300,000 would hit 2.00B but is a different cache key, and every
+  # rung of this ladder shares this one. Change it only when starting a fresh ladder.
+  corpus_size: 9000000
   output_dir: outputs
   run_name: qwen3_depth28_exact
-  max_seq_len: 128
+  max_seq_len: 1024
   seed: 42
   device: cuda
   precision: bf16
@@ -45,8 +44,10 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 8.0e-5 # 2e-5 * sqrt(512/32); holds lr*sqrt(steps) = 7.69e-3, unchanged from batch 384
+    # null = sqrt-batch scaled from the tuned reference; the trainer logs the value.
+    lr: null
     epochs: 3
-    batch_size: 512 # 128/rank on 4 cards = the measured H100 throughput peak
+    token_budget: 16384 # per RANK, measured at depth 28
+    max_seqs: 256
     warmup_ratio: 0.1
     weight_decay: 0.01

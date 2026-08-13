@@ -4,9 +4,9 @@ The single-config path, start to finish. For a batch over several configs and GP
 `scripts/qwen3/run_experiments.py`, which does the same steps per config and prints one table.
 
 Usage:
-    python main.py corpus  --config configs/qwen3/depth19_multi_domain.yaml
-    python main.py distill --config configs/qwen3/depth19_multi_domain.yaml
-    python main.py eval    --config configs/qwen3/depth19_multi_domain.yaml
+    python main.py corpus  --config configs/qwen3/depth19_quad.yaml
+    python main.py distill --config configs/qwen3/depth19_quad.yaml
+    python main.py eval    --config configs/qwen3/depth19_quad.yaml
 """
 
 import argparse

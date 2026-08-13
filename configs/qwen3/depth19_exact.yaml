@@ -1,23 +1,21 @@
-# multi_domain ladder, baseline arm: full teacher depth, exact ops, no penalty.
-# The student is mathematically the teacher, so this measures the TRAINING change alone (new corpus,
-# 1024 tokens, token-budgeted batching). Anything that drops here is the setup, not the architecture,
-# and invalidates the other two arms. Also the config to run the identity self-tests under.
-# See depth19_multi_domain.yaml for the shared setup.
+# multi_domain ladder, layer-cut arm: depth 19 with exact ops and no penalty.
+# The exact-op control for depth19_quad — every other lever is held, so the pair isolates
+# what the FHE ops cost. See depth19_quad.yaml for the shared setup.
 
 model:
   backend: qwen3
-  num_hidden_layers: 28 # full teacher depth — no reduction in the baseline
+  num_hidden_layers: 19
 
   softmax: exact
   softmax_kwargs: {}
-  activation: silu
+  activation: silu # Qwen3's SwiGLU nonlinearity is SiLU, NOT GELU
   activation_kwargs: {}
   attn_impl: sdpa_causal
 
 distill:
   beta: 1.0
-  hidden_layer_map: null # null -> auto uniform stride; identity at 28
-  range_penalty: 0.0
+  hidden_layer_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+  range_penalty: 0.0 # exact SiLU has no bounded domain to squash into
 
 train:
   teacher_model: Qwen/Qwen3-Embedding-0.6B
@@ -29,7 +27,7 @@ train:
   # rung of this ladder shares this one. Change it only when starting a fresh ladder.
   corpus_size: 9000000
   output_dir: outputs
-  run_name: qwen3_depth28_multi_domain
+  run_name: qwen3_depth19_exact
   max_seq_len: 1024
   seed: 42
   device: cuda

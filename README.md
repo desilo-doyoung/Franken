@@ -87,13 +87,13 @@ each config on its own GPU, scores all three eval suites, and writes a markdown 
 
 ```bash
 uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
-  configs/qwen3/depth28_multi_domain.yaml configs/qwen3/depth19_multi_domain{_exact,}.yaml
+  configs/qwen3/depth28_exact.yaml configs/qwen3/depth19_{exact,quad}.yaml
 ```
 
 Or step by step for a single config:
 
 ```bash
-CFG=configs/qwen3/depth19_multi_domain.yaml
+CFG=configs/qwen3/depth19_quad.yaml
 uv run python main.py corpus  --config $CFG            # holdout, scoreability, corpus_size,
                                                        # caching it if absent (hours, CPU + network)
 uv run python main.py distill --config $CFG            # lr derived from distill.drift
@@ -101,7 +101,7 @@ uv run python main.py eval    --config $CFG            # agreement + corpus + ex
 ```
 
 On a fresh machine, smoke-test the setup first — `scripts/qwen3/README.md` has a four-step sequence
-(~30 min) ending in a check with a known right answer: `configs/qwen3/smoke_multi_domain.yaml` is full
+(~30 min) ending in a check with a known right answer: `configs/qwen3/smoke.yaml` is full
 teacher depth with exact ops, so `eval` with no `--student-ckpt` must read every delta as `0.0000`.
 
 `--config` is required everywhere: the config *is* the experiment, and these commands cost hours.
