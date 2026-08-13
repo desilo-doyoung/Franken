@@ -10,6 +10,7 @@ source of truth. Training itself is `main.py distill`, not here.
 | `parity_gate.py` | is the from-scratch student still bit-equal to the teacher? |
 | `precision_gate.py` | is `precision: bf16` safe for this architecture? |
 | `act_range.py` | what range do the FHE operators actually see? |
+| `search.py` | what does the student actually retrieve for this query, and where did it differ from the teacher? |
 | `run_experiments.py` | all of the above over many configs, into one markdown table |
 | `common.py` | shared: path bootstrap, flags, `load()` (teacher+student), nDCG scoring |
 
@@ -178,6 +179,38 @@ for the activation, attention scores for the softmax.
   outside its domain). Maxima are exact — never subsample them.
 - 🐛 Reports `0.0` for attention scores under `attn_impl: sdpa_causal` instead of saying so — actively
   misleading on a `cgf` config.
+
+## `search.py` — eyeball the retrievals
+
+`eval.py` gives you the aggregates; this gives you one query at a time. It prints the student's top-10
+with the teacher's rank of each hit beside it, the teacher hits the student missed, and the gold
+documents marked — under a banner carrying the pool-wide numbers, so an anecdote is always read
+against the population it came from.
+
+```bash
+CUDA_VISIBLE_DEVICES=2 uv run python scripts/qwen3/search.py --source gooaq \
+  --config configs/qwen3/depth19_exact.yaml \
+  --student-ckpt outputs/qwen3_depth19/student/pytorch_model.bin
+```
+
+Then type queries. A pool id (`q0`) runs that query with its judgements, `:r` draws a random one,
+anything else is free-form; `--query` does the same non-interactively. Startup embeds the pool once
+per model (the teacher's half is the cache `eval.py` already writes; the student's is recomputed) —
+after that each query is instant.
+
+- **Three metrics, and they are not the same thing.** `recall@10 docs` is the tracker's number:
+  teacher-neighbour agreement over the pool's *documents*, no queries and no judgements involved.
+  `agree@10` is the same idea on the query side. `recall@10 gold` is the MTEB sense — did the judged
+  document land in the top 10. A student can lose a lot of the first while barely moving the last.
+- **Read the histogram, not just the mean.** An `agree@10` of 0.74 spread evenly is a different model
+  from one that is perfect on half the queries and broken on the rest.
+- A pool query is sent as `q_texts` **verbatim**, so it is byte-identical to what `eval.py` scored;
+  a free-form query gets the source's own `Source.instruct`, and documents are never prefixed.
+- ⚠️ nDCG is suppressed for the `scores_ndcg=False` sources (`wiki_*`, `specter`) exactly as in
+  `eval.py`; `recall@10 gold` still prints, and on those sources it inherits the same caveat that the
+  gold is one arbitrary member of an equally valid set.
+- With no `--student-ckpt` on a **full-depth** config the student is the teacher: `agree@10` must read
+  1.00 and the "missed" block must be empty. That is the self-test.
 
 ## Multi-GPU for a single run
 
