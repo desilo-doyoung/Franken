@@ -19,8 +19,9 @@ class Qrels:
     """Real judgements, for a source whose rows hold no pair. Layouts are not inferrable: BeIR ships
     query-id/corpus-id in `test`, C-MTEB ships qid/pid in `dev` with queries under config `default`.
 
-    Weaker guarantee than a pair task — judgements pick the golds, so each lands in train with
-    ~96% probability. The document side is seen; only distractors are held out.
+    Judged documents are held out of training by `build._judged` (v8): `evalset._from_qrels`
+    force-adds every gold to the pool whatever it hashes to, so `split_of` alone left most of them
+    in the draw. Still weaker than a pair task — the query side is unjudged text the pool inherits.
     """
 
     repo: str
@@ -138,17 +139,16 @@ _MULTI_DOMAIN = [
         0.03,
         key="post1",
     ),
-    # Partial eval contamination, bounded by the sampling rate (~4% of pubmed, ~2% of s2orc):
-    # pubmed overlaps nfcorpus's domain, s2orc is scifact's source. `fiqa` is the clean check.
-    # The query side is a TITLE, not a question.
+    # Science bulk, and the query side is a TITLE, not a question. Chosen over a PubMed corpus
+    # because nfcorpus IS PubMed: overlap here measured at 3 rows in 400,000, exact-hash only.
     Source(
-        "pubmed",
+        "arxiv",
         "science",
-        "MedRAG/pubmed",
-        "default",
-        adapters.pair("title", "content"),
+        "gfissore/arxiv-abstracts-2021",
+        None,
+        adapters.pair("title", "abstract"),
         0.06,
-        key="PMID",
+        key="id",
         instruct=WEB_SEARCH,
     ),
     # NOT "citation sentence -> cited abstract": the card pairs an abstract with "an excerpt or

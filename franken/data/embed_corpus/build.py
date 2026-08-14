@@ -8,7 +8,7 @@ import re
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache, lru_cache
 from typing import Any
 
 import datasets
@@ -26,8 +26,10 @@ from franken.data.embed_corpus.spec import Record, corpus_texts, eval_pair, spli
 # v6: SPLIT_PCT 2/2 -> 1/4 (split membership is baked in, not part of the key); per-source
 #     `instruct` replaces `prefix_query`.
 # v7: instructions adopted on 6 asymmetric sources, so their stored query text changed.
+# v8: judged documents of the Qrels sources are held out of training (`_judged`), and `pubmed` is
+#     gone — it duplicates nfcorpus's corpus.
 _CACHE_DIR = "outputs/corpus_cache"
-_CACHE_VERSION = 7
+_CACHE_VERSION = 8
 
 # Shard-order shuffling does the global mixing, so the buffer stays small — a big one only adds
 # download latency, and the assembled corpus is shuffled anyway.
@@ -46,12 +48,27 @@ def _stream(repo: str, config: str | None, hf_split: str):
     return ds.shuffle(seed=0, buffer_size=_SHUFFLE)
 
 
+@cache
+def _judged(spec) -> frozenset[str]:
+    """Documents a `Qrels` source judges — held out of training wholesale.
+
+    `evalset._from_qrels` force-adds every gold to its pool whatever the hash says (a query whose
+    gold is absent is unanswerable), so `split_of` alone leaves most of them in the training draw.
+    """
+    _qid, pid, score = spec.cols
+    rows = datasets.load_dataset(spec.repo, split=spec.split)
+    return frozenset(str(r[pid]) for r in rows if float(r[score]) > 0)
+
+
 def records(src: Source, split: str) -> Iterator[Record]:
     """Rows of one source belonging to `split`, normalized. The corpus and the eval both read this,
     which is what stops them disagreeing about membership or about cleaning."""
     hf_split = src.hf_split if src.key else src.split_map.get(split, split)
+    judged = _judged(src.qrels) if src.qrels and split == "train" else frozenset()
     for row in _stream(src.repo, src.config, hf_split):
         if src.key and split_of(str(row[src.key])) != split:
+            continue
+        if judged and str(row[src.key]) in judged:
             continue
         rec = src.adapt(row)
         if rec is not None:
