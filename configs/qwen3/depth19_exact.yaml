@@ -22,10 +22,8 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  # Probe said 111.3 tok/text; the built corpus realized 107.7, so this spends 1.94B, not 2B.
-  # Left as-is on purpose: 9,300,000 would hit 2.00B but is a different cache key, and every
-  # rung of this ladder shares this one. Change it only when starting a fresh ladder.
-  corpus_size: 9000000
+  # v8 mix (pubmed -> arxiv) measures 110.3 tok/text: 2.01B token-passes over 2 epochs.
+  corpus_size: 9100000
   output_dir: outputs
   run_name: qwen3_depth19_exact
   max_seq_len: 1024
