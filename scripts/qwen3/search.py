@@ -12,6 +12,9 @@ is always read against the aggregate it came from.
     CUDA_VISIBLE_DEVICES=2 uv run python scripts/qwen3/search.py --source specter
         --config configs/qwen3/smoke.yaml --query "graph neural networks"
 
+`--worst N` picks the queries for you -- the N the student agrees with the teacher least on, which
+is where a lever's damage shows if it has any. Both it and `--query` skip the REPL.
+
 With no --student-ckpt at full depth the student IS the teacher: agree@10 must read 1.00 and the
 "missed" block must be empty. That is the self-test.
 """
@@ -30,25 +33,36 @@ from franken.paths import RunPaths
 from franken.tasks.embed import recall_at_k
 
 SNIPPET = 58
+LINES = 3  # rows of document text per hit; 1 restores the old one-line snippet
 BINS = 11
+PAD = " " * 26  # the rank/cos/t@/id columns, for a continuation row
 
 
 def _width(s: str) -> int:
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
 
 
-def _snip(text: str) -> str:
+def _snip(text: str) -> list[str]:
     # Collapse first: code and abstracts carry newlines that would break every column below.
     s = " ".join(text.split())
-    out, w = "", 0
-    for c in s:
-        cw = 2 if unicodedata.east_asian_width(c) in "WF" else 1
-        if w + cw > SNIPPET - 3:
-            out += "..."
-            w += 3
-            break
-        out, w = out + c, w + cw
-    return out + " " * (SNIPPET - w)
+    rows = []
+    while s and len(rows) < LINES:
+        last = len(rows) == LINES - 1
+        budget = SNIPPET - 3 if last else SNIPPET
+        take, w = 0, 0
+        for c in s:
+            cw = 2 if unicodedata.east_asian_width(c) in "WF" else 1
+            if w + cw > budget:
+                break
+            take, w = take + 1, w + cw
+        # Prefer a word break, but only a late one -- CJK sources carry no spaces at all.
+        if not last and take < len(s) and (brk := s.rfind(" ", 0, take + 1)) > budget * 0.6:
+            take = brk
+        row, s = s[:take].rstrip(), s[take:].lstrip()
+        if last and s:
+            row += "..."
+        rows.append(row + " " * (SNIPPET - _width(row)))
+    return rows or [" " * SNIPPET]
 
 
 def _recall(ranked_ids: list[str], gold: dict[str, float]) -> float:
@@ -108,7 +122,7 @@ def _banner(p, td, tq, sd, sq, name, split, ndcg_ok):
     else:
         print("  nDCG@10            -    gold is one arbitrary member of an equally valid set")
     _histogram(agree)
-    return mean_agree
+    return mean_agree, agree
 
 
 @torch.no_grad()
@@ -131,9 +145,10 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
     for r, (j, c) in enumerate(zip(s_idx, s_cos, strict=True), 1):
         mark = "=" if j in t_rank else "x"
         mark += "  G" if p.d_ids[j] in gold else ""
-        print(
-            f"{r:>4} {c:>6.4f} {t_rank.get(j, '-'):>4}  {p.d_ids[j]:<8}{_snip(p.d_texts[j])} {mark}"
-        )
+        head, *rest = _snip(p.d_texts[j])
+        print(f"{r:>4} {c:>6.4f} {t_rank.get(j, '-'):>4}  {p.d_ids[j]:<8}{head} {mark}")
+        for row in rest:
+            print(f"{PAD}{row}")
 
     missed = [
         (r, j, c) for r, (j, c) in enumerate(zip(t_idx, t_cos, strict=True), 1) if j not in s_idx
@@ -142,7 +157,10 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
         print(f"\nTEACHER top-10 the student missed{'':<32}cos is the TEACHER's")
         for r, j, c in missed:
             g = "  G" if p.d_ids[j] in gold else ""
-            print(f"{r:>4} {c:>6.4f} {'':>4}  {p.d_ids[j]:<8}{_snip(p.d_texts[j])}   {g}")
+            head, *rest = _snip(p.d_texts[j])
+            print(f"{r:>4} {c:>6.4f} {'':>4}  {p.d_ids[j]:<8}{head}   {g}")
+            for row in rest:
+                print(f"{PAD}{row}")
 
     hits = len(set(t_idx) & set(s_idx))
     print(
@@ -176,6 +194,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--source", default="gooaq", help="a source of the config's corpus mix")
     p.add_argument("--split", default="test", choices=("validation", "test"))
     p.add_argument("--query", action="append", help="one-shot, repeatable; omit for the REPL")
+    p.add_argument(
+        "--worst", type=int, default=0, help="show the N queries the student agrees least on"
+    )
     args = p.parse_args(argv)
 
     cfg = common.config(args)
@@ -212,12 +233,17 @@ def main(argv: list[str] | None = None) -> None:
     print("embed   student (recomputed every run)...", flush=True)
     sd, sq = embed_pool(m, m.student, pl)
 
-    mean_agree = _banner(pl, td, tq, sd, sq, args.source, args.split, src.scores_ndcg)
+    mean_agree, agree = _banner(pl, td, tq, sd, sq, args.source, args.split, src.scores_ndcg)
 
-    if args.query:
-        for text in args.query:
-            sent, qid = _sent(pl, src, text)
-            _show(m, pl, td, sd, sent, qid, mean_agree, src.scores_ndcg)
+    worst = sorted(range(len(agree)), key=agree.__getitem__)[: args.worst]
+    if worst:
+        print("\nworst by agree@10  " + "  ".join(f"{pl.q_ids[i]} {agree[i]:.1f}" for i in worst))
+    for i in worst:
+        _show(m, pl, td, sd, pl.q_texts[i], pl.q_ids[i], mean_agree, src.scores_ndcg)
+    for text in args.query or ():
+        sent, qid = _sent(pl, src, text)
+        _show(m, pl, td, sd, sent, qid, mean_agree, src.scores_ndcg)
+    if worst or args.query:
         return
 
     print("\ntype a query, a pool id (q0..), :r for a random pool query, :q to quit")

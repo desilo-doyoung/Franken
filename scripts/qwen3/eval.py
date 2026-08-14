@@ -54,7 +54,8 @@ def _assemble(corpus, queries, qrels_rows, id_field: str, task: str) -> Pool:
             q_ids.append(qid)
             q_texts.append(instruct(task, r["text"].strip()))
 
-    # document = title + text, and documents take no instruction prefix.
+    # document = title + text, and documents take no instruction prefix. The space join is BEIR's
+    # own: `extract_corpus_sentences` is (title + sep + text).strip() with sep=" " — not our choice.
     d_ids = [str(x) for x in corpus[id_field]]
     titles = corpus["title"] if "title" in corpus.column_names else [""] * len(d_ids)
     d_texts = [f"{t} {x}".strip() for t, x in zip(titles, corpus["text"], strict=True)]

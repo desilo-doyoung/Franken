@@ -198,6 +198,13 @@ anything else is free-form; `--query` does the same non-interactively. Startup e
 per model (the teacher's half is the cache `eval.py` already writes; the student's is recomputed) —
 after that each query is instant.
 
+`--worst N` prints the N queries with the lowest `agree@10` instead of waiting for input — the tail
+the histogram shows but a hand-picked query almost never hits. Both it and `--query` skip the REPL.
+
+- ⚠️ **The worst queries are usually the pool's, not the model's.** The same ids come top of the
+  list for every checkpoint including a full-depth one, and they sit on a flat cosine plateau where
+  ranks 6–10 differ by ~0.01 — so read them as hard queries before reading them as damage.
+
 - **Three metrics, and they are not the same thing.** `recall@10 docs` is the tracker's number:
   teacher-neighbour agreement over the pool's *documents*, no queries and no judgements involved.
   `agree@10` is the same idea on the query side. `recall@10 gold` is the MTEB sense — did the judged
