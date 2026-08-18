@@ -54,11 +54,12 @@ franken/
   distill/           layer_map, masked_mse_loss, Distiller (backend + task driven)
   data/              mrpc.py, embed_corpus/ (the embedding corpus + its eval pools; see its README)
   cli.py             train-teacher | distill | eval
+  tests/             pure-unit tests; `uv run pytest`
+  scripts/           run as `python -m franken.scripts.<...>`, never by file path
+    stage_distill.py op-curriculum (staged op-replacement) distillation — model-agnostic
+    bert/            MRPC-specific: evaluate.py, act_range.py, seed_sweep.py
+    qwen3/           corpus.py, eval.py, gates, orchestration (see its README)
 configs/<model>/     e.g. configs/bert/{default,fhe_gelu,fhe_full,quad,quad_fhe,quad_cgf_fhe}.yaml
-scripts/
-  stage_distill.py   op-curriculum (staged op-replacement) distillation — model-agnostic
-  bert/              MRPC-specific: evaluate.py, act_range.py, seed_sweep.py
-  qwen3/             corpus.py, eval.py, gates, orchestration (see scripts/qwen3/README.md)
 outputs/<model>/     teacher/, student/, stage*/ (gitignored)
 ```
 
@@ -71,7 +72,7 @@ uv sync                 # Python >=3.11; installs torch (CUDA), transformers, da
 uv run python main.py train-teacher --config configs/bert/default.yaml
 # 2. distill a student (teacher_ckpt in the config points at outputs/bert/teacher)
 uv run python main.py distill --config configs/bert/default.yaml
-# 3. evaluate teacher + student (delegates to scripts/<backend>/evaluate.py)
+# 3. evaluate teacher + student (delegates to franken/scripts/<backend>/)
 uv run python main.py eval --config configs/bert/default.yaml --ckpt outputs/bert/student
 ```
 
@@ -86,7 +87,7 @@ Label-free: the teacher's pooled embedding *is* the target, so there is no teach
 each config on its own GPU, scores all three eval suites, and writes a markdown table:
 
 ```bash
-uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
+uv run python -m franken.scripts.qwen3.run_experiments --devices 0,1,2,3 --ddp \
   configs/qwen3/depth28_exact.yaml configs/qwen3/depth19_{exact,quad}.yaml
 ```
 
@@ -100,7 +101,7 @@ uv run python main.py distill --config $CFG            # lr derived from distill
 uv run python main.py eval    --config $CFG            # agreement + corpus + external nDCG
 ```
 
-On a fresh machine, smoke-test the setup first — `scripts/qwen3/README.md` has a four-step sequence
+On a fresh machine, smoke-test the setup first — `franken/scripts/qwen3/README.md` has a four-step sequence
 (~30 min) ending in a check with a known right answer: `configs/qwen3/smoke.yaml` is full
 teacher depth with exact ops, so `eval` with no `--student-ckpt` must read every delta as `0.0000`.
 
@@ -114,11 +115,11 @@ the teacher, so every delta must read ~0.
 ```bash
 # Op-curriculum: distill the easier op set first, then warm-start and swap in the harder op.
 # Helps when two aggressive ops interact (e.g. quad GELU + cgf softmax); see PROGRESS.md.
-uv run python scripts/stage_distill.py \
+uv run python -m franken.scripts.stage_distill \
   --config-a configs/bert/quad_fhe.yaml --config-b configs/bert/quad_cgf_fhe.yaml
 
 # Verify a polynomial-op student stays in-domain (FHE self-containment) + write a histogram.
-uv run python scripts/bert/act_range.py --config configs/bert/quad_cgf_fhe.yaml \
+uv run python -m franken.scripts.bert.act_range --config configs/bert/quad_cgf_fhe.yaml \
   --student-ckpt outputs/bert/stageB_quad_cgf/pytorch_model.bin --out preact.png
 ```
 

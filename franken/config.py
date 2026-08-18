@@ -63,7 +63,7 @@ class DistillConfig:
     range_penalty: float = 0.0
     # Which STUDENT layers the penalty applies to; None = all. Constraining a layer costs accuracy:
     # on Qwen3, 27 of 28 sit inside +-24 while one outlier hits ~300, and penalizing all 28 to fix
-    # that one cost 8.2 recall points. Measure with scripts/qwen3/act_range.py first.
+    # that one cost 8.2 recall points. Measure with franken/scripts/qwen3/act_range.py first.
     range_penalty_layers: list[int] | None = None
 
 

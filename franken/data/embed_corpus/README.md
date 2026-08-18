@@ -60,7 +60,7 @@ new), set `key` to the column the split hashes on — or leave it `None` if the 
 splits — and give it a relative `weight`; weights are normalised at import, so no rebalancing.
 
 **Every source must be scoreable.** It yields `(query, positive)` records, or it declares `Qrels`.
-There is no escape hatch, and `scripts/qwen3/corpus.py` fails the gate before a build is paid for.
+There is no escape hatch, and `franken/scripts/qwen3/corpus.py` fails the gate before a build is paid for.
 An unscoreable slice is a permanent blind spot — that is how `code_apps` −53.9% turned out to be
 measuring corpus coverage rather than the depth cut.
 

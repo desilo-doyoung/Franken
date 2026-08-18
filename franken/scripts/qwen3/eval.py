@@ -11,9 +11,10 @@ it is capacity and more data will not help.
 Validation selects, test reports: the corpus suite defaults to `--split test` because validation is
 what `Distiller.train` scores recall@10 on to pick the checkpoint.
 
-    uv run python scripts/qwen3/eval.py --student-ckpt outputs/<run>/student/pytorch_model.bin
-    uv run python scripts/qwen3/eval.py --suite corpus --split validation  # what selection saw
-    uv run python scripts/qwen3/eval.py --config configs/qwen3/depth28_exact.yaml
+    uv run python -m franken.scripts.qwen3.eval \
+        --student-ckpt outputs/<run>/student/pytorch_model.bin
+    uv run python -m franken.scripts.qwen3.eval --suite corpus --split validation  # selection saw
+    uv run python -m franken.scripts.qwen3.eval --config configs/qwen3/depth28_exact.yaml
 
 With no --student-ckpt the student is seeded from the teacher, so at FULL depth every delta reads
 ~0 -- the self-test. Below full depth it is an untrained truncation and reads ~-100%.
@@ -24,15 +25,25 @@ from __future__ import annotations
 import json
 from functools import partial
 
-import common
 import datasets
 import torch
 import torch.nn.functional as F
-from common import K, Models, _embed_texts, embed_pool, load, ndcg_pool, score, teacher_cache
-from franken.data.embed_corpus import WEB_SEARCH, Pool, instruct, mix, pool
-from franken.tasks.embed import recall_at_k
 from scipy.stats import spearmanr
 from torch.utils.data import DataLoader
+
+from franken.data.embed_corpus import WEB_SEARCH, Pool, instruct, mix, pool
+from franken.scripts.qwen3 import common
+from franken.scripts.qwen3.common import (
+    K,
+    Models,
+    _embed_texts,
+    embed_pool,
+    load,
+    ndcg_pool,
+    score,
+    teacher_cache,
+)
+from franken.tasks.embed import recall_at_k
 
 SUITES = ("fidelity", "corpus", "external")
 
@@ -96,7 +107,8 @@ def _xpqa(pair: str, task: str) -> Pool:
 # `"document": ""`) is the model's contract, and stripping it measures symmetric similarity instead
 # of retrieval. WEB_SEARCH is the default; a task-specific string is kept ONLY where a teacher-only
 # sweep measured it beating web by more than the ~0.005 floor -- two of five here, none of the 18
-# corpus sources. Deltas in the qwen3 tracker; the sweep script is `git log -- scripts/qwen3`.
+# corpus sources. Deltas in the qwen3 tracker; the sweep script is
+# `git log -- franken/scripts/qwen3`.
 EXTERNAL = {
     # 3.6k docs, biomedical, GRADED rel (0-2). +0.0110 over web.
     "nfcorpus": (

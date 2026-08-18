@@ -7,14 +7,15 @@ Qwen3's massive activations before `gate_proj`, so hidden-state stats overestima
 required domain by ~20x, and domain costs multiplicative depth.
 
 Usage:
-    uv run python scripts/qwen3/act_range.py --config configs/qwen3/gate_parity.yaml
+    uv run python -m franken.scripts.qwen3.act_range --config configs/qwen3/gate_parity.yaml
 """
 
 from __future__ import annotations
 
-import common
 import torch
 from torch.utils.data import DataLoader
+
+from franken.scripts.qwen3 import common
 
 SAMPLE = 20_000  # values kept per layer per batch, for quantiles only
 

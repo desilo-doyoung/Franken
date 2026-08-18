@@ -14,8 +14,9 @@ SINGLE run can absorb.
 data-dependent -- the trainer logs the real count at startup and derives lr from it.
 
 Usage:
-    uv run python scripts/qwen3/run_experiments.py --devices 2,3 configs/qwen3/depth19*.yaml
-    uv run python scripts/qwen3/run_experiments.py --devices 2,3 --eval-only configs/qwen3/*.yaml
+    uv run python -m franken.scripts.qwen3.run_experiments --devices 2,3 configs/qwen3/depth19*.yaml
+    uv run python -m franken.scripts.qwen3.run_experiments --devices 2,3 --eval-only \
+        configs/qwen3/*.yaml
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ import sys
 import threading
 import time
 
-import common
 from franken.config import Config
 from franken.paths import RunPaths
+from franken.scripts.qwen3 import common
 
 _ROOT = common.ROOT
 
@@ -121,7 +122,8 @@ def one_experiment(
     code = _run(
         [
             sys.executable,
-            os.path.join("scripts", "qwen3", "eval.py"),
+            "-m",
+            "franken.scripts.qwen3.eval",
             "--config",
             config,
             "--student-ckpt",
@@ -283,7 +285,7 @@ def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:
     log = os.path.join(out_dir, "corpus.log")
     _say(f"corpus: gates{' + BUILD (hours)' if build else ''} -> {log}")
     code = _run(
-        [sys.executable, os.path.join("scripts", "qwen3", "corpus.py"), "--config", config_path],
+        [sys.executable, "-m", "franken.scripts.qwen3.corpus", "--config", config_path],
         "",  # no GPU needed
         log,
     )
@@ -328,7 +330,7 @@ def main(argv: list[str] | None = None) -> None:
                 raise SystemExit(
                     f"{config}: no corpus cache for {cfg.train.corpus} "
                     f"({cfg.train.corpus_size:,} texts) and --eval-only will not build one.\n"
-                    f"    uv run python scripts/qwen3/corpus.py --config {config}"
+                    f"    uv run python -m franken.scripts.qwen3.corpus --config {config}"
                 )
             if not args.eval_only:
                 _corpus(cfg, config, out_dir, build=missing)

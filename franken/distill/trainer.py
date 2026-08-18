@@ -233,7 +233,7 @@ class Distiller:
             if batch_plan is not None and epoch:
                 loader = build_loader(epoch)
             # Mean penalty over the epoch: the only visible evidence it is doing anything (it should
-            # fall). Verify the end state with scripts/qwen3/act_range.py on the checkpoint.
+            # fall). Verify the end state with franken/scripts/qwen3/act_range.py on the checkpoint.
             penalties = []
             for batch in loader:
                 batch = {k: v.to(self.device) for k, v in batch.items()}

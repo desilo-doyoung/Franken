@@ -5,11 +5,11 @@ queries and no judgements, so it cannot be eyeballed. This prints the three thin
 can support, each named separately, under a banner carrying the population numbers so an anecdote
 is always read against the aggregate it came from.
 
-    CUDA_VISIBLE_DEVICES=2 uv run python scripts/qwen3/search.py --source gooaq
+    CUDA_VISIBLE_DEVICES=2 uv run python -m franken.scripts.qwen3.search --source gooaq
         --config configs/qwen3/depth19_exact.yaml
         --student-ckpt outputs/qwen3_depth19/student/pytorch_model.bin
 
-    CUDA_VISIBLE_DEVICES=2 uv run python scripts/qwen3/search.py --source specter
+    CUDA_VISIBLE_DEVICES=2 uv run python -m franken.scripts.qwen3.search --source specter
         --config configs/qwen3/smoke.yaml --query "graph neural networks"
 
 `--worst N` picks the queries for you -- the N the student agrees with the teacher least on, which
@@ -24,12 +24,13 @@ from __future__ import annotations
 import random
 import unicodedata
 
-import common
 import datasets
 import torch
-from common import K, embed_pool, ndcg_at_k, ndcg_pool, teacher_cache
+
 from franken.data.embed_corpus import instruct, mix, pool
 from franken.paths import RunPaths
+from franken.scripts.qwen3 import common
+from franken.scripts.qwen3.common import K, embed_pool, ndcg_at_k, ndcg_pool, teacher_cache
 from franken.tasks.embed import recall_at_k
 
 SNIPPET = 58

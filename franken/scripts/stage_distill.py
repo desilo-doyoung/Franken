@@ -10,7 +10,7 @@ quad+cgf 0.845 single-stage -> 0.873 staged, with Stage B's gentle defaults (lr 
 below the configs' 5e-5) so absorbing the new op does not wash out the Stage A init.
 
 Usage:
-    python scripts/stage_distill.py \
+    python -m franken.scripts.stage_distill \
         --config-a configs/bert/quad_fhe.yaml \
         --config-b configs/bert/quad_cgf_fhe.yaml \
         [--skip-stagea] [--stageb-lr 3e-5] [--stageb-epochs 8]
@@ -20,11 +20,9 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+
 from franken.config import Config
 from franken.distill.trainer import Distiller
 from franken.paths import RunPaths

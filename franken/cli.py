@@ -1,7 +1,8 @@
 """Command-line entrypoints: corpus | train-teacher | distill | eval.
 
 The single-config path, start to finish. For a batch over several configs and GPUs use
-`scripts/qwen3/run_experiments.py`, which does the same steps per config and prints one table.
+`franken/scripts/qwen3/run_experiments.py`, which does the same steps per config and prints
+one table.
 
 Usage:
     python main.py corpus  --config configs/qwen3/depth19_quad.yaml
@@ -63,30 +64,23 @@ def cmd_distill(args: argparse.Namespace, extra: list[str]) -> None:
 
 # Per backend, because the two tracks score different things: MRPC is accuracy/F1 over both splits,
 # qwen3 is teacher agreement + nDCG over three suites.
-_EVALUATOR = {"bert": "evaluate.py", "qwen3": "eval.py"}
+_EVALUATOR = {"bert": "evaluate", "qwen3": "eval"}
 
 
 def _delegate(backend: str, script: str, argv: list[str]) -> None:
-    """Run scripts/<backend>/<script> in-process, with its own directory importable (the qwen3
-    scripts import a sibling `common`)."""
-    import importlib.util
-    import os
-    import sys
+    """Run franken.scripts.<backend>.<script>.main in-process."""
+    import importlib
 
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(repo_root, "scripts", backend, script)
-    if not os.path.exists(path):
-        raise SystemExit(f"No {script} for backend {backend!r} at {path}.")
-    sys.path.insert(0, os.path.dirname(path))
-    spec = importlib.util.spec_from_file_location(f"franken_{backend}_{script}", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    try:
+        mod = importlib.import_module(f"franken.scripts.{backend}.{script}")
+    except ModuleNotFoundError as e:
+        raise SystemExit(f"No {script} for backend {backend!r}: {e}") from e
     mod.main(argv)
 
 
 def cmd_corpus(args: argparse.Namespace, extra: list[str]) -> None:
     cfg = _load_config(args)
-    _delegate(cfg.model.backend, "corpus.py", ["--config", args.config] + extra)
+    _delegate(cfg.model.backend, "corpus", ["--config", args.config] + extra)
 
 
 def cmd_eval(args: argparse.Namespace, extra: list[str]) -> None:

@@ -14,7 +14,7 @@ pytorch_model.bin and model.safetensors.
 
 Usage:
     # Orchestrate across GPUs 2 and 3 (default):
-    uv run python scripts/bert/seed_sweep.py --config configs/bert/default.yaml \
+    uv run python -m franken.scripts.bert.seed_sweep --config configs/bert/default.yaml \
         --seeds 42-51 --gpus 2,3 --sweep-dir outputs/bert/seed_sweep \
         --student-out outputs/bert/student
 """
@@ -29,17 +29,18 @@ import shutil
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 import torch
 import torch.nn.functional as F
+from safetensors.torch import save_file
+from torch.utils.data import DataLoader
+
 from franken.config import Config
 from franken.data.mrpc import compute_metrics, load_mrpc
 from franken.distill.trainer import Distiller
 from franken.models import build_backend
 from franken.tasks import build_task
-from safetensors.torch import save_file
-from torch.utils.data import DataLoader
+
+MODULE = "franken.scripts.bert.seed_sweep"  # workers are relaunched as `python -m MODULE`
 
 
 # --------------------------------------------------------------------------- utils
@@ -274,7 +275,8 @@ def cmd_orchestrate(args: argparse.Namespace) -> None:
             out = os.path.join(args.sweep_dir, f"teacher_gpu{gpu}.json")
             argv = [
                 py,
-                __file__,
+                "-m",
+                MODULE,
                 "teacher-worker",
                 "--config",
                 args.config,
@@ -310,7 +312,8 @@ def cmd_orchestrate(args: argparse.Namespace) -> None:
         state_out = os.path.join(args.sweep_dir, f"student_best_gpu{gpu}.pt")
         argv = [
             py,
-            __file__,
+            "-m",
+            MODULE,
             "student-worker",
             "--config",
             args.config,

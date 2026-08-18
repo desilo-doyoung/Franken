@@ -6,7 +6,7 @@ later FHE measurement assumes that gap is zero when the ops are exact.
 Fails by design on FHE configs (cgf / polynomial activation); it's an exact-op gate.
 
 Usage:
-    uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/gate_parity.yaml
+    uv run python -m franken.scripts.qwen3.parity_gate --config configs/qwen3/gate_parity.yaml
 """
 
 from __future__ import annotations
@@ -15,12 +15,12 @@ import argparse
 import math
 import sys
 
-import common  # noqa: F401  -- puts the repo root on sys.path; must precede any `franken` import
 import torch
 import torch.nn.functional as F
+from transformers import AutoTokenizer
+
 from franken.config import Config
 from franken.models import build_backend
-from transformers import AutoTokenizer
 
 COS_THRESHOLD = 0.9999
 MAX_ULP = 16  # accumulated summation-order noise over 28 layers; a bug is orders larger

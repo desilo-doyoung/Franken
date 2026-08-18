@@ -7,7 +7,7 @@ and reported when it is not.
 Measurement lives in `franken.data.embed_corpus` (`profile`, `describe`, `realized_mix`); this file
 is argument parsing, tables and the pass/fail verdict.
 
-    uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_quad.yaml
+    uv run python -m franken.scripts.qwen3.corpus --config configs/qwen3/depth19_quad.yaml
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ import os
 import sys
 import time
 
-import common  # noqa: F401  -- puts the repo root on sys.path; must precede any `franken` import
 import datasets
+
 from franken.config import Config
 from franken.data.embed_corpus import (
     SPLITS,

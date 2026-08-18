@@ -9,28 +9,24 @@ Model construction and the forward pass go through the model backend
 building stays MRPC-specific (this is an MRPC scorer).
 
 Usage:
-    python scripts/bert/evaluate.py --config configs/bert/default.yaml
-    python scripts/bert/evaluate.py --models student --splits validation test
-    python scripts/bert/evaluate.py \
+    python -m franken.scripts.bert.evaluate --config configs/bert/default.yaml
+    python -m franken.scripts.bert.evaluate --models student --splits validation test
+    python -m franken.scripts.bert.evaluate \
         --student-ckpt outputs/bert/student/pytorch_model.bin --splits test
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import sys
-
-# Make the repo root importable when run as `python scripts/bert/evaluate.py`.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch
+from torch.utils.data import DataLoader
+
 from franken.config import Config
 from franken.data.mrpc import compute_metrics, load_mrpc
 from franken.models import build_backend
 from franken.paths import RunPaths
 from franken.tasks import build_task
-from torch.utils.data import DataLoader
 
 
 @torch.no_grad()

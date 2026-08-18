@@ -1,4 +1,4 @@
-# `scripts/qwen3` — tooling for the Qwen3-Embedding student
+# `franken/scripts/qwen3` — tooling for the Qwen3-Embedding student
 
 Every script takes `--config <yaml>` and reads model/task/corpus from it, so the config is the single
 source of truth. Training itself is `main.py distill`, not here.
@@ -21,7 +21,7 @@ each config on its own GPU, scores all three eval suites, and prints the table:
 
 ```bash
 # depth28 FIRST under --ddp: it is the control, and --ddp finishes it before spending on the rest.
-uv run python scripts/qwen3/run_experiments.py --devices 0,1,2,3 --ddp \
+uv run python -m franken.scripts.qwen3.run_experiments --devices 0,1,2,3 --ddp \
   configs/qwen3/depth28_exact.yaml \
   configs/qwen3/depth19_exact.yaml \
   configs/qwen3/depth19_quad.yaml
@@ -60,7 +60,7 @@ DEV=2                                    # a card you own
 CFG=configs/qwen3/depth19_quad.yaml
 
 # 1. env, CUDA, model download, and the student still bit-equal to the teacher  (~2 min)
-uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/gate_parity.yaml
+uv run python -m franken.scripts.qwen3.parity_gate --config configs/qwen3/gate_parity.yaml
 
 # 2. the real corpus gates: all 18 sources load, all are scoreable, tok/text measured (~40 min,
 #    and its HF downloads are exactly the ones the real build reuses, so this is not wasted)
@@ -188,7 +188,7 @@ documents marked — under a banner carrying the pool-wide numbers, so an anecdo
 against the population it came from.
 
 ```bash
-CUDA_VISIBLE_DEVICES=2 uv run python scripts/qwen3/search.py --source gooaq \
+CUDA_VISIBLE_DEVICES=2 uv run python -m franken.scripts.qwen3.search --source gooaq \
   --config configs/qwen3/depth19_exact.yaml \
   --student-ckpt outputs/qwen3_depth19/student/pytorch_model.bin
 ```

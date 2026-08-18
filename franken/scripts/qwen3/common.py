@@ -1,9 +1,4 @@
-"""Shared setup for the qwen3 scripts.
-
-Import this before any `franken` module — it puts the repo root on `sys.path`, which is why the
-scripts no longer each carry that dance. isort keeps it first: `franken` is configured as
-first-party, so it always sorts after this.
-"""
+"""Shared helpers for the qwen3 scripts: flags, teacher+student loading, retrieval scoring."""
 
 from __future__ import annotations
 
@@ -12,18 +7,16 @@ import hashlib
 import math
 import os
 import re
-import sys
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
+from franken.config import Config
+from franken.models import build_backend
+from franken.tasks import build_task
 
-from franken.config import Config  # noqa: E402
-from franken.models import build_backend  # noqa: E402
-from franken.tasks import build_task  # noqa: E402
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
 def parser(doc: str, json: bool = True) -> argparse.ArgumentParser:

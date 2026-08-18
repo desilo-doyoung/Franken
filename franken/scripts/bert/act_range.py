@@ -10,24 +10,22 @@ the output magnitude stays <= ~0.125*D^2 (the FHE dynamic-range budget). Prints
 a numeric per-layer table and writes a pre-activation histogram PNG.
 
 Usage:
-    python scripts/bert/act_range.py --config configs/bert/quad_cgf_fhe.yaml --out preact.png
+    python -m franken.scripts.bert.act_range --config configs/bert/quad_cgf_fhe.yaml \
+        --out preact.png
 """
 
 from __future__ import annotations
 
 import argparse
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import torch
+from torch.utils.data import DataLoader
+
 from franken.config import Config
 from franken.data.mrpc import load_mrpc
 from franken.models import build_backend
 from franken.paths import RunPaths
 from franken.tasks import build_task
-from torch.utils.data import DataLoader
 
 
 @torch.no_grad()

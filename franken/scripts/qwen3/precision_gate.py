@@ -6,13 +6,13 @@ promoted to fp32 and `residual + hidden` promotes fp32+bf16 -> fp32, so the resi
 with the two things that would silently break it: RoPE staying fp32, and the teacher staying
 out of the autocast region.
 
-    uv run python scripts/qwen3/precision_gate.py --config configs/qwen3/gate_precision.yaml
+    uv run python -m franken.scripts.qwen3.precision_gate --config configs/qwen3/gate_precision.yaml
 """
 
 import argparse
 
-import common  # noqa: F401  -- puts the repo root on sys.path; must precede any `franken` import
 import torch
+
 from franken.config import Config
 from franken.models import build_backend
 from franken.tasks import build_task

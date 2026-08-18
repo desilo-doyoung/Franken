@@ -1,7 +1,8 @@
 """The mix: one ``Source`` per dataset, and nothing else declares a dataset.
 
 **Every source is scoreable** — it yields (query, positive) records or declares ``Qrels``. No escape
-hatch; `scripts/qwen3/corpus.py` enforces it before a build is paid for. An unscoreable slice
+hatch; `franken/scripts/qwen3/corpus.py` enforces it before a build is paid for. An unscoreable
+slice
 is a permanent blind spot, which is how `code_apps` -53.9% turned out to be measuring coverage.
 """
 
