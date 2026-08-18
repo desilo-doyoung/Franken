@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
     if "teacher" in args.models:
         models["teacher"] = backend.load_teacher(cfg).to(device)
     if "student" in args.models:
-        sc = args.student_ckpt or RunPaths(cfg).student_bin()
+        sc = args.student_ckpt or RunPaths(cfg).student_bin
         student = backend.build_student(cfg)
         student.load_state_dict(torch.load(sc, map_location=device))
         models["student"] = student.to(device)

@@ -65,7 +65,7 @@ def test_output_namespace_defaults_to_the_backend():
     cfg = Config.from_dict({"model": {"backend": "qwen3"}})
     paths = RunPaths(cfg)
     assert paths.base == os.path.join("outputs", "qwen3")
-    assert paths.student_bin() == os.path.join("outputs", "qwen3", "student", "pytorch_model.bin")
+    assert paths.student_bin == os.path.join("outputs", "qwen3", "student", "pytorch_model.bin")
 
 
 def test_unknown_top_level_block_is_rejected():

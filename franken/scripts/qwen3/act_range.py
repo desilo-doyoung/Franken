@@ -77,11 +77,11 @@ def main(argv: list[str] | None = None) -> None:
                 lambda m, inp, out, i=i: _record(preact, i, out[mask_holder["m"]], domain)
             )
         )
-    for i, layer in enumerate(model.layers):
+    for i, softmax in enumerate(backend.softmax_ops(model)):
         # Scores are the softmax's first argument, i.e. pre-mask. Keep only entries that are
         # actually visible: both tokens real, and key <= query (causal).
         hooks.append(
-            layer.self_attn.softmax.register_forward_pre_hook(
+            softmax.register_forward_pre_hook(
                 lambda m, a, i=i: _record(
                     scores, i, a[0][mask_holder["vis"].expand_as(a[0])], domain
                 )

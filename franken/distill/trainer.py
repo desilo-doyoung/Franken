@@ -62,9 +62,8 @@ def resolve_lr(opt, global_batch: float, log) -> float:
 
 
 class BatchLoader:
-    """How the training set is cut into steps: a token-budgeted plan, a DistributedSampler, or
-    plain shuffling. Owns the per-epoch loader, because steps/epoch must not move between epochs
-    or the LR schedule stops matching the recorded runs."""
+    """Token-budgeted plan, DistributedSampler, or plain shuffle. Owns the per-epoch loader:
+    steps/epoch must not move, or the LR schedule stops matching the recorded runs."""
 
     def __init__(self, cfg: Config, dist, dataset, collator, log):
         self.opt = cfg.train.distill
@@ -144,9 +143,8 @@ class BatchLoader:
 
 
 class RangePenalty:
-    """FHE range penalty: pull FFN pre-activations, read via forward hooks on backend-supplied
-    modules, into the activation op's domain. Falsy unless `range_penalty > 0` and the op exposes
-    a `domain`. Use as a context manager; the hooks live only for its body."""
+    """Pulls FFN pre-activations into the activation op's domain, via forward hooks that live
+    only for the `with` body. Falsy unless `range_penalty > 0` and the op exposes a `domain`."""
 
     def __init__(self, backend, student, cfg: Config, log):
         self.weight = cfg.distill.range_penalty

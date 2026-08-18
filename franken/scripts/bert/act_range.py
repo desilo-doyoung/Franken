@@ -46,7 +46,7 @@ def main() -> None:
     tokenizer = task.build_tokenizer(cfg)
 
     student = backend.build_student(cfg)
-    sc = args.student_ckpt or RunPaths(cfg).student_bin()
+    sc = args.student_ckpt or RunPaths(cfg).student_bin
     student.load_state_dict(torch.load(sc, map_location=device))
     student = student.to(device).eval()
 

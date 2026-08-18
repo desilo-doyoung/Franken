@@ -165,7 +165,7 @@ def build(cfg, task, tokenizer, sources) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> bool:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -190,13 +190,14 @@ def main(argv: list[str] | None = None) -> None:
         build(cfg, task, tokenizer, sources)
 
     print(f"\n{'CORPUS OK' if ok else 'CORPUS FAILED — do not train'}\n")
-    # os._exit, not SystemExit: an HF retry thread aborts during interpreter *finalization*
-    # (SIGABRT, the 134 that makes a successful build look failed), which would overwrite this exit
-    # code. Skipping finalization avoids that phase, so flush first -- os._exit does not.
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0 if ok else 1)
+    return ok
 
 
 if __name__ == "__main__":
-    main()
+    ok = main()
+    # os._exit, not sys.exit: an HF retry thread aborts during interpreter *finalization* (SIGABRT,
+    # the 134 that makes a successful build look failed), which would overwrite this exit code.
+    # Skipping finalization dodges that phase, so flush first -- os._exit does not.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0 if ok else 1)

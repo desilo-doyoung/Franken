@@ -29,7 +29,8 @@ uv run python -m franken.scripts.qwen3.run_experiments --devices 0,1,2,3 --ddp \
 
 ⚠️ `distill.token_budget` is **per rank**, so the `multi_domain` configs are calibrated for **4 ranks**
 (16,384 × 4 = 65,536 tokens/step → ~25.6k steps/epoch). On a different rank count the trainer still
-derives a correct `lr` from `distill.drift`, but the step count moves and the numbers stop being
+derives a correct `lr` from the batch it actually assembles, but the step count moves and the
+numbers stop being
 comparable to the recorded ladder.
 
 Or step by step for a single config, via the top-level CLI:
@@ -117,8 +118,8 @@ results print, so a successful build can exit **134** — `corpus.py` exits via 
 that, and the runner trusts the `CORPUS OK` verdict over the exit code.
 
 `TOKEN_TARGET = 2e9` lives in exactly one place (`corpus.py`). `corpus_size` is measured once and
-pasted into the config. `lr` is never in a config — `distill.drift` is, and the trainer derives `lr`
-from the realized step count. A ladder once ran 5.6% hot because a corrected estimate never reached
+pasted into the config. `lr` is normally `null` in a config, and the trainer derives it by
+sqrt-batch scaling from the batch the run actually assembles. A ladder once ran 5.6% hot because a corrected estimate never reached
 the config that consumed it — which is what the stage-3 report is for.
 
 ## `eval.py` — three suites, and the subtraction between two of them

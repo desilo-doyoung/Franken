@@ -110,7 +110,7 @@ _MULTI_DOMAIN = [
     # strings written from the dataset cards came in at +0.0017 to -0.0067 against it, i.e. noise or
     # worse, on all seven. The model keys on the canonical string it was trained with, not on
     # semantic fit -- so tailoring is only worth it where it beat web by more than the ~0.005 floor,
-    # which happened on exactly two EXTERNAL tasks (see eval.EXTERNAL) and no corpus source.
+    # which happened on exactly two EXTERNAL tasks (see franken.data.external) and no corpus source.
     Source(
         "gooaq",
         "informal",

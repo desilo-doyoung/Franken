@@ -67,3 +67,6 @@ class Qwen3Backend(ModelBackend):
 
     def activation_ops(self, model: nn.Module) -> list[nn.Module]:
         return [ly.mlp.act_fn for ly in model.layers]
+
+    def softmax_ops(self, model: nn.Module) -> list[nn.Module]:
+        return [ly.self_attn.softmax for ly in model.layers]

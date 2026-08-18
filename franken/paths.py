@@ -27,6 +27,7 @@ class RunPaths:
     def student(self) -> str:
         return os.path.join(self.base, "student")
 
+    @property
     def student_bin(self) -> str:
         return os.path.join(self.student, "pytorch_model.bin")
 

@@ -39,3 +39,6 @@ class BertBackend(ModelBackend):
 
     def activation_ops(self, model: nn.Module) -> list[nn.Module]:
         return [ly.intermediate.intermediate_act_fn for ly in model.bert.encoder.layer]
+
+    def softmax_ops(self, model: nn.Module) -> list[nn.Module]:
+        return [ly.attention.self.softmax for ly in model.bert.encoder.layer]

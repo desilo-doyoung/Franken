@@ -41,7 +41,7 @@ train:
   distill:
     lr: null # exercises the sqrt-batch derivation path
     epochs: 1
-    token_budget: 16384
-    max_seqs: 256
+    token_budget: 4096
+    max_seqs: 64
     warmup_ratio: 0.1
     weight_decay: 0.01

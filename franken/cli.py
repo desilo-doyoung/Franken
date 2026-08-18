@@ -53,7 +53,7 @@ def cmd_distill(args: argparse.Namespace, extra: list[str]) -> None:
     if d.dist.is_main:
         paths = RunPaths(cfg)
         os.makedirs(paths.student, exist_ok=True)
-        torch.save(d.student.state_dict(), paths.student_bin())
+        torch.save(d.student.state_dict(), paths.student_bin)
         print(f"Student saved to {paths.student}")
 
     # Every rank reaches teardown together: destroy_process_group is collective, so letting one
@@ -75,12 +75,13 @@ def _delegate(backend: str, script: str, argv: list[str]) -> None:
         mod = importlib.import_module(f"franken.scripts.{backend}.{script}")
     except ModuleNotFoundError as e:
         raise SystemExit(f"No {script} for backend {backend!r}: {e}") from e
-    mod.main(argv)
+    return mod.main(argv)
 
 
 def cmd_corpus(args: argparse.Namespace, extra: list[str]) -> None:
     cfg = _load_config(args)
-    _delegate(cfg.model.backend, "corpus", ["--config", args.config] + extra)
+    if _delegate(cfg.model.backend, "corpus", ["--config", args.config] + extra) is False:
+        raise SystemExit("corpus gates failed — do not train")
 
 
 def cmd_eval(args: argparse.Namespace, extra: list[str]) -> None:

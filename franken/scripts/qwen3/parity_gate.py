@@ -17,10 +17,10 @@ import sys
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer
 
 from franken.config import Config
 from franken.models import build_backend
+from franken.tasks import build_task
 
 COS_THRESHOLD = 0.9999
 MAX_ULP = 16  # accumulated summation-order noise over 28 layers; a bug is orders larger
@@ -37,10 +37,10 @@ PROBE_TEXTS = [
 
 
 @torch.no_grad()
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", default="configs/qwen3/gate_parity.yaml")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
@@ -51,8 +51,8 @@ def main() -> int:
     backend.seed_student(student, teacher, cfg)
     student = student.to(device).eval()
 
-    # The embed task will own this; until it exists, build it the same way it will.
-    tokenizer = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
+    # The task's own tokenizer: it pins padding_side, which this gate's pad-mask check depends on.
+    tokenizer = build_task(cfg.train.task).build_tokenizer(cfg)
     enc = tokenizer(
         PROBE_TEXTS,
         padding=True,

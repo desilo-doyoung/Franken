@@ -10,12 +10,8 @@ import torch
 
 @torch.no_grad()
 def embed_batches(backend, task, batches, device, *models, ctx=nullcontext):
-    """Pooled fp32 CPU embeddings for each model, from ONE pass over already-collated batches.
-
-    Several models per call rather than one: the callers compare a student against a teacher on
-    identical batches, and a second pass would have to reproduce the batching to keep rows aligned.
-    ``ctx`` is a factory, not a context manager, because it is entered once per batch.
-    """
+    """Pooled fp32 CPU embeddings per model, from ONE pass: a second pass would have to reproduce
+    the batching to keep student and teacher rows aligned. ``ctx`` is entered per batch."""
     outs = [[] for _ in models]
     for batch in batches:
         batch = {k: v.to(device) for k, v in batch.items()}

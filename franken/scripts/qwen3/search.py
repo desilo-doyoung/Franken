@@ -219,11 +219,11 @@ def main(argv: list[str] | None = None) -> None:
 
     datasets.disable_progress_bars()
     m = common.load(args)
-    if args.student_ckpt and args.student_ckpt != RunPaths(cfg).student_bin():
+    if args.student_ckpt and args.student_ckpt != RunPaths(cfg).student_bin:
         # max_seq_len is not recorded in a bare state_dict, so a foreign ckpt is the only signal
         # that this config's length and corpus may not be the ones it was distilled under.
         print(
-            f"\nWARN  this ckpt is not {RunPaths(cfg).student_bin()}, the path this\n"
+            f"\nWARN  this ckpt is not {RunPaths(cfg).student_bin}, the path this\n"
             f"      config writes. It is being run at max_seq_len {cfg.train.max_seq_len}."
         )
     if torch.cuda.is_available():

@@ -83,7 +83,7 @@ def one_experiment(
     stem = os.path.splitext(os.path.basename(config))[0]
     tag = f"[gpu{device}] {stem}"
     cfg = Config.from_yaml(config)
-    ckpt = RunPaths(cfg).student_bin()
+    ckpt = RunPaths(cfg).student_bin
     nproc = len(device.split(",")) if ddp else 1
     # depth/ops come from the config, not the scorer: they label the run, and `report` needs them
     # for every row including a FAILED one.

@@ -97,7 +97,7 @@ Or step by step for a single config:
 CFG=configs/qwen3/depth19_quad.yaml
 uv run python main.py corpus  --config $CFG            # holdout, scoreability, corpus_size,
                                                        # caching it if absent (hours, CPU + network)
-uv run python main.py distill --config $CFG            # lr derived from distill.drift
+uv run python main.py distill --config $CFG            # lr derived by sqrt-batch scaling
 uv run python main.py eval    --config $CFG            # agreement + corpus + external nDCG
 ```
 
