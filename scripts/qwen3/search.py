@@ -71,6 +71,12 @@ def _recall(ranked_ids: list[str], gold: dict[str, float]) -> float:
     return sum(d in gold for d in ranked_ids[:K]) / min(K, len(gold))
 
 
+def _embed_dist(t_emb, s_emb):
+    # 1-cos per row, the trainer's `embed_dist`, so the number here is the one it logs. Rows are
+    # L2-normed by the backend, so the elementwise product sums to the cosine.
+    return 1.0 - (t_emb * s_emb).sum(-1)
+
+
 def _top(q_vec, d_emb):
     sims = (q_vec @ d_emb.T).squeeze(0)
     top = sims.topk(min(K, sims.numel()))
@@ -112,6 +118,12 @@ def _banner(p, td, tq, sd, sq, name, split, ndcg_ok):
         f" {len(p.d_ids):,} docs --\n{pad}what the tracker quotes. Teacher 1.0 by construction."
     )
     print(f"  agree@10   queries {mean_agree:.4f}    the same, query side")
+    dq, dd = _embed_dist(tq, sq), _embed_dist(td, sd)
+    print(
+        f"  embed_dist q {dq.mean():.6f}  d {dd.mean():.6f}    1-cos between the two models' OWN"
+        f" vectors\n{pad}for the same text, mean over the pool; worst q {dq.max():.6f}"
+        f"  d {dd.max():.6f}"
+    )
     print(
         f"  recall@10  gold    t {gold_t:.4f}  s {gold_s:.4f}  {gold_s - gold_t:+.4f}"
         f"    |top-10 & qrels| / min(10, |qrels|)"
@@ -164,7 +176,11 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
 
     hits = len(set(t_idx) & set(s_idx))
     print(
-        f"\nagree@10    {hits / K:.2f}   {hits} of the teacher's top-10"
+        f"\nembed_dist  {float(_embed_dist(tq[0], sq[0])):.6f}   1-cos, teacher vs student on THIS"
+        f" query   (top-10 docs {float(_embed_dist(td[s_idx], sd[s_idx]).mean()):.6f})"
+    )
+    print(
+        f"agree@10    {hits / K:.2f}   {hits} of the teacher's top-10"
         f"   (pool mean {mean_agree:.2f})"
     )
     if gold:
