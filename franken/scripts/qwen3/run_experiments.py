@@ -167,39 +167,43 @@ def one_experiment(
     return result
 
 
-def report(results: list[dict], out_dir: str) -> None:
-    # Saved as well as printed: scrollback is not storage, and a closed ssh session would lose the
-    # only copy of an hour of GPU time.
+def deficits(r: dict) -> dict:
+    """The derived columns, out of the f-strings so they can be checked without a GPU run."""
+    # recall@10 is ALREADY teacher-relative (1.0 is the ceiling), so its deficit is 1 - recall.
+    recall_def = 1.0 - r["recall"]
+    ndcg_def = (r["ndcg_teacher"] - r["ndcg"]) / r["ndcg_teacher"]
+    delta = r["stsb_student"] - r["stsb_teacher"]
+    return {
+        "recall_def": recall_def,
+        "ndcg_def": ndcg_def,
+        # nDCG deficit over recall deficit; undefined when the student matched the teacher.
+        "ratio": ndcg_def / recall_def if recall_def > 1e-9 else None,
+        "stsb_delta": delta,
+        # Relative to the teacher's own STS-B, which is the reference the claim is about
+        # ("preserves the teacher"), not an absolute-quality score.
+        "stsb_rel": 100 * delta / r["stsb_teacher"],
+    }
+
+
+def render(results: list[dict]) -> list[str]:
+    """The results block, as lines. Pure: no printing, no files, no GPU."""
     ok = [r for r in results if not r.get("error")]
-    out: list[str] = []
-
-    def emit(line: str = "") -> None:
-        out.append(line)
-        print(line)
-
-    emit("\n" + "=" * 78)
-    emit("RESULTS — paste into franken/models/qwen3/PROGRESS.md\n")
-    emit(
+    out: list[str] = ["\n" + "=" * 78, "RESULTS — paste into franken/models/qwen3/PROGRESS.md\n"]
+    out.append(
         "| run | depth | ops | recall@10 | vs teacher | nDCG@10 | vs teacher | ratio¹ "
         "| embed_dist | STS-B | Δ teacher | relative | min |"
     )
-    emit("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    out.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in ok:
+        d = deficits(r)
         mins = f"{r['minutes']:.0f}" if r.get("minutes") else "—"
-        delta = r["stsb_student"] - r["stsb_teacher"]
-        # Relative to the teacher's own STS-B, which is the reference the claim is about
-        # ("preserves the teacher"), not an absolute-quality score.
-        rel = 100 * delta / r["stsb_teacher"]
-        # recall@10 is ALREADY teacher-relative (1.0 is the ceiling), so its deficit is 1 - recall.
-        recall_def = 1.0 - r["recall"]
-        ndcg_def = (r["ndcg_teacher"] - r["ndcg"]) / r["ndcg_teacher"]
-        ratio = f"{ndcg_def / recall_def:.2f}" if recall_def > 1e-9 else "—"
-        emit(
+        ratio = f"{d['ratio']:.2f}" if d["ratio"] is not None else "—"
+        out.append(
             f"| {r['stem']} | {r['depth']} | {r['softmax']}/{r['activation']} "
-            f"| {r['recall']:.4f} | {-100 * recall_def:+.1f}% "
-            f"| {r['ndcg']:.4f} | {-100 * ndcg_def:+.1f}% | {ratio} "
+            f"| {r['recall']:.4f} | {-100 * d['recall_def']:+.1f}% "
+            f"| {r['ndcg']:.4f} | {-100 * d['ndcg_def']:+.1f}% | {ratio} "
             f"| {r['embed_dist']:.5f} | {r['stsb_student']:.4f} "
-            f"| {delta:+.4f} | {rel:+.1f}% | {mins} |"
+            f"| {d['stsb_delta']:+.4f} | {d['stsb_rel']:+.1f}% | {mins} |"
         )
 
     # Failures stay out of the table so the table is always pasteable, but they are listed
@@ -207,9 +211,9 @@ def report(results: list[dict], out_dir: str) -> None:
     for r in results:
         if r.get("error"):
             log = f"  ({r['log']})" if r.get("log") else ""
-            emit(f"\nFAILED {r['stem']}: {r['error']}{log}")
+            out.append(f"\nFAILED {r['stem']}: {r['error']}{log}")
 
-    emit(
+    out.append(
         "\n¹ nDCG deficit ÷ recall deficit. <1 means recall@10 overstates the damage; >1 means it "
         "understates it. Measured 1.6 for the depth-19 cut once every task is in the macro — it "
         "read 0.08 on the old 2-task one."
@@ -219,33 +223,42 @@ def report(results: list[dict], out_dir: str) -> None:
     # opposite directions (code -61%, Chinese +1%), and only this table shows that.
     names = sorted({t for r in ok for t in r.get("ndcg_tasks", {})})
     if names:
-        emit(f"\nper-task nDCG@10, student (teacher) — the {len(names)} tasks in the macro\n")
-        emit("| run | " + " | ".join(names) + " |")
-        emit("|---" * (len(names) + 1) + "|")
+        out.append(f"\nper-task nDCG@10, student (teacher) — the {len(names)} tasks in the macro\n")
+        out.append("| run | " + " | ".join(names) + " |")
+        out.append("|---" * (len(names) + 1) + "|")
         for r in ok:
             cells = []
             for name in names:
                 task = r.get("ndcg_tasks", {}).get(name)
                 cells.append(f"{task['student']:.4f} ({task['teacher']:.4f})" if task else "—")
-            emit(f"| {r['stem']} | " + " | ".join(cells) + " |")
+            out.append(f"| {r['stem']} | " + " | ".join(cells) + " |")
     ndcg_teachers = {round(r["ndcg_teacher"], 4) for r in ok}
     if ndcg_teachers:
-        emit(f"teacher nDCG@10: {', '.join(f'{t:.4f}' for t in sorted(ndcg_teachers))}")
+        out.append(f"teacher nDCG@10: {', '.join(f'{t:.4f}' for t in sorted(ndcg_teachers))}")
 
     teachers = {round(r["stsb_teacher"], 4) for r in ok}
     if teachers:
         # One value unless configs differ in max_seq_len — the teacher is deterministic, so a
         # second value means the runs aren't comparable on STS-B and the deltas hide it.
-        emit(f"\nteacher STS-B: {', '.join(f'{t:.4f}' for t in sorted(teachers))}")
+        out.append(f"\nteacher STS-B: {', '.join(f'{t:.4f}' for t in sorted(teachers))}")
         if len(teachers) > 1:
-            emit("  WARNING: teacher differs across runs (max_seq_len?) — deltas not comparable")
+            out.append(
+                "  WARNING: teacher differs across runs (max_seq_len?) — deltas not comparable"
+            )
 
     for r in results:
         if r.get("trace"):
-            emit(f"\n{r['stem']} training trace:")
-            for line in r["trace"]:
-                emit(f"  {line}")
-    emit("=" * 78)
+            out.append(f"\n{r['stem']} training trace:")
+            out.extend(f"  {line}" for line in r["trace"])
+    out.append("=" * 78)
+    return out
+
+
+def report(results: list[dict], out_dir: str) -> None:
+    # Saved as well as printed: scrollback is not storage, and a closed ssh session would lose the
+    # only copy of an hour of GPU time.
+    out = render(results)
+    print("\n".join(out))
 
     # results.md is the printed block verbatim (copy/paste or scp it); results.json is every field
     # for later re-analysis, including the fields the table has no room for (sim_rho, pool, ckpt).

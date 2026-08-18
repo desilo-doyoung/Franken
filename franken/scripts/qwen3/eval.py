@@ -34,7 +34,7 @@ from torch.utils.data import DataLoader
 from franken.data.embed_corpus import WEB_SEARCH, Pool, instruct, mix, pool
 from franken.encode import embed_batches, embed_texts
 from franken.metrics import K, ndcg_pool, recall_at_k
-from franken.scripts.qwen3 import common
+from franken.scripts.qwen3 import common, report
 from franken.scripts.qwen3.common import Models, embed_pool, load, score, teacher_cache
 
 SUITES = ("fidelity", "corpus", "external")
@@ -129,7 +129,7 @@ EXTERNAL = {
 # --------------------------------------------------------------- suites
 
 
-def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes: dict | None = None) -> dict:
+def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes=None, emit=report.silent) -> dict:
     """Score teacher and student over named pools, one row each, teacher cached. `shapes` says what
     a task retrieves -- without it a reader cannot tell that `gooaq` is question->answer while
     `specter` is anchor->cited-title against a hard negative, difficulties that are not comparable.
@@ -138,23 +138,19 @@ def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes: dict | None = 
     for name, p in pools.items():
         shape = (shapes or {}).get(name, "")
         if not p:
-            print(f"{name:>18} {'':>6}   no queries", flush=True)
+            emit(report.empty_row(name))
             continue
         t = score(m, m.teacher, p, cache=teacher_cache(suite, name, m.cfg))
         s = score(m, m.student, p)
-        print(
-            f"{name:>18} {'':>6} {len(p.q_ids):>5} {len(p.d_ids):>6} "
-            f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}%"
-            f"   {shape}",
-            flush=True,
-        )
+        # Emitted as it lands, not at the end: a pool takes minutes and the run is otherwise silent.
+        emit(report.task_row(name, "", len(p.q_ids), len(p.d_ids), report.quality(t, s), shape))
         out[name] = {"teacher": t, "student": s, "queries": len(p.q_ids), "docs": len(p.d_ids)}
         if shape:
             out[name]["retrieves"] = shape
     return out
 
 
-def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict, ndcg: dict) -> dict:
+def _corpus_rows(m, pools, kinds: dict, shapes: dict, ndcg: dict, emit=report.silent) -> dict:
     """Quality AND fidelity per task, off one pass of embeddings (free: `score` already embedded
     every pool twice and threw the vectors away). nDCG@K is quality lost; recall@K and embed_dist
     are how far the student's geometry moved ON THAT SLICE. Different questions, read as a ratio,
@@ -166,7 +162,7 @@ def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict, n
     for name, p in pools.items():
         kind, shape = kinds.get(name, ""), shapes.get(name, "")
         if not p:
-            print(f"{name:>18} {kind:>6}   no queries", flush=True)
+            emit(report.empty_row(name, kind))
             continue
         td, tq = embed_pool(m, m.teacher, p, teacher_cache("corpus", name, m.cfg))
         sd, sq = embed_pool(m, m.student, p)
@@ -186,26 +182,16 @@ def _corpus_rows(m: Models, pools: dict[str, Pool], kinds: dict, shapes: dict, n
         if row["scores_ndcg"]:
             t, s = ndcg_pool(p, td, tq), ndcg_pool(p, sd, sq)
             row |= {"teacher": t, "student": s}
-            quality = f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t if t else 0:>7.1f}%"
+            cells = report.quality(t, s)
         else:
-            quality = f"{'-':>9} {'-':>9} {'-':>9} {'-':>8}"
-        print(
-            f"{name:>18} {kind:>6} {len(p.q_ids):>5} {len(p.d_ids):>6} {quality} "
-            f"{rec:>9.4f} {dist:>8.4f}   {shape}",
-            flush=True,
+            cells = report.BLANK_QUALITY
+        emit(
+            report.task_row(
+                name, kind, len(p.q_ids), len(p.d_ids), f"{cells} {rec:>9.4f} {dist:>8.4f}", shape
+            )
         )
         out[name] = row
     return out
-
-
-def _header(what: str, metric: str) -> None:
-    # The metric always goes in the header: `recall@10` here means teacher-neighbour agreement,
-    # MTEB's means something else, so an unlabelled column is a number waiting to be misread.
-    print(
-        f"\n== {what} -- {metric} ==\n{'task':>18} {'kind':>6} {'q':>5} {'docs':>6} "
-        f"{'teacher':>9} {'student':>9} {'delta':>9} {'rel':>8}   retrieves",
-        flush=True,
-    )
 
 
 def _macro(rows: list[dict]) -> tuple[float, float]:
@@ -213,17 +199,14 @@ def _macro(rows: list[dict]) -> tuple[float, float]:
     return sum(r["teacher"] for r in rows) / n, sum(r["student"] for r in rows) / n
 
 
-def _print_macro(label: str, rows: list[dict]) -> dict:
+def _macro_of(label: str, rows: list[dict], emit) -> dict:
     t, s = _macro(rows)
-    print(
-        f"{f'{label}({len(rows)})':>18} {'':>14} {'':>5} {'':>6} "
-        f"{t:>9.4f} {s:>9.4f} {s - t:>+9.4f} {100 * (s - t) / t:>7.1f}%"
-    )
+    emit(report.macro_row(label, t, s, len(rows)))
     return {"teacher": t, "student": s, "n": len(rows)}
 
 
 @torch.no_grad()
-def fidelity(m: Models) -> dict:
+def fidelity(m: Models, emit=report.silent) -> dict:
     """Teacher agreement on the corpus's own held-out pool, plus STS-B as a labelled anchor.
 
     recall@10 is ALREADY teacher-relative -- feeding it the teacher gives exactly 1.0, so there is
@@ -253,38 +236,18 @@ def fidelity(m: Models) -> dict:
         "stsb_teacher": stsb["teacher"],
         "stsb_student": stsb["student"],
     }
-    print(
-        f"\n== agreement: {out['pool']} held-out corpus texts -- recall@{K} vs THIS teacher "
-        f"(not MTEB's recall) =="
-    )
-    print(
-        f"  recall@{K}     {out[f'recall@{K}']:.4f}   of the teacher's top-{K} neighbours found;"
-        f" teacher = 1.0 by construction"
-    )
-    print(f"  embed_dist    {out['embed_dist']:.6f}   (per-vector; logging only, it misranks)")
-    print(
-        f"  STS-B         teacher {stsb['teacher']:.4f}  student {stsb['student']:.4f}  "
-        f"delta {stsb['student'] - stsb['teacher']:+.4f}"
-    )
+    emit(report.fidelity_block(out))
     return out
 
 
-def corpus(m: Models, split: str, names: list[str]) -> dict:
+def corpus(m: Models, split: str, names: list[str], emit=report.silent) -> dict:
     """nDCG@10 on held-out rows of the training slices, so coverage is out of the equation.
 
     Two macros, deliberately not one: a qrels task's golds are ~96% likely to be train rows, so
     only its distractors are held out. Averaging that into a clean headline is the CORE mistake.
     """
     sources = {s.name: s for s in mix(m.cfg.train.corpus)}
-    print(
-        f"\n== corpus: held-out rows of {m.cfg.train.corpus}, split={split} ==\n"
-        f"   quality = nDCG@{K} (teacher/student/delta/rel);  fidelity = recall@{K} + embed_dist\n"
-        f"   both over the task's whole doc pool. Read across MODELS: `docs` differs per task and\n"
-        f"   both metrics are pool-size dependent, so task-to-task is not comparable\n"
-        f"{'task':>18} {'kind':>6} {'q':>5} {'docs':>6} {'teacher':>9} {'student':>9} "
-        f"{'delta':>9} {'rel':>8} {f'recall@{K}':>9} {'dist':>8}   retrieves",
-        flush=True,
-    )
+    emit(report.corpus_header(m.cfg.train.corpus, split))
     pools = {n: pool(sources[n], split, m.cfg.train.corpus) for n in names}
     kinds = {n: ("qrels" if sources[n].qrels else "pair") for n in names}
     # For a qrels source the row holds no pair, so the adapter's shape describes the corpus text
@@ -298,55 +261,51 @@ def corpus(m: Models, split: str, names: list[str]) -> dict:
         for n in names
     }
     ndcg = {n: sources[n].scores_ndcg for n in names}
-    rows = _corpus_rows(m, pools, kinds, shapes, ndcg)
+    rows = _corpus_rows(m, pools, kinds, shapes, ndcg, emit)
     for n, r in rows.items():
         r["domain"] = sources[n].domain
 
     out: dict = {"metric": f"ndcg@{K}", "sources": rows}
     if not rows:
         return out
-    print()
+    emit("")
     # Every macro is over scored tasks only -- a suppressed task has no nDCG to average.
     scored = [r for r in rows.values() if r["scores_ndcg"]]
     if blind := [n for n, r in rows.items() if not r["scores_ndcg"]]:
-        share = sum(sources[n].weight for n in blind)
-        print(
-            f"nDCG not scored ({len(blind)}, {share:.0%} of the corpus): {', '.join(blind)}\n"
-            f"  gold is one arbitrary member of an equally valid set; read their recall@{K}.",
-        )
+        emit(report.unscored_note(blind, sum(sources[n].weight for n in blind)))
     for kind in ("pair", "qrels"):
         if group := [r for r in scored if r["tag"] == kind]:
-            out[f"macro_{kind}"] = _print_macro(f"MACRO-{kind}", group)
+            out[f"macro_{kind}"] = _macro_of(f"MACRO-{kind}", group, emit)
     # Pair tasks only. Mixing in qrels tasks would fold ~96%-train-row documents into a domain
     # average, which is the reason the macros are split in the first place.
     pair_rows = [r for r in scored if r["tag"] == "pair"]
     if pair_rows:
-        print(f"\nby domain (pair tasks only, nDCG@{K}):")
+        emit(f"\nby domain (pair tasks only, nDCG@{K}):")
         for domain in sorted({r["domain"] for r in pair_rows}):
             group = [r for r in pair_rows if r["domain"] == domain]
-            dt, ds = _macro(group)
-            print(f"  {domain:<14} n={len(group)}  {dt:.4f} -> {ds:.4f}  {ds - dt:+.4f}")
+            emit(report.domain_row(domain, len(group), *_macro(group)))
     return out
 
 
-def external(m: Models, names: list[str]) -> dict:
+def external(m: Models, names: list[str], emit=report.silent) -> dict:
     """nDCG@10 against ground-truth judgements. NOT comparable to the published MTEB table: task
     subset, the config's own max_seq_len (the FHE condition) vs MTEB's 512, one generic instruction.
 
     ⚠️ The macro is EVERY scored task. Two tasks ("CORE") read the depth-19 cut at +0.4% where five
     put it at -16.0%, inverting the ratio column too -- it reversed the conclusion, not the value.
     """
-    _header("external benchmarks", f"nDCG@{K}")
+    emit(report.header("external benchmarks", f"nDCG@{K}"))
     rows = _pairs(
         m,
         {n: EXTERNAL[n][0](EXTERNAL[n][1]) for n in names},
         "external",
         shapes=dict.fromkeys(names, "judged query -> gold document"),
+        emit=emit,
     )
     out: dict = {"metric": f"ndcg@{K}", "tasks": rows}
     if rows:
-        print()
-        out["macro"] = _print_macro("MACRO", list(rows.values()))
+        emit("")
+        out["macro"] = _macro_of("MACRO", list(rows.values()), emit)
     return out
 
 
@@ -378,28 +337,30 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"Not in the mix: {unknown}; have {sorted(cfg_sources)}")
 
     datasets.disable_progress_bars()
+
+    def emit(line: str) -> None:
+        # Flushed: a suite takes minutes per task and stdout is block-buffered into a log file.
+        print(line, flush=True)
+
     m = load(args)
     result: dict = {"config": args.config, "student_ckpt": args.student_ckpt, "k": K}
     if "fidelity" in suites:
-        result["fidelity"] = fidelity(m)
+        result["fidelity"] = fidelity(m, emit)
     if "corpus" in suites:
-        result["corpus"] = corpus(m, args.split, names)
+        result["corpus"] = corpus(m, args.split, names, emit)
     if "external" in suites:
-        result["external"] = external(m, tasks)
+        result["external"] = external(m, tasks, emit)
 
     # The subtraction the two nDCG suites exist for. Pair-derived only: the qrels macro's documents
     # are mostly train rows, so it would flatter the in-distribution side.
     in_dist = result.get("corpus", {}).get("macro_pair")
     off_dist = result.get("external", {}).get("macro")
     if in_dist and off_dist:
-        a = 100 * (in_dist["student"] - in_dist["teacher"]) / in_dist["teacher"]
-        b = 100 * (off_dist["student"] - off_dist["teacher"]) / off_dist["teacher"]
+        a = report.relative_delta(in_dist["teacher"], in_dist["student"])
+        b = report.relative_delta(off_dist["teacher"], off_dist["student"])
         result["coverage_gap"] = b - a
-        print(
-            f"\nin-distribution {a:+.1f}%   external {b:+.1f}%   coverage gap {b - a:+.1f}%\n"
-            f"  a large gap means the fix is corpus coverage; both large means capacity."
-        )
-    print()
+        emit(report.coverage_gap_block(a, b))
+    emit("")
 
     if args.json:
         with open(args.json, "w") as f:
