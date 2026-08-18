@@ -42,7 +42,7 @@ model:
   softmax: exact
   softmax_kwargs: {{}}
   {"activation: quad_silu" if quad else "activation: silu # Qwen3's SwiGLU nonlinearity is SiLU, NOT GELU"}
-  activation_kwargs: {{ domain: 32 }}{"" if quad else "  # unused by exact silu"}
+  activation_kwargs: {"{ domain: 32 }" if quad else "{} # ExactSiLU takes no ctor args: `domain` would be a TypeError, not a no-op"}
   attn_impl: sdpa_causal
 
 distill:
