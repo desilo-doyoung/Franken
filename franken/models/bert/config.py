@@ -1,10 +1,5 @@
-"""BERT student architecture config.
-
-The BERT student is built from scratch (no pretrained checkpoint to read dims
-from), so every architectural dimension is declared here. Extends the
-model-agnostic ``franken.config.ModelConfig`` (backend / depth / ops) with the
-BERT-specific widths, vocab, and dropout the from-scratch modules consume.
-"""
+"""BERT student dims: the student is built from scratch, so nothing reads them off a
+checkpoint."""
 
 from __future__ import annotations
 
@@ -15,8 +10,7 @@ from franken.config import ModelConfig
 
 @dataclass
 class BertModelConfig(ModelConfig):
-    """BERT dims. Width matches the teacher (768) so hidden-state MSE needs no
-    projection; only depth (``num_hidden_layers``) and ops change."""
+    # Width matches the teacher, so hidden-state MSE needs no projection.
 
     hidden_size: int = 768
     num_attention_heads: int = 12

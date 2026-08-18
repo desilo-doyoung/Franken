@@ -1,16 +1,14 @@
-"""Periodic progress lines for long runs, which otherwise emit one line per epoch -- hours of
-silence in which a healthy run is indistinguishable from a hung one."""
+"""Periodic progress lines: one line per epoch leaves hours in which a healthy run looks hung."""
 
 import time
 
 import torch
 
-# Steps between lines. Output is indented, so run_experiments' epoch-line trace ignores it.
-LOG_EVERY = 50
+LOG_EVERY = 50  # indented output, so run_experiments' epoch-line trace ignores it
 
 
 class ProgressLogger:
-    # Not tqdm: this lands in a redirected log file, where carriage returns collapse into one line.
+    # Not tqdm: carriage returns collapse into one line in a redirected log.
     def __init__(self, total_steps, world_size, device, log, enabled=True):
         self.total_steps, self.world_size, self.log = total_steps, world_size, log
         self.enabled, self.every = enabled, LOG_EVERY
@@ -21,7 +19,7 @@ class ProgressLogger:
 
     def step(self, loss, batch):
         self.step_i += 1
-        # Off rank 0 there is nothing to print, and reading the accumulators would sync the GPU.
+        # Reading the accumulators off rank 0 would sync the GPU for nothing.
         if not self.enabled:
             return
         self._loss += loss.detach()
@@ -34,7 +32,7 @@ class ProgressLogger:
         elapsed = time.monotonic() - self._t0
         per_step = elapsed / self.every
         remaining = (self.total_steps - self.step_i) * per_step
-        # Rank 0 sees only its own shard, so scale its token count to the whole job.
+        # Rank 0 sees only its shard; scale to the whole job.
         tok_s = self._tokens.item() * self.world_size / elapsed
         finish = time.strftime("%H:%M", time.localtime(time.time() + remaining))
         self.log(

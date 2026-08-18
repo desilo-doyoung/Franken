@@ -1,17 +1,10 @@
-"""Run a batch of distillation experiments across the available GPUs and print one table.
+"""Run a batch of distillation experiments across the given GPUs and print one table.
 
-Per config: corpus gates (once per corpus), distill, then `eval.py`. Everything a decision needs
-lands in one markdown table for PROGRESS.md. Numbers come from each scorer's `--json`, never
-scraped from prose, so a reworded print cannot corrupt the table; a crashed run degrades to one
-FAILED row with its log tail.
+Per config: corpus gates (once per corpus), distill, then eval. Numbers come from each scorer's
+`--json`, never scraped from prose. A crashed run degrades to one FAILED row with its log tail.
 
-Configs are a work queue over the given cards, so N configs cost ceil(N/devices) slots. Pass only
-cards you actually own -- a co-tenant's idle GPU is not free capacity. `--ddp` switches the other
-way: one config at a time over ALL devices. The queue maximizes throughput; DDP maximizes what a
-SINGLE run can absorb.
-
-⚠️ `token_budget` is PER RANK, so tokens/step scales with the device count and steps/epoch is
-data-dependent -- the trainer logs the real count at startup and derives lr from it.
+Configs are a work queue over the cards; `--ddp` instead runs one config at a time across all of
+them. Pass only cards you own. `token_budget` is PER RANK, so tokens/step scales with the count.
 
 Usage:
     uv run python -m franken.scripts.qwen3.run_experiments --devices 2,3 configs/qwen3/depth19*.yaml
@@ -45,7 +38,7 @@ def _say(msg: str) -> None:
 
 
 def _run(cmd: list[str], device: str, log_path: str) -> int:
-    """Run one subprocess pinned to `device`, streaming its output to `log_path`."""
+    """One subprocess pinned to `device`, output streamed to `log_path`."""
     env = os.environ | {"CUDA_VISIBLE_DEVICES": device}
     with open(log_path, "w") as log:
         proc = subprocess.run(cmd, cwd=_ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -58,14 +51,13 @@ def _tail(path: str, n: int = 15) -> str:
 
 
 def _trace(path: str) -> list[str]:
-    """The per-epoch metric lines from a distill log — the convergence story in ~4 lines."""
+    """The per-epoch metric lines from a distill log."""
     with open(path) as f:
         return [ln.rstrip() for ln in f if ln.startswith(("init:", "epoch "))]
 
 
 def _distill_cmd(config: str, nproc: int) -> list[str]:
-    # `-m torch.distributed.run` rather than the `torchrun` console script, so the ranks inherit
-    # exactly this interpreter -- on a remote box the bare `torchrun` on PATH is often another venv.
+    # `-m torch.distributed.run`, not the `torchrun` script: the ranks must inherit THIS venv.
     argv = ["main.py", "distill", "--config", config]
     if nproc > 1:
         return [sys.executable, "-m", "torch.distributed.run", f"--nproc_per_node={nproc}", *argv]
@@ -85,8 +77,7 @@ def one_experiment(
     cfg = Config.from_yaml(config)
     ckpt = RunPaths(cfg).student_bin
     nproc = len(device.split(",")) if ddp else 1
-    # depth/ops come from the config, not the scorer: they label the run, and `report` needs them
-    # for every row including a FAILED one.
+    # From the config, not the scorer: `report` needs them for FAILED rows too.
     result = {
         "stem": stem,
         "config": config,
@@ -169,18 +160,17 @@ def one_experiment(
 
 def deficits(r: dict) -> dict:
     """The derived columns, out of the f-strings so they can be checked without a GPU run."""
-    # recall@10 is ALREADY teacher-relative (1.0 is the ceiling), so its deficit is 1 - recall.
+    # recall@10 is already teacher-relative, so its deficit is 1 - recall.
     recall_def = 1.0 - r["recall"]
     ndcg_def = (r["ndcg_teacher"] - r["ndcg"]) / r["ndcg_teacher"]
     delta = r["stsb_student"] - r["stsb_teacher"]
     return {
         "recall_def": recall_def,
         "ndcg_def": ndcg_def,
-        # nDCG deficit over recall deficit; undefined when the student matched the teacher.
+        # Undefined when the student matched the teacher.
         "ratio": ndcg_def / recall_def if recall_def > 1e-9 else None,
         "stsb_delta": delta,
-        # Relative to the teacher's own STS-B, which is the reference the claim is about
-        # ("preserves the teacher"), not an absolute-quality score.
+        # Relative to the teacher's own STS-B, the reference the claim is about.
         "stsb_rel": 100 * delta / r["stsb_teacher"],
     }
 
@@ -206,8 +196,7 @@ def render(results: list[dict]) -> list[str]:
             f"| {d['stsb_delta']:+.4f} | {d['stsb_rel']:+.1f}% | {mins} |"
         )
 
-    # Failures stay out of the table so the table is always pasteable, but they are listed
-    # loudly: a batch that quietly dropped a run reads as "that config wasn't tried".
+    # Out of the table so it stays pasteable, but listed loudly.
     for r in results:
         if r.get("error"):
             log = f"  ({r['log']})" if r.get("log") else ""
@@ -219,8 +208,7 @@ def render(results: list[dict]) -> list[str]:
         "read 0.08 on the old 2-task one."
     )
 
-    # Always print the per-task breakdown: the macro is an average over domains that move in
-    # opposite directions (code -61%, Chinese +1%), and only this table shows that.
+    # The macro averages domains that move in opposite directions; only this shows that.
     names = sorted({t for r in ok for t in r.get("ndcg_tasks", {})})
     if names:
         out.append(f"\nper-task nDCG@10, student (teacher) — the {len(names)} tasks in the macro\n")
@@ -238,8 +226,7 @@ def render(results: list[dict]) -> list[str]:
 
     teachers = {round(r["stsb_teacher"], 4) for r in ok}
     if teachers:
-        # One value unless configs differ in max_seq_len — the teacher is deterministic, so a
-        # second value means the runs aren't comparable on STS-B and the deltas hide it.
+        # The teacher is deterministic, so a second value means the runs are not comparable.
         out.append(f"\nteacher STS-B: {', '.join(f'{t:.4f}' for t in sorted(teachers))}")
         if len(teachers) > 1:
             out.append(
@@ -255,13 +242,11 @@ def render(results: list[dict]) -> list[str]:
 
 
 def report(results: list[dict], out_dir: str) -> None:
-    # Saved as well as printed: scrollback is not storage, and a closed ssh session would lose the
-    # only copy of an hour of GPU time.
+    # Saved as well as printed: scrollback is not storage.
     out = render(results)
     print("\n".join(out))
 
-    # results.md is the printed block verbatim (copy/paste or scp it); results.json is every field
-    # for later re-analysis, including the fields the table has no room for (sim_rho, pool, ckpt).
+    # results.md is the printed block verbatim; results.json keeps the fields the table drops.
     md, js = os.path.join(out_dir, "results.md"), os.path.join(out_dir, "results.json")
     with open(md, "w") as f:
         f.write("\n".join(out) + "\n")
@@ -275,8 +260,7 @@ _PREBUILD_THRESHOLD = 100_000
 
 
 def _cache_missing(cfg) -> bool:
-    # Runs go one per device CONCURRENTLY and `_build_split` is per process, so with no cache every
-    # run tokenizes the whole corpus independently -- hours each at 9M texts.
+    # Runs go one per device concurrently, so with no cache each tokenizes the whole corpus.
     from franken.data.embed_corpus import cache_path  # noqa: PLC0415  (heavy import, rare path)
     from franken.tasks import build_task  # noqa: PLC0415
 
@@ -291,8 +275,7 @@ def _cache_missing(cfg) -> bool:
 
 
 def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:
-    # Gates (holdout, every source loading and scoreable, corpus_size still matching) are pure
-    # checks, cheap next to a distill. corpus.py decides whether to build; `build` only logs it.
+    # Pure checks, cheap next to a distill. corpus.py decides whether to build; `build` logs it.
     if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
         return
     log = os.path.join(out_dir, "corpus.log")
@@ -302,8 +285,7 @@ def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:
         "",  # no GPU needed
         log,
     )
-    # 134/-6 is SIGABRT from an HF retry thread during interpreter shutdown, historically AFTER the
-    # results print. corpus.py exits via os._exit to dodge it, but trust the verdict over the code.
+    # 134/-6 is SIGABRT from an HF retry thread at shutdown; trust the verdict over the code.
     if code != 0 and not (code in (134, -6) and "CORPUS OK" in _tail(log, 4)):
         raise SystemExit(f"corpus FAILED (exit {code}) — not training\n{_tail(log)}")
 
@@ -336,7 +318,7 @@ def main(argv: list[str] | None = None) -> None:
     pending: queue.Queue = queue.Queue()
     done: set[str] = set()  # the corpus step is per CORPUS, not per config
     for i, config in enumerate(args.configs):
-        cfg = Config.from_yaml(config)  # fail on a bad config now, not 30 min into the batch
+        cfg = Config.from_yaml(config)  # fail now, not 30 min into the batch
         if cfg.train.corpus not in done:
             missing = _cache_missing(cfg)
             if args.eval_only and missing:
@@ -361,14 +343,14 @@ def main(argv: list[str] | None = None) -> None:
                 results[i] = one_experiment(
                     config, device, out_dir, args.eval_only, args.ddp, args.tasks
                 )
-            except Exception as exc:  # keep the other runs alive; report it as a row
+            except Exception as exc:  # keep the other runs alive
                 results[i] = {"stem": os.path.basename(config), "error": repr(exc)}
 
     mode = f"DDP across {len(devices)}" if args.ddp else f"queued over {len(devices)}"
     print(f"{len(args.configs)} experiment(s), {mode} device(s): {', '.join(devices)}")
     print(f"logs: {out_dir}")
     started = time.monotonic()
-    # DDP already owns every card, so the queue collapses to one worker holding the whole set.
+    # DDP owns every card, so the queue collapses to one worker.
     threads = [
         threading.Thread(target=worker, args=(d,))
         for d in ([",".join(devices)] if args.ddp else devices)

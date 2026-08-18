@@ -1,9 +1,8 @@
-"""Type a query, see what the student actually retrieves — and how the teacher ranked the same docs.
+"""Type a query, see what the student retrieves and how the teacher ranked the same docs.
 
-The tracker's `recall@10` is teacher-neighbour agreement over the pool's DOCUMENTS; it takes no
-queries and no judgements, so it cannot be eyeballed. This prints the three things a single query
-can support, each named separately, under a banner carrying the population numbers so an anecdote
-is always read against the aggregate it came from.
+The tracker's `recall@10` takes no queries and no judgements, so it cannot be eyeballed. Each
+number here is named separately, under a banner carrying the population figures so an anecdote is
+read against its aggregate.
 
     CUDA_VISIBLE_DEVICES=2 uv run python -m franken.scripts.qwen3.search --source gooaq
         --config configs/qwen3/depth19_exact.yaml
@@ -45,7 +44,7 @@ def _width(s: str) -> int:
 
 
 def _snip(text: str) -> list[str]:
-    # Collapse first: code and abstracts carry newlines that would break every column below.
+    # Collapse first: code and abstracts carry newlines that would break the columns.
     s = " ".join(text.split())
     rows = []
     while s and len(rows) < LINES:
@@ -57,7 +56,7 @@ def _snip(text: str) -> list[str]:
             if w + cw > budget:
                 break
             take, w = take + 1, w + cw
-        # Prefer a word break, but only a late one -- CJK sources carry no spaces at all.
+        # Only a late word break -- CJK sources carry no spaces at all.
         if not last and take < len(s) and (brk := s.rfind(" ", 0, take + 1)) > budget * 0.6:
             take = brk
         row, s = s[:take].rstrip(), s[take:].lstrip()
@@ -68,8 +67,7 @@ def _snip(text: str) -> list[str]:
 
 
 def _embed_dist(t_emb, s_emb):
-    # 1-cos per row, the trainer's `embed_dist`, so the number here is the one it logs. Rows are
-    # L2-normed by the backend, so the elementwise product sums to the cosine.
+    # 1-cos per row, the trainer's `embed_dist`. Rows are L2-normed, so the product is the cosine.
     return 1.0 - (t_emb * s_emb).sum(-1)
 
 
@@ -195,7 +193,7 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
 
 
 def _sent(p, src, text):
-    # A pool query already carries its instruction; re-wrapping it would double the prefix.
+    # A pool query already carries its instruction.
     if text in p.q_ids:
         return p.q_texts[p.q_ids.index(text)], text
     return instruct(src.instruct, text), None
@@ -220,8 +218,8 @@ def main(argv: list[str] | None = None) -> None:
     datasets.disable_progress_bars()
     m = common.load(args)
     if args.student_ckpt and args.student_ckpt != RunPaths(cfg).student_bin:
-        # max_seq_len is not recorded in a bare state_dict, so a foreign ckpt is the only signal
-        # that this config's length and corpus may not be the ones it was distilled under.
+        # max_seq_len is not in a bare state_dict, so a foreign ckpt is the only signal that this
+        # config may not be the one it was distilled under.
         print(
             f"\nWARN  this ckpt is not {RunPaths(cfg).student_bin}, the path this\n"
             f"      config writes. It is being run at max_seq_len {cfg.train.max_seq_len}."
@@ -229,7 +227,7 @@ def main(argv: list[str] | None = None) -> None:
     if torch.cuda.is_available():
         print(f"\ndevice  {m.device}  {torch.cuda.get_device_name(m.device)}")
 
-    # Uncached pools re-stream from HF for minutes, which otherwise reads as a hang.
+    # Uncached pools re-stream for minutes, which otherwise reads as a hang.
     print(f"pool    {args.source}/{args.split}, uncached means minutes of HF streaming", flush=True)
     pl = pool(src, args.split, cfg.train.corpus)
     if not pl:

@@ -1,16 +1,8 @@
-"""Seed sweep: best teacher seed, then the best student seed on top of it. Selection is on
-*validation* throughout; test scores are reported at the end for information only.
+"""Seed sweep: best teacher seed by lowest validation CE, then the best student seed on top of it
+by highest validation F1. Selection is on validation throughout; test is reported for information.
 
-  1. Teacher phase — fine-tune per seed, select LOWEST validation CE (best-calibrated soft targets
-     distil into the stronger student). CE is computed here directly, dodging the transformers 5.13
-     `eval_loss` 2x-logging quirk.
-  2. Student phase — freeze that teacher, distil per seed, select highest validation F1. Each run
-     already restores its own best-val-F1 epoch inside Distiller.train().
-
-Seeds are split across --gpus, one single-GPU worker subprocess per chunk: that avoids HF Trainer
-DataParallel, which would change the effective batch size and break bit-reproducibility. A barrier
-between the phases keeps selection global. The winner is exported to <student-out>/ as both
-pytorch_model.bin and model.safetensors.
+Seeds are split across --gpus, one single-GPU worker subprocess per chunk -- HF Trainer's
+DataParallel would change the effective batch size and break bit-reproducibility.
 
 Usage:
     # Orchestrate across GPUs 2 and 3 (default):

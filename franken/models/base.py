@@ -1,6 +1,4 @@
-"""Model backend interface: everything model-family-specific that ``Distiller`` and the scripts
-need. Nothing task-specific (data/labels/loss/metric live on ``franken.tasks.Task``).
-"""
+"""Model backend interface: everything model-family-specific. Nothing task-specific."""
 
 from __future__ import annotations
 
@@ -13,8 +11,7 @@ from franken.distill.layer_map import resolve_layer_map
 
 
 class ModelBackend(ABC):
-    # Substring identifying a per-layer weight key, with the block index directly after it
-    # ("bert.encoder.layer.3.…", "layers.3.…"). Everything else is copied verbatim.
+    # Substring before a block index in a weight key ("layers.3."); everything else copies verbatim.
     layer_marker: str
 
     @abstractmethod
@@ -26,8 +23,7 @@ class ModelBackend(ABC):
         """Load a frozen, eval-mode teacher with hidden states enabled."""
 
     def seed_student(self, student: nn.Module, teacher: nn.Module, cfg: Config) -> None:
-        """Strided teacher -> student init, in place. Weights transfer by name, so a student block
-        keeps the teacher block's key layout under depth reduction."""
+        """Strided teacher -> student init, in place; weights transfer by name."""
         layer_map = resolve_layer_map(
             teacher.config.num_hidden_layers,
             cfg.model.num_hidden_layers,
@@ -47,8 +43,7 @@ class ModelBackend(ABC):
 
     @abstractmethod
     def forward(self, model: nn.Module, inputs: dict) -> dict:
-        """Teacher or student -> ``{"output": Tensor, "hidden_states": Sequence[Tensor]}``, with
-        ``hidden_states[0]`` the embedding output (HF convention)."""
+        """-> ``{"output", "hidden_states"}``, with ``hidden_states[0]`` the embedding output."""
 
     @abstractmethod
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:

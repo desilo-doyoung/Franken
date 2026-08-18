@@ -1,12 +1,5 @@
-"""Evaluate the teacher and/or distilled student on MRPC splits.
-
-Reports accuracy + F1 for each (model, split) pair as a table. MRPC is the one
-GLUE task whose `test` split ships with public labels, so validation *and* test
-can both be scored locally.
-
-Model construction and the forward pass go through the model backend
-(``franken.models``) so this script is not tied to a specific model class; data
-building stays MRPC-specific (this is an MRPC scorer).
+"""Accuracy + F1 for the teacher and/or student on MRPC splits. MRPC is the one GLUE task whose
+`test` split ships with public labels, so both splits score locally.
 
 Usage:
     python -m franken.scripts.bert.evaluate --config configs/bert/default.yaml

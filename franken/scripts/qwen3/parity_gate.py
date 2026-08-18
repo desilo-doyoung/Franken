@@ -1,9 +1,7 @@
-"""Parity gate: with exact ops + full depth + teacher weights, the from-scratch
-Qwen3 student must BE the teacher. Any gap is a module bug (RoPE/QK-norm order,
-repeat_kv, causal+pad mask, hidden_states bookkeeping), not float noise — and every
-later FHE measurement assumes that gap is zero when the ops are exact.
+"""With exact ops, full depth and teacher weights, the from-scratch student must BE the teacher.
+Any gap is a module bug, not float noise, and every later FHE measurement assumes it is zero.
 
-Fails by design on FHE configs (cgf / polynomial activation); it's an exact-op gate.
+Fails by design on FHE configs -- it is an exact-op gate.
 
 Usage:
     uv run python -m franken.scripts.qwen3.parity_gate --config configs/qwen3/gate_parity.yaml
@@ -25,8 +23,7 @@ from franken.tasks import build_task
 COS_THRESHOLD = 0.9999
 MAX_ULP = 16  # accumulated summation-order noise over 28 layers; a bug is orders larger
 
-# Mixed lengths on purpose: real padding exercises the additive pad mask and the
-# last-non-pad-token pooling index instead of reducing to "the last column".
+# Mixed lengths on purpose: real padding exercises the pad mask and the pooling index.
 PROBE_TEXTS = [
     "short",
     "The capital of France is Paris.",
@@ -80,9 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: hidden_states {len(sh)} != {len(th)}; the gate needs full teacher depth.")
         return 1
 
-    # Judge on real tokens only: pad positions are read by nothing (masked in the loss,
-    # excluded by last-token pooling), and attn_impl "sdpa_causal" leaves garbage there by
-    # design. The raw max is still printed so a broken pad mask stays visible.
+    # Real tokens only: nothing reads pad positions, and "sdpa_causal" leaves garbage there. The
+    # raw max is still printed so a broken pad mask stays visible.
     keep = inputs["attention_mask"].bool().unsqueeze(-1)
     n = keep.sum().item() * sh[0].shape[-1]
     mses = [(((a - b) * keep) ** 2).sum().item() / n for a, b in zip(sh, th, strict=True)]
@@ -93,9 +89,8 @@ def main(argv: list[str] | None = None) -> int:
         f"on real tokens (raw incl. pad {raw:.3e})"
     )
 
-    # |Δ|max lands on Qwen3's massive-activation channels (|h| in the thousands), where one
-    # fp32 ULP is already ~5e-4 absolute. So measure the gap in ULPs of the value it sits on:
-    # a few ULPs is accumulated summation-order noise, orders more is a logic bug.
+    # |Δ|max lands on massive-activation channels where one fp32 ULP is ~5e-4 absolute, so
+    # measure it in ULPs: a few is summation-order noise, orders more is a logic bug.
     worst = max(range(len(th)), key=lambda i: dmaxes[i])
     d = (sh[worst] - th[worst]).abs() * keep
     at = th[worst].flatten()[d.argmax()].abs().item()

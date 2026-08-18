@@ -1,10 +1,8 @@
 """What the FHE-approximated operators actually see, per layer.
 
-Polynomial activations explode outside their domain and there is no clamp at inference,
-so the domain must be picked from the *operator's input* — `gate_proj` output for the
-activation, attention scores for the softmax — not from hidden states: RMSNorm strips
-Qwen3's massive activations before `gate_proj`, so hidden-state stats overestimate the
-required domain by ~20x, and domain costs multiplicative depth.
+The domain must be picked from the OPERATOR's input, not from hidden states: RMSNorm strips
+Qwen3's massive activations first, so hidden-state stats overestimate it ~20x, and domain costs
+multiplicative depth.
 
 Usage:
     uv run python -m franken.scripts.qwen3.act_range --config configs/qwen3/gate_parity.yaml
@@ -21,9 +19,8 @@ SAMPLE = 20_000  # values kept per layer per batch, for quantiles only
 
 
 def _record(store, i, x, domain):
-    """min/max/over-domain counts are EXACT over every value — with no clamp at inference the
-    single largest value decides safety, so that statistic must never be subsampled. Only the
-    quantile uses a subsample."""
+    """min/max and the over-domain count are EXACT: with no clamp at inference the single largest
+    value decides safety. Only the quantile is subsampled."""
     x = x.flatten().float()
     s = store.setdefault(i, {"min": float("inf"), "max": -float("inf"), "over": 0, "n": 0, "q": []})
     s["min"] = min(s["min"], x.min().item())
@@ -78,8 +75,7 @@ def main(argv: list[str] | None = None) -> None:
             )
         )
     for i, softmax in enumerate(backend.softmax_ops(model)):
-        # Scores are the softmax's first argument, i.e. pre-mask. Keep only entries that are
-        # actually visible: both tokens real, and key <= query (causal).
+        # Pre-mask, so keep only visible entries: both tokens real and key <= query.
         hooks.append(
             softmax.register_forward_pre_hook(
                 lambda m, a, i=i: _record(
@@ -108,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     if scores:
         _report("attention scores — input to the softmax (visible entries only)", scores, False)
     else:
-        # Reporting the empty store would print "max 0.0", which reads as a measurement.
+        # An empty store would print "max 0.0", which reads as a measurement.
         print(
             f"\nattention scores: NOT MEASURED — attn_impl={cfg.model.attn_impl!r} fuses the "
             f"softmax so its hook never fires. Re-run with 'manual' when softmax is not 'exact' "

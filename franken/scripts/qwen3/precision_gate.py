@@ -1,10 +1,8 @@
-"""Check that `precision: bf16` is safe for this architecture, before spending GPU-hours on it.
+"""Check that `precision: bf16` is safe here, before spending GPU-hours on it.
 
-bf16 is safe here only because autocast never stores the big activations in bf16: RMSNorm is
-promoted to fp32 and `residual + hidden` promotes fp32+bf16 -> fp32, so the residual stream
-(= hidden_states, the hidden-loss input) stays fp32. That is load-bearing, so assert it, along
-with the two things that would silently break it: RoPE staying fp32, and the teacher staying
-out of the autocast region.
+It is safe only because the residual stream (= hidden_states, the hidden-loss input) stays fp32
+under autocast. That is load-bearing, so assert it, plus the two things that would break it
+silently: RoPE staying fp32, and the teacher staying out of the autocast region.
 
     uv run python -m franken.scripts.qwen3.precision_gate --config configs/qwen3/gate_precision.yaml
 """
@@ -19,8 +17,7 @@ from franken.metrics import recall_at_k
 from franken.models import build_backend
 from franken.tasks import build_task
 
-# A bf16 teacher must move the targets by MORE than the comparison band, otherwise the
-# "teacher stays fp32" rule is decoration rather than a real constraint.
+# A bf16 teacher must move the targets by MORE than the band, or the rule is decoration.
 BAND = 0.004
 
 
@@ -30,9 +27,8 @@ def _fail(msg):
 
 
 def check_rope(model, device):
-    """cos/sin must stay fp32 inside an autocast region. torch.einsum is intercepted by
-    autocast on name and returns bf16 despite a .float() input, which corrupts the angles;
-    rope.py uses a broadcast multiply for exactly this reason."""
+    """cos/sin must stay fp32 under autocast: `torch.einsum` is intercepted by name and returns
+    bf16 despite a .float() input, which is why rope.py uses a broadcast multiply."""
     pos = torch.arange(16, device=device).unsqueeze(0)
     hidden = torch.zeros(1, 16, model.config.hidden_size, device=device)
     with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -58,9 +54,8 @@ def check_hidden_states(model, device):
 
 @torch.no_grad()
 def check_teacher_exclusion(backend, teacher, task, cfg, device):
-    """Embed the validation pool with the teacher in fp32 and again under bf16 autocast. If
-    those agree within the band, excluding the teacher from autocast buys nothing and this
-    check is worthless -- so a PASS here means they DISAGREE."""
+    """fp32 vs bf16-autocast teacher embeddings. If they agree within the band, excluding the
+    teacher buys nothing -- so a PASS here means they DISAGREE."""
     from torch.utils.data import DataLoader
 
     tokenizer = task.build_tokenizer(cfg)

@@ -1,6 +1,4 @@
-"""Swappable ops: ``ModelConfig.softmax``/``activation`` are names resolved here into modules,
-so attention/FFN never hardcode ``F.softmax``/``F.gelu``. Add an op = one class + one dict entry.
-"""
+"""Swappable ops, so attention/FFN never hardcode ``F.softmax``/``F.gelu``."""
 
 from __future__ import annotations
 
@@ -10,14 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
-# --- softmax ops: forward(scores, mask=None, dim=-1) -> attention weights ---
-# `scores` are RAW (unmasked); `mask` is the additive attention mask
-# (0 = visible, large-negative = masked). Ops apply the mask themselves.
+# softmax ops: forward(raw_scores, additive_mask=None, dim=-1); the op applies the mask itself.
 
 
 class ExactSoftmax(nn.Module):
-    """Standard numerically-stable softmax (adds the additive mask if given)."""
-
     def forward(self, scores, mask=None, dim=-1):
         if mask is not None:
             scores = scores + mask
@@ -25,10 +19,8 @@ class ExactSoftmax(nn.Module):
 
 
 class CGFSoftmax(nn.Module):
-    """HE-friendly: log-sum-exp approximated by its 2nd-order cumulant, so
-    ``softmax_i ~= exp(x_i - mu - var/2 - log n_vis)`` over visible positions. Only masked
-    mul/add/square/exp — no ciphertext division or max-subtraction. Unnormalized by design;
-    distillation adapts to it."""
+    """log-sum-exp by its 2nd-order cumulant: only mul/add/square/exp, no ciphertext division or
+    max-subtraction. Unnormalized by design; distillation adapts to it."""
 
     def forward(self, scores, mask=None, dim=-1):
         m = (mask == 0).to(scores.dtype) if mask is not None else torch.ones_like(scores)
@@ -40,32 +32,20 @@ class CGFSoftmax(nn.Module):
         return torch.exp(logits) * m
 
 
-# --- activation ops: forward(x) -> x ---
-
-
 class ExactGELU(nn.Module):
-    """Reference GELU (matches HF BERT); the exact-ops baseline."""
-
     def forward(self, x):
         return F.gelu(x)
 
 
 class ChebyshevGELU(nn.Module):
     """GELU as one Chebyshev polynomial on ``u = x / domain``; the basis keeps intermediates in
-    ``[-1, 1]`` (the monomial ``x**k`` would explode). FHE mult-depth ~``ceil(log2 degree)``.
-
-    ⚠️ Outside ``[-domain, domain]`` the polynomial explodes. Training clamps ``u`` (scaffold, so
-    init doesn't NaN on the teacher's ~±150 outliers); inference does NOT clamp — min/max is costly
-    in FHE — so safety is an empirical, per-dataset property to VERIFY, not a guarantee. Widening
-    ``domain`` buys margin at the cost of depth.
-    """
+    ``[-1, 1]``. Explodes outside the domain, and inference does not clamp -- verify the range."""
 
     def __init__(self, degree: int = 52, domain: float = 32.0, **kwargs):
         super().__init__()
         self.degree = degree
         self.domain = float(domain)
-        # Least-squares fit of GELU over [-domain, domain] in the Chebyshev basis
-        # (numerically stable over wide domains, unlike a monomial fit).
+        # Chebyshev basis, not monomial: numerically stable over wide domains.
         xs = np.linspace(-self.domain, self.domain, max(8001, int(self.domain * 400)))
         xt = torch.from_numpy(xs)
         y = (0.5 * xt * (1.0 + torch.erf(xt / 2.0**0.5))).numpy()
@@ -75,8 +55,7 @@ class ChebyshevGELU(nn.Module):
         self.register_buffer("coef", torch.tensor(coef, dtype=torch.float32))
 
     def _eval_poly(self, u):
-        # sum_k c_k T_k(u), basis by T_k = 2 T_{k//2} T_{k-k//2} - T_|.|. FHE would use
-        # Paterson-Stockmeyer: same depth, ~2*sqrt(degree) mults vs the ~degree here.
+        # sum_k c_k T_k(u). FHE would use Paterson-Stockmeyer: same depth, fewer mults.
         c = self.coef
         n = c.numel() - 1
         T = [torch.ones_like(u)]  # T_0
@@ -100,12 +79,8 @@ class ChebyshevGELU(nn.Module):
 
 
 class QuadGELU(nn.Module):
-    """MPCFormer's ``0.125 x^2 + 0.25 x + 0.5``. Degree 2 everywhere (FHE mult-depth 1), so unlike
-    a Chebyshev fit it never explodes — but ``x^2`` amplifies, leaving the output range ~5x wider
-    than exact GELU, and it needs heavy hidden-state alignment: beta=1 gets stuck, use beta~10.
-
-    ``domain`` only exposes the op to ``distill.range_penalty``, bounding output to
-    ~``0.125*domain^2``. None = unbounded."""
+    """MPCFormer's ``0.125 x^2 + 0.25 x + 0.5``. Never explodes, but needs heavy hidden-state
+    alignment (beta~10). ``domain`` only exposes the op to ``distill.range_penalty``."""
 
     def __init__(self, domain: float | None = None, **kwargs):
         super().__init__()
@@ -121,21 +96,11 @@ class ExactSiLU(nn.Module):
 
 
 class QuadSiLU(nn.Module):
-    """``a x^2 + b x + c`` fitted to **SiLU**: same FHE cost as ``quad`` (mult-depth 1) at 4.2x
-    lower error, because ``quad`` fits *GELU* and isn't even good there (``quad(0)=0.5``,
-    SiLU(0)=0). Coefficients are free in FHE, so fitting the right function is a pure win.
+    """``a x^2 + b x + c`` fitted to SiLU: same FHE cost as ``quad`` at 4.2x lower error, since
+    ``quad`` fits GELU. Defaults are least-squares over the measured gate_proj bulk (``|x| <= 16``).
 
-    Defaults: least-squares over the **measured** Qwen3-Embedding-0.6B gate_proj distribution on
-    ``|x| <= 16`` (38M samples; bulk RMSE 0.222 vs 0.924 for ``quad``). Fitting the full observed
-    range (max 319) is dragged nearly-linear by the tails and gets *worse* in the bulk. The fit
-    domain is insensitive though — RMSE 0.221/0.222/0.292 on ``|x| <= 8/16/32`` — so no refit is
-    needed when the deployed ``domain`` moves inside that band.
-
-    ⚠️ Degree 2 everywhere, so it never explodes: ``domain`` is a purely FHE-side output-range
-    requirement and can only COST accuracy, since ``range_penalty`` spends capacity forcing
-    activations where they do not naturally go. Set it from the ciphertext scale budget and prefer
-    the loosest the scheme tolerates. Unpenalized, real data drives output to ~9000 under either
-    fit (input tails dominate, not coefficients); the penalty bounds it to ~``a*domain^2``.
+    ``domain`` is an FHE output-range requirement and can only COST accuracy, so prefer the loosest
+    the scheme tolerates.
     """
 
     def __init__(

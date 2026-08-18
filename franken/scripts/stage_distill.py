@@ -1,13 +1,6 @@
-"""Op-curriculum (progressive op-replacement) distillation.
-
-Stage A distils with the *easier* op set from the strided init; Stage B warm-starts from those
-weights (by name, strict=False) and switches to the harder op set, so the model absorbs one
-approximation at a time. The configs may differ in ANY op -- nothing here is softmax-specific.
-
-Unlike TinyBERT/MPCFormer two-stage KD, which stages *loss targets* with all ops live throughout
-(~ what beta=10 already does), this stages *which ops are active*. Verified on MRPC test:
-quad+cgf 0.845 single-stage -> 0.873 staged, with Stage B's gentle defaults (lr 3e-5, 8 epochs,
-below the configs' 5e-5) so absorbing the new op does not wash out the Stage A init.
+"""Op-curriculum distillation: Stage A distils the easier op set from the strided init, Stage B
+warm-starts from it and swaps in the harder op, so the model absorbs one approximation at a time.
+The configs may differ in ANY op. Verified on MRPC test: quad+cgf 0.845 single-stage -> 0.873.
 
 Usage:
     python -m franken.scripts.stage_distill \
@@ -56,8 +49,7 @@ def main() -> None:
     p.add_argument("--stageb-epochs", type=int, default=8, help="Stage B epochs")
     args = p.parse_args()
 
-    # Output dirs default to the run-namespaced base (flat when run_name is unset,
-    # i.e. identical to the historical outputs/bert/stageA_quad / outputs/bert/stageB_quad_cgf).
+    # Default to the run-namespaced base.
     cfg_a = Config.from_yaml(args.config_a)
     cfg_b = Config.from_yaml(args.config_b)
     stagea_dir = args.stagea_dir or RunPaths(cfg_a).subdir("stageA_quad")
@@ -89,9 +81,8 @@ def main() -> None:
     db = Distiller(cfg_b)
     db.setup()  # strided init (kept for any params the Stage B op adds)
     sd = torch.load(stagea_ckpt, map_location=db.device)
-    # strict=False so the swapped op need not be parameter-free: shared backbone
-    # params warm-start from Stage A; params only the Stage B op introduces keep
-    # their init. Both cases are reported so a silent name mismatch can't hide.
+    # strict=False so the swapped op may carry parameters of its own; both cases are reported
+    # below, so a silent name mismatch cannot hide.
     incompatible = db.student.load_state_dict(sd, strict=False)
     if incompatible.missing_keys:
         print(

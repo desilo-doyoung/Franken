@@ -21,9 +21,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.a
 
 
 def parser(doc: str, json: bool = True) -> argparse.ArgumentParser:
-    # `--config` is REQUIRED, not defaulted: the config decides what gets measured and these
-    # scripts cost minutes to hours, so a wrong default is expensive and silent. The defaults used
-    # to disagree, and two scorers run bare compared a 128-token model against a 1024-token one.
+    # REQUIRED, not defaulted: two scorers once ran bare and compared a 128-token model against
+    # a 1024-token one.
     p = argparse.ArgumentParser(
         description=doc, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -35,7 +34,7 @@ def parser(doc: str, json: bool = True) -> argparse.ArgumentParser:
 
 
 def config(args) -> Config:
-    """The config alone, for checks worth doing before paying for a model load."""
+    """The config alone, for checks worth doing before a model load."""
     return Config.from_yaml(args.config)
 
 
@@ -51,12 +50,8 @@ class Models:
 
 
 def load(args) -> Models:
-    """Teacher and student, both eval-mode on the config's device, student seeded from the teacher
-    and then optionally overwritten from `--student-ckpt`.
-
-    Warns when a no-ckpt run is NOT an identity: a seeded student only equals the teacher at full
-    depth; truncated it scores near-random (-99.7% measured at depth 19) and says nothing.
-    """
+    """Teacher and student, eval-mode, student seeded from the teacher then optionally overwritten
+    from `--student-ckpt`. Warns when a no-ckpt run is NOT an identity (i.e. below full depth)."""
     cfg = Config.from_yaml(args.config)
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
     backend, task = build_backend(cfg.model.backend), build_task(cfg.train.task)
@@ -67,8 +62,7 @@ def load(args) -> Models:
     backend.seed_student(student, teacher, cfg)
     if args.student_ckpt:
         student.load_state_dict(torch.load(args.student_ckpt, map_location="cpu"))
-    # requires_grad_(False), not just eval(): these scripts only score. Without it a scorer that
-    # forgets no_grad retains an autograd graph per batch and OOMs on the accumulation loop.
+    # requires_grad_(False), not just eval(): a scorer that forgets no_grad would OOM otherwise.
     student = student.to(device).eval().requires_grad_(False)
 
     depth, teacher_depth = cfg.model.num_hidden_layers, teacher.config.num_hidden_layers
@@ -109,9 +103,8 @@ def pool_digest(pool) -> str:
 
 
 def embed_pool(m: Models, model, pool, cache: str | None = None):
-    # Validate the cache on pool CONTENT, not size: a change to how pools are built holds the count
-    # at 500x5000 while swapping the documents, which once served an old pool's teacher embeddings
-    # against new ids and read as +107.7% on the identity self-test.
+    # Keyed on pool CONTENT, not size: a rebuild keeps the count while swapping the documents,
+    # which once read as +107.7% on the identity self-test.
     digest = pool_digest(pool)
     if cache and os.path.exists(cache):
         blob = torch.load(cache, weights_only=True)

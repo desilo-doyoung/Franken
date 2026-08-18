@@ -1,8 +1,5 @@
-"""One function per dataset shape: ``row -> Record | None`` (None drops the row).
-
-Replaced two parallel sets of extractors, the second existing only to undo the first. Texts stay
-natural units (a paragraph, a query) — an embedding model is deployed on whole passages.
-"""
+"""One function per dataset shape: ``row -> Record | None``. Texts stay natural units, since an
+embedding model is deployed on whole passages."""
 
 from __future__ import annotations
 
@@ -19,8 +16,7 @@ def _clean(row, col: str) -> str:
 
 
 def pair(a: str, b: str) -> Callable[[dict], Record | None]:
-    """``a`` is the query side, ``b`` the document side. A row missing one side still contributes
-    the other as corpus text; it just yields no eval pair."""
+    """``a`` is the query side. A row missing one side still yields the other as corpus text."""
 
     def adapt(row) -> Record | None:
         query, doc = _clean(row, a), _clean(row, b)
@@ -33,8 +29,7 @@ def pair(a: str, b: str) -> Callable[[dict], Record | None]:
 
 
 def triplet(row) -> Record | None:
-    # No length floor: NLI-style text is short by nature, and short is the regime CGF normalizes
-    # differently — a mode worth covering rather than filtering.
+    # No length floor: short text is the regime CGF normalizes differently, worth covering.
     query, pos, neg = (_clean(row, c) for c in ("anchor", "positive", "negative"))
     if not (query or pos or neg):
         return None
@@ -45,8 +40,7 @@ triplet.shape = "anchor -> positive (+hard negative)"
 
 
 def marco(row) -> Record | None:
-    """A query plus 10 passages, the relevant ones flagged — one row is a whole retrieval task, so
-    no split can separate a query from its positive. Every flagged passage is a positive."""
+    """One row is a whole retrieval task, so no split can separate a query from its positive."""
     query = row["query"].strip()
     texts = [p.strip() for p in row["passages"]["passage_text"]]
     flags = row["passages"]["is_selected"]
@@ -61,8 +55,7 @@ marco.shape = "web query -> selected passage (+9 near-misses)"
 
 
 def titled(row) -> Record | None:
-    """A corpus dump: title + body, no query, so the source MUST declare `Qrels`. Space, not ". ",
-    matching the f"{title} {text}" shape `eval.py` builds every external document with."""
+    """Title + body, no query, so the source MUST declare `Qrels`. Space join matches external."""
     title, text = _clean(row, "title"), _clean(row, "text")
     if len(text) < _MIN_DOC:
         return None
@@ -73,12 +66,8 @@ titled.shape = "no pair in the row -- needs Qrels"
 
 
 def paragraphs(row) -> Record | None:
-    """Wikipedia rows are whole articles (median 1,040 tokens zh, 1,764 ru), so taken whole ~93% of
-    every row is discarded and the slice is nothing but lead paragraphs.
-
-    Two paragraphs of one article are related by construction. Only ONE becomes gold: promoting
-    every sibling would hand a single query ~35 golds and make nDCG@10 trivially satisfiable.
-    """
+    """Wikipedia rows are whole articles, so taken whole the slice is nothing but lead paragraphs.
+    Two paragraphs are related by construction; only ONE becomes gold, or nDCG is trivial."""
     paras = [p.strip() for p in row["text"].split("\n") if len(p.strip()) >= _MIN_PARAGRAPH]
     if not paras:
         return None
@@ -91,7 +80,7 @@ paragraphs.shape = "paragraph 1 -> paragraph 2 of the same article"
 
 
 def wikitext(row) -> Record | None:
-    # Blank lines and " = = Heading = = " rows ship as records of their own. Smoke preset only.
+    # Headings and blank lines ship as records of their own. Smoke preset only.
     text = row["text"].strip()
     if len(text) < _MIN_DOC or text.startswith("="):
         return None
@@ -99,8 +88,8 @@ def wikitext(row) -> Record | None:
 
 
 def marco_side(kind: str) -> Callable[[dict], Record | None]:
-    """Legacy `mixed` preset: the query side alone, or the passages alone. `marco` yields both,
-    which is right for multi_domain but would change `mixed`'s measured proportions."""
+    """Legacy `mixed` preset: one side only, since `marco` yields both and would change its
+    measured proportions."""
 
     def adapt(row) -> Record | None:
         if kind == "query":

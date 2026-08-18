@@ -6,19 +6,14 @@ import math
 
 import torch
 
-# nDCG@K and recall@K everywhere; retrieval is consumed at this scale. The selection pool is 500
-# texts, so recall@10 has 5000 slots and a quantum of 0.0002.
-K = 10
+K = 10  # nDCG@K and recall@K everywhere; the scale retrieval is consumed at
 
 
 def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = K) -> float:
-    """Fraction of each text's top-k teacher neighbours the student also retrieves -- *relative*
-    similarity, which is how an embedding model is actually used. THE selection metric; per-vector
-    agreement (``embed_dist`` = 1-cos) is logging only, because uniform shrinkage keeps cosine high
-    while destroying the ranking and a global rotation does the reverse.
+    """Fraction of each text's top-k teacher neighbours the student also retrieves. THE selection
+    metric: per-vector cosine survives a shrinkage that destroys the ranking, and vice versa.
 
-    ⚠️ Comparable only at a FIXED pool size: difficulty is ``k/(n-1)``, so identical per-vector
-    damage reads 1.000 at n=11, 0.110 at n=500, 0.039 at n=5000. Rows must be L2-normed.
+    Comparable only at a FIXED pool size (difficulty is ``k/(n-1)``). Rows must be L2-normed.
     """
     ss, st = student @ student.T, teacher @ teacher.T
     # Mask self-similarity, else every row's nearest neighbour is itself and both models agree
@@ -32,12 +27,8 @@ def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = K) -> flo
 
 
 def gold_recall_at_k(ranked_ids, gold: dict[str, float], k: int = K) -> float:
-    """Judged-gold recall -- a different question from ``recall_at_k``, which scores agreement with
-    the teacher and takes no judgements.
-
-    ``min(k, |gold|)``: a query with 40 judged documents could never exceed 0.25 otherwise, which
-    reads as model damage rather than the ceiling it is.
-    """
+    """Judged-gold recall -- a different question from ``recall_at_k``, which needs no judgements.
+    The ``min(k, |gold|)`` denominator keeps a heavily-judged query from capping below 1."""
     return sum(d in gold for d in ranked_ids[:k]) / min(k, len(gold))
 
 
@@ -53,11 +44,8 @@ def ndcg_at_k(ranked_ids, relevant: dict[str, float], k: int = K) -> float:
 
 
 def ndcg_pool(pool, d_emb, q_emb, k: int = K) -> float:
-    """Mean nDCG@k over the pool's queries. The backend L2-norms its output, so this is cosine.
-
-    Split from the embedding step so a caller can reuse the embeddings — per-task fidelity
-    (recall@k, embed_dist) is then free rather than a second pass over the pool.
-    """
+    """Mean nDCG@k over the pool's queries. Takes embeddings, not a model, so a caller scoring
+    fidelity on the same pool reuses them instead of paying a second pass."""
     total = 0.0
     for i in range(0, len(pool.q_ids), 256):  # the full queries x docs matrix is needlessly big
         sims = q_emb[i : i + 256] @ d_emb.T

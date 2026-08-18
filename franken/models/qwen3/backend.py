@@ -1,10 +1,5 @@
-"""Qwen3-Embedding backend: the from-scratch ``Qwen3Model`` student (RMSNorm, RoPE, GQA with
-QK-norm, SwiGLU MLP) against the frozen HF ``AutoModel`` backbone as teacher.
-
-The output contract is the *pooled sentence embedding*: Qwen3-Embedding pools the last non-pad
-token of the final hidden state and L2-normalizes. Both models go through the same pooling code
-here, so the task's loss only ever compares like with like.
-"""
+"""Qwen3-Embedding backend: the from-scratch student against the frozen HF backbone. Both go
+through the same pooling here, so the loss only ever compares like with like."""
 
 from __future__ import annotations
 
@@ -19,12 +14,7 @@ from franken.models.qwen3.model import Qwen3Model
 
 
 def _last_token_pool(last_hidden: torch.Tensor, attention_mask: torch.Tensor | None):
-    """Qwen3-Embedding pooling: the hidden state at the last visible position.
-
-    Indexed as "last position where the mask is 1" rather than ``mask.sum() - 1`` so
-    it is correct under either padding side (Qwen3-Embedding's reference code pads
-    left; HF's collator pads right).
-    """
+    """The hidden state at the last visible position, indexed so either padding side works."""
     if attention_mask is None:
         return last_hidden[:, -1]
     seq_len = attention_mask.shape[-1]
@@ -39,10 +29,8 @@ class Qwen3Backend(ModelBackend):
         return Qwen3Model(cfg.model)
 
     def load_teacher(self, cfg: Config) -> nn.Module:
-        # Frozen HF backbone (no lm_head), exact ops, per-layer hidden states enabled
-        # so the distillation loss can read them. dtype is pinned to fp32: transformers
-        # 5.x defaults to the checkpoint dtype (bf16 here), which would put the parity
-        # gate and the distillation targets at bf16 precision.
+        # fp32 is pinned: transformers 5.x defaults to the checkpoint dtype (bf16), which would
+        # put the parity gate and the distillation targets at bf16.
         ckpt = cfg.train.teacher_ckpt or cfg.train.teacher_model
         model = AutoModel.from_pretrained(ckpt, dtype=torch.float32, output_hidden_states=True)
         model.eval()
@@ -51,7 +39,7 @@ class Qwen3Backend(ModelBackend):
 
     def forward(self, model: nn.Module, inputs: dict) -> dict:
         out = model(**inputs)
-        # Custom student returns a dict; the HF teacher returns a ModelOutput.
+        # Student returns a dict; the HF teacher returns a ModelOutput.
         if isinstance(out, dict):
             last_hidden, hidden_states = out["last_hidden_state"], out["hidden_states"]
         else:

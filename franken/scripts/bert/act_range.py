@@ -1,13 +1,6 @@
-"""Activation-range / FHE self-containment check for a trained student.
-
-Runs the student over MRPC splits and records, per FFN layer:
-  * pre-activation range  (intermediate.dense output -> input to the poly GELU)
-  * activation output range (intermediate_act_fn output)
-
-For the quad GELU with domain D, self-containment means every pre-activation
-stays within [-D, D] (so the deployed bare poly is never fed out-of-domain) and
-the output magnitude stays <= ~0.125*D^2 (the FHE dynamic-range budget). Prints
-a numeric per-layer table and writes a pre-activation histogram PNG.
+"""FHE self-containment check: per FFN layer, the pre-activation range (input to the poly GELU)
+and the activation output range. Self-contained means every pre-activation stays within [-D, D],
+so the deployed bare poly is never fed out-of-domain. Also writes a histogram PNG.
 
 Usage:
     python -m franken.scripts.bert.act_range --config configs/bert/quad_cgf_fhe.yaml \
@@ -101,7 +94,7 @@ def main() -> None:
         y = post[i]
         pmin, pmax = x.min().item(), x.max().item()
         xa = x.abs()
-        # torch.quantile caps at ~16M elems; subsample for the percentile.
+        # torch.quantile caps at ~16M elements.
         if xa.numel() > 5_000_000:
             idx = torch.randint(0, xa.numel(), (5_000_000,))
             p999 = torch.quantile(xa[idx], 0.999).item()

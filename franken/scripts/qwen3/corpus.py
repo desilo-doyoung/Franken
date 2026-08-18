@@ -1,11 +1,6 @@
-"""The corpus workflow: verify the holdout, measure the mix, build the cache.
-
-One script because the three stages always run in this order, on the same mix, each gating the next.
-The cache is built when it is missing — hours, but the alternative is every rank building its own —
-and reported when it is not.
-
-Measurement lives in `franken.data.embed_corpus` (`profile`, `describe`, `realized_mix`); this file
-is argument parsing, tables and the pass/fail verdict.
+"""The corpus workflow: verify the holdout, measure the mix, build the cache. Three stages in one
+script because each gates the next. Measurement lives in `franken.data.embed_corpus`; this file is
+argument parsing, tables and the verdict.
 
     uv run python -m franken.scripts.qwen3.corpus --config configs/qwen3/depth19_quad.yaml
 """
@@ -37,13 +32,9 @@ HOLDOUT_SAMPLE = 100  # texts per split per source, for the overlap check
 
 
 def check(sources) -> bool:
-    """Only the sources with UPSTREAM splits are worth streaming: for a hash-split source
-    disjointness is a theorem, since membership is a pure function of the key.
-
-    Disjoint is not enough — a split can be clean and still unrepresentative — so the splits are
-    also compared on mean text length. That caught CodeSearchNet's `all` config, where the stream
-    is grouped by language and train drew python+javascript while val and test drew pure python.
-    """
+    """Only upstream-split sources need streaming -- for a hash-split source disjointness is a
+    theorem. Splits are also compared on mean text length, since clean is not the same as
+    representative."""
     native = [s for s in sources if s.key is None]
     print(
         f"holdout, upstream-split sources only ({len(native)} of {len(sources)}; "
@@ -79,12 +70,12 @@ def check(sources) -> bool:
 
 
 def measure(cfg, sources, tokenizer) -> tuple[bool, int]:
-    """Per-source token length -> the `corpus_size` that spends TOKEN_TARGET, plus the scoreability
-    gate: a source must yield an eval pair or declare Qrels, or it is a permanent blind spot."""
+    """Per-source token length -> the `corpus_size` that spends TOKEN_TARGET, plus the
+    scoreability gate."""
     cap, epochs = cfg.train.max_seq_len, cfg.train.distill.epochs
     print(f"\n{cfg.train.corpus}: {len(sources)} sources, max_seq_len {cap}")
-    # `mean`/`p50` are post-cap (what the corpus stores, hence the budget); `cut%` and `max*` are
-    # UNtruncated. The max, not a percentile: the FHE polynomial domain is clamp-free.
+    # mean/p50 are post-cap; cut%/max* are untruncated. The max, not a percentile: FHE has no
+    # clamp.
     print(
         f"{'source':<18} {'domain':<14} {'w':>6} {'mean':>7} {'p50':>5} "
         f"{'cut%':>6} {'max*':>7} {'score':>6}",
@@ -120,15 +111,9 @@ def measure(cfg, sources, tokenizer) -> tuple[bool, int]:
 
 
 def build(cfg, task, tokenizer, sources) -> None:
-    """Build and cache if needed, then report what the artifact holds.
-
-    Every rank re-streams independently otherwise — hours at 9M texts — so they must all cache-hit.
-    The token count is a report, not a gate: `corpus_size` is converted from the budget through a
-    `tok/text` estimated on SAMPLE texts per source, whose standard error is about the size of the
-    few percent it lands off 2B, and a run near the budget is a fine run. It is still the only place
-    a stale `corpus_size` shows up, so it prints on cache hits too — a number that only appears on
-    the build that made the corpus says nothing on the reruns that reuse it.
-    """
+    """Build and cache if needed, then report what the artifact holds. The token count is a
+    report, not a gate -- `tok/text` is sampled, so landing a few percent off is expected. It
+    prints on cache hits too, since that is the only place a stale `corpus_size` shows up."""
     cap = cfg.train.max_seq_len
     cached = os.path.isdir(
         cache_path(cfg.train.corpus, "train", cfg.train.corpus_size, cap, tokenizer)

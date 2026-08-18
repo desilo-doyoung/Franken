@@ -1,9 +1,5 @@
-"""Retrieval pools over a source's held-out rows.
-
-The split guarantee is inherited rather than restated: `records` assigns a row to exactly one split
-as a pure function of its key, so a task cannot silently score trained rows, and a changed key
-column moves the eval with it.
-"""
+"""Retrieval pools over a source's held-out rows. The split guarantee is inherited from `records`,
+so a changed key column moves the eval with it."""
 
 from __future__ import annotations
 
@@ -19,8 +15,7 @@ from franken.data.embed_corpus.spec import eval_pair, instruct, split_of
 
 QUERIES, DOCS = 500, 5_000
 
-# Bump alongside an adapter OR an instruction change: pools are text, and `q_texts` carries the
-# source's instruction, which the key does not.
+# Bump alongside an adapter OR an instruction change: `q_texts` carries the instruction.
 # v2: SPLIT_PCT 2/2 -> 1/4 moves pool membership; per-source `instruct`.
 # v3: instructions adopted on 6 asymmetric sources -> their `q_texts` changed.
 _CACHE_DIR = "outputs/corpus_pool_cache"
@@ -42,9 +37,8 @@ class Pool:
 
 
 class _Docs:
-    """Deduplicates by text. An identical twin of a gold document is an exact tie in the ranking, so
-    it caps nDCG below 1 and the winner is decided by ~1e-7 of float noise — measured at 108
-    duplicates in gooaq's 5,000, enough to move the identity self-test off zero."""
+    """Deduplicates by text: a twin of a gold document is an exact tie, so the winner would be
+    decided by float noise -- enough to move the identity self-test off zero."""
 
     def __init__(self, limit: int):
         self.limit = limit
@@ -80,11 +74,9 @@ def _from_pairs(src: Source, split: str, n_queries: int, n_docs: int) -> Pool:
             if len(pool.q_ids) < n_queries:
                 qid = f"q{len(pool.q_ids)}"
                 pool.q_ids.append(qid)
-                # The source's own instruction, so the eval matches training in format as well as
-                # content -- a query the student never saw prefixed must not arrive prefixed here.
+                # The source's own instruction, so the eval matches training in format too.
                 pool.q_texts.append(instruct(src.instruct, query))
-                # `force`: a gold must be in the pool even once the doc cap is reached, else the
-                # query is unanswerable and scores 0 for a reason that is not the model.
+                # A gold must be in the pool past the cap, else the query is unanswerable.
                 pool.qrels[qid] = {docs.add(g, force=True): 1.0 for g in golds}
             else:
                 for g in golds:
@@ -117,8 +109,7 @@ def _from_qrels(src: Source, split: str, n_queries: int, n_docs: int) -> Pool:
             q_texts.append(instruct(src.instruct, text))
     wanted = {pid for qid in q_ids for pid in rel[qid]}
 
-    # Stream the corpus rather than download it whole (BeIR/nq is 2.68M documents), and run the
-    # source's own adapter so an eval document is byte-identical to the corpus text.
+    # Streamed, and through the source's own adapter, so eval text is byte-identical to corpus.
     docs = _Docs(n_docs)
     found: dict[str, str] = {}
     for row in datasets.load_dataset(src.repo, src.config, split=src.hf_split, streaming=True):
@@ -157,8 +148,7 @@ def pool(
     n_docs: int = DOCS,
     cache: bool = True,
 ) -> Pool:
-    """Every source is scoreable, so this always returns a pool — empty only if a source ran out of
-    held-out rows, which is a finding, not a configuration."""
+    """Empty only if a source ran out of held-out rows -- a finding, not a configuration."""
     path = _cache_path(corpus, src.name, split)
     if cache and n_queries == QUERIES and n_docs == DOCS and os.path.exists(path):
         with open(path) as f:

@@ -1,8 +1,5 @@
-"""Command-line entrypoints: corpus | train-teacher | distill | eval.
-
-The single-config path, start to finish. For a batch over several configs and GPUs use
-`franken/scripts/qwen3/run_experiments.py`, which does the same steps per config and prints
-one table.
+"""Command-line entrypoints: corpus | train-teacher | distill | eval. The single-config path;
+`run_experiments` does the same per config across GPUs and prints one table.
 
 Usage:
     python main.py corpus  --config configs/qwen3/depth19_quad.yaml
@@ -48,22 +45,19 @@ def cmd_distill(args: argparse.Namespace, extra: list[str]) -> None:
 
     from franken.distill.dist import barrier, shutdown
 
-    # Rank 0 only: every rank would otherwise race on the same path, and only rank 0 holds the
-    # selected checkpoint.
+    # Rank 0 only: it alone holds the selected checkpoint, and the others would race on the path.
     if d.dist.is_main:
         paths = RunPaths(cfg)
         os.makedirs(paths.student, exist_ok=True)
         torch.save(d.student.state_dict(), paths.student_bin)
         print(f"Student saved to {paths.student}")
 
-    # Every rank reaches teardown together: destroy_process_group is collective, so letting one
-    # rank tear down while another is still saving hangs the job.
+    # destroy_process_group is collective, so tearing down mid-save hangs the job.
     barrier(d.dist)
     shutdown(d.dist)
 
 
-# Per backend, because the two tracks score different things: MRPC is accuracy/F1 over both splits,
-# qwen3 is teacher agreement + nDCG over three suites.
+# Per backend: MRPC scores accuracy/F1, qwen3 scores agreement + nDCG over three suites.
 _EVALUATOR = {"bert": "evaluate", "qwen3": "eval"}
 
 
@@ -105,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_config(p: argparse.ArgumentParser) -> None:
-        # Required, not defaulted: the config is the experiment, and these commands cost hours.
+        # Required, not defaulted: the config IS the experiment.
         p.add_argument("--config", required=True, help="path to YAML config")
 
     p_corpus = sub.add_parser("corpus", help="gate + measure the corpus, caching it if needed")
@@ -134,10 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    # Unrecognized flags pass through to the delegated script, so `eval --suite corpus --sources X`
-    # works without this file mirroring every scorer flag.
+    # Unrecognized flags pass through, so this file need not mirror every scorer flag.
     args, extra = parser.parse_known_args(argv)
-    # Only the delegating commands forward extras; elsewhere an unknown flag is a typo.
+    # Elsewhere an unknown flag is a typo.
     if extra and args.command not in ("corpus", "eval"):
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
     args.func(args, extra)

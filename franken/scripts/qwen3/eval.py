@@ -4,12 +4,9 @@
     corpus     nDCG@10 + recall@10  quality AND fidelity per training slice, held-out rows
     external   nDCG@10 benchmarks   quality lost in the wild -- the number to quote
 
-`external - corpus` is the coverage gap, printed at the bottom, and that subtraction is the point:
-a small in-distribution deficit with a large external one means the fix is data; both large means
-it is capacity and more data will not help.
-
-Validation selects, test reports: the corpus suite defaults to `--split test` because validation is
-what `Distiller.train` scores recall@10 on to pick the checkpoint.
+`external - corpus` is the coverage gap: a small in-distribution deficit with a large external one
+means the fix is data; both large means it is capacity. The corpus suite defaults to `--split test`
+because validation is what picked the checkpoint.
 
     uv run python -m franken.scripts.qwen3.eval \
         --student-ckpt outputs/<run>/student/pytorch_model.bin
@@ -44,10 +41,8 @@ SUITES = ("fidelity", "corpus", "external")
 
 
 def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes=None, emit=report.silent) -> dict:
-    """Score teacher and student over named pools, one row each, teacher cached. `shapes` says what
-    a task retrieves -- without it a reader cannot tell that `gooaq` is question->answer while
-    `specter` is anchor->cited-title against a hard negative, difficulties that are not comparable.
-    """
+    """One row per pool, teacher cached. `shapes` says what each task retrieves -- the tasks have
+    very different difficulty and the column is what makes that visible."""
     out = {}
     for name, p in pools.items():
         shape = (shapes or {}).get(name, "")
@@ -56,7 +51,7 @@ def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes=None, emit=repo
             continue
         t = score(m, m.teacher, p, cache=teacher_cache(suite, name, m.cfg))
         s = score(m, m.student, p)
-        # Emitted as it lands, not at the end: a pool takes minutes and the run is otherwise silent.
+        # As it lands: a pool takes minutes and the run is otherwise silent.
         emit(report.task_row(name, "", len(p.q_ids), len(p.d_ids), report.quality(t, s), shape))
         out[name] = {"teacher": t, "student": s, "queries": len(p.q_ids), "docs": len(p.d_ids)}
         if shape:
@@ -65,13 +60,11 @@ def _pairs(m: Models, pools: dict[str, Pool], suite: str, shapes=None, emit=repo
 
 
 def _corpus_rows(m, pools, kinds: dict, shapes: dict, ndcg: dict, emit=report.silent) -> dict:
-    """Quality AND fidelity per task, off one pass of embeddings (free: `score` already embedded
-    every pool twice and threw the vectors away). nDCG@K is quality lost; recall@K and embed_dist
-    are how far the student's geometry moved ON THAT SLICE. Different questions, read as a ratio,
-    so both belong per task rather than pooled.
+    """Quality AND fidelity per task off one pass of embeddings. nDCG is quality lost; recall and
+    embed_dist are how far the geometry moved -- different questions, read as a ratio.
 
-    `ndcg` is `Source.scores_ndcg`: blank rather than caveated where the gold is arbitrary, because
-    a printed number gets read as one."""
+    `ndcg` is `Source.scores_ndcg`: blanked where the gold is arbitrary, since a printed number
+    gets read as one."""
     out = {}
     for name, p in pools.items():
         kind, shape = kinds.get(name, ""), shapes.get(name, "")
@@ -121,12 +114,9 @@ def _macro_of(label: str, rows: list[dict], emit) -> dict:
 
 @torch.no_grad()
 def fidelity(m: Models, emit=report.silent) -> dict:
-    """Teacher agreement on the corpus's own held-out pool, plus STS-B as a labelled anchor.
-
-    recall@10 is ALREADY teacher-relative -- feeding it the teacher gives exactly 1.0, so there is
-    no teacher column to print. It comes from the same `recall_at_k` that selected the checkpoint,
-    so this is the number that chose it; comparable only at a fixed pool size.
-    """
+    """Teacher agreement on the held-out pool, plus STS-B as a labelled anchor. recall@10 is
+    already teacher-relative (the teacher scores 1.0), and is the number that chose the
+    checkpoint."""
     data = m.task.datasets(m.tokenizer, m.cfg, splits=("validation",))
     ds = data["validation"].with_format("torch", columns=m.task.torch_columns())
     loader = DataLoader(ds, batch_size=16, collate_fn=data["collator"])
@@ -139,7 +129,7 @@ def fidelity(m: Models, emit=report.silent) -> dict:
             embed_texts(m.backend, model, m.tokenizer, m.cfg, ds_sts[c], m.device)
             for c in ("sentence1", "sentence2")
         )
-        # Label range is [0, 5]; Spearman is rank-based so the scale does not matter.
+        # Spearman is rank-based, so the [0, 5] label scale does not matter.
         stsb[who] = spearmanr(F.cosine_similarity(a, b, dim=-1).numpy(), ds_sts["label"]).statistic
 
     out = {
@@ -155,17 +145,14 @@ def fidelity(m: Models, emit=report.silent) -> dict:
 
 
 def corpus(m: Models, split: str, names: list[str], emit=report.silent) -> dict:
-    """nDCG@10 on held-out rows of the training slices, so coverage is out of the equation.
-
-    Two macros, deliberately not one: a qrels task's golds are ~96% likely to be train rows, so
-    only its distractors are held out. Averaging that into a clean headline is the CORE mistake.
-    """
+    """nDCG on held-out rows of the training slices, so coverage is out of the equation. Two
+    macros, not one: a qrels task's golds are mostly train rows, so only its distractors are held
+    out."""
     sources = {s.name: s for s in mix(m.cfg.train.corpus)}
     emit(report.corpus_header(m.cfg.train.corpus, split))
     pools = {n: pool(sources[n], split, m.cfg.train.corpus) for n in names}
     kinds = {n: ("qrels" if sources[n].qrels else "pair") for n in names}
-    # For a qrels source the row holds no pair, so the adapter's shape describes the corpus text
-    # rather than the eval task — which is real judged queries run against it.
+    # A qrels row holds no pair, so the adapter's shape would describe the corpus, not the task.
     shapes = {
         n: (
             "judged query -> gold passage"
@@ -190,8 +177,7 @@ def corpus(m: Models, split: str, names: list[str], emit=report.silent) -> dict:
     for kind in ("pair", "qrels"):
         if group := [r for r in scored if r["tag"] == kind]:
             out[f"macro_{kind}"] = _macro_of(f"MACRO-{kind}", group, emit)
-    # Pair tasks only. Mixing in qrels tasks would fold ~96%-train-row documents into a domain
-    # average, which is the reason the macros are split in the first place.
+    # Pair tasks only -- the same reason the macros are split.
     pair_rows = [r for r in scored if r["tag"] == "pair"]
     if pair_rows:
         emit(f"\nby domain (pair tasks only, nDCG@{K}):")
@@ -202,11 +188,10 @@ def corpus(m: Models, split: str, names: list[str], emit=report.silent) -> dict:
 
 
 def external(m: Models, names: list[str], emit=report.silent) -> dict:
-    """nDCG@10 against ground-truth judgements. NOT comparable to the published MTEB table: task
-    subset, the config's own max_seq_len (the FHE condition) vs MTEB's 512, one generic instruction.
+    """nDCG against ground-truth judgements. NOT comparable to the published MTEB table: task
+    subset, the config's own max_seq_len, one generic instruction.
 
-    ⚠️ The macro is EVERY scored task. Two tasks ("CORE") read the depth-19 cut at +0.4% where five
-    put it at -16.0%, inverting the ratio column too -- it reversed the conclusion, not the value.
+    The macro is EVERY scored task -- a two-task subset once reversed the conclusion outright.
     """
     emit(report.header("external benchmarks", f"nDCG@{K}"))
     rows = _pairs(
@@ -228,8 +213,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument(
         "--suite", default=",".join(SUITES), help=f"comma-separated: {', '.join(SUITES)}"
     )
-    # test, not validation: validation selects the checkpoint (`Distiller.train` -> recall@10), so
-    # reporting there would score the split that picked the model. Selection never reads test.
+    # test, not validation: validation is what selected the checkpoint.
     p.add_argument("--split", default="test", choices=("validation", "test"))
     p.add_argument("--sources", default="", help="corpus suite: subset of the mix; default all")
     p.add_argument(
@@ -244,7 +228,7 @@ def main(argv: list[str] | None = None) -> None:
     if unknown := [t for t in tasks if t not in EXTERNAL]:
         raise SystemExit(f"Unknown task(s) {unknown}; available: {', '.join(EXTERNAL)}")
 
-    # Resolved before the model load, so a typo fails in milliseconds.
+    # Before the model load, so a typo fails in milliseconds.
     cfg_sources = [s.name for s in mix(common.config(args).train.corpus)]
     names = [n.strip() for n in args.sources.split(",") if n.strip()] or cfg_sources
     if unknown := [n for n in names if n not in cfg_sources]:
@@ -253,8 +237,7 @@ def main(argv: list[str] | None = None) -> None:
     datasets.disable_progress_bars()
 
     def emit(line: str) -> None:
-        # Flushed: a suite takes minutes per task and stdout is block-buffered into a log file.
-        print(line, flush=True)
+        print(line, flush=True)  # flushed: stdout is block-buffered into a log file
 
     m = load(args)
     result: dict = {"config": args.config, "student_ckpt": args.student_ckpt, "k": K}
@@ -265,8 +248,8 @@ def main(argv: list[str] | None = None) -> None:
     if "external" in suites:
         result["external"] = external(m, tasks, emit)
 
-    # The subtraction the two nDCG suites exist for. Pair-derived only: the qrels macro's documents
-    # are mostly train rows, so it would flatter the in-distribution side.
+    # The subtraction the two nDCG suites exist for. Pair-derived: qrels docs are mostly train
+    # rows and would flatter the in-distribution side.
     in_dist = result.get("corpus", {}).get("macro_pair")
     off_dist = result.get("external", {}).get("macro")
     if in_dist and off_dist:

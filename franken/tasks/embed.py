@@ -1,7 +1,5 @@
-"""Embedding self-distillation: match a pretrained teacher's pooled embedding, no labels, so the
-"task" is agreement with the teacher rather than any downstream objective. The backend owns
-pooling, so nothing here sees hidden-state layout or is Qwen3-specific.
-"""
+"""Embedding self-distillation: match the teacher's pooled embedding, no labels. The backend owns
+pooling, so nothing here is Qwen3-specific."""
 
 from __future__ import annotations
 
@@ -30,14 +28,10 @@ _RECALL_KEY = f"recall@{K}"
 
 
 class EmbeddingDistillLoss(nn.Module):
-    """``(1 - cos)`` on the pooled embedding + ``beta`` * masked hidden MSE.
+    """``(1 - cos)`` on the pooled embedding + ``beta`` * masked hidden MSE (TinyBERT-style
+    layerwise matching, which earns its place once the student is structurally different).
 
-    Embedding term is Reimers & Gurevych (2020): they minimize MSE, and on L2-normed vectors
-    ``MSE == 2 - 2cos``, so cosine is the same objective on a bounded, readable scale. Hidden term
-    is TinyBERT/Patient-KD layerwise matching, which earns its place once the student is
-    structurally different (reduced depth); ``beta: 0`` turns it off.
-
-    No CE / logit-KL: no labels and no logits, which is why ``alpha``/``temperature`` go unused.
+    No labels and no logits, so ``alpha``/``temperature`` go unused.
     """
 
     def __init__(self, cfg: DistillConfig):
@@ -74,9 +68,8 @@ class EmbedSelfDistillTask(Task):
 
     def build_tokenizer(self, cfg: Config) -> Any:
         tok = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
-        # Pinned for consistency, not correctness: RoPE is *relative*, so left padding's constant
-        # position shift cancels (verified cosine 1.0 alone vs batched, both models). EXCEPT under
-        # attn_impl "sdpa_causal", which drops the pad mask and needs pads AFTER real tokens.
+        # RoPE is relative, so padding side normally cancels -- EXCEPT under attn_impl
+        # "sdpa_causal", which drops the pad mask and needs pads AFTER real tokens.
         tok.padding_side = "right"
         return tok
 
@@ -105,13 +98,11 @@ class EmbedSelfDistillTask(Task):
             teacher_out["hidden_states"],
             batch["attention_mask"],
         )
-        # Components are logging-only; detach so the trainer can scalar-ize them without
-        # dragging the autograd graph (total stays attached for backward).
+        # Logging only; detached so scalar-izing them drags no autograd graph.
         return total, {"embed": embed.detach(), "hidden": hidden.detach()}
 
     def select_metric(self) -> tuple[str, bool]:
-        # Deliberately NOT what the loss minimizes: per-vector closeness is not how the model is
-        # used -- see `recall_at_k`.
+        # Deliberately NOT what the loss minimizes -- see `recall_at_k`.
         return (_RECALL_KEY, True)
 
     @torch.no_grad()
@@ -123,12 +114,11 @@ class EmbedSelfDistillTask(Task):
                 "EmbedSelfDistillTask.evaluate needs `teacher`: the metric is agreement with "
                 "the teacher, so there is nothing to score against without it."
             )
-        # Only the scored split: rebuilding the training corpus per epoch is minutes at 216k.
+        # Only the scored split: rebuilding the training corpus per epoch costs minutes.
         data = self.datasets(tokenizer, cfg, splits=(split,))
         ds = data[split].with_format("torch", columns=self.torch_columns())
-        # Batched like training, so one knob bounds memory everywhere (a fixed sequence count at
-        # max_seq_len 1024 puts the whole 500-row pool in one ~20 GB batch). Safe to differ from
-        # training: recall@10 is bit-identical at eval batch 8/16/32/64, only embed_dist moves.
+        # Batched like training so one knob bounds memory everywhere; recall@10 is bit-identical
+        # across eval batch sizes anyway.
         opt = cfg.train.distill
         if opt.token_budget:
             lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(
@@ -140,8 +130,7 @@ class EmbedSelfDistillTask(Task):
             loader = DataLoader(ds, batch_size=opt.batch_size, collate_fn=data["collator"])
         device = next(model.parameters()).device
 
-        # Whole-pool embeddings, not a streaming mean: recall@k is a property of the pool's
-        # neighbourhood structure, so it cannot be accumulated batch by batch. 500x1024 fp32.
+        # Whole-pool: recall@k is a property of the neighbourhood, not accumulable batch by batch.
         model.eval()
         student_emb, teacher_emb = embed_batches(backend, self, loader, device, model, teacher)
 

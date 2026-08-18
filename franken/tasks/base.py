@@ -1,6 +1,4 @@
-"""Task interface: everything about *what* is being learned, independent of the model family. So
-swapping self-distillation for a fine-tuned downstream task needs no ``ModelBackend`` change.
-"""
+"""Task interface: what is being learned, independent of the model family."""
 
 from __future__ import annotations
 
@@ -31,9 +29,7 @@ class Task(ABC):
 
     @abstractmethod
     def compute_loss(self, student_out: dict, teacher_out: dict, batch: dict, cfg: Config) -> tuple:
-        """Return ``(total_loss, components)`` where ``components`` is a dict of
-        named scalar tensors for logging. ``*_out`` are backend forward outputs
-        (``{"output", "hidden_states"}``); ``cfg`` supplies the distill weights."""
+        """-> ``(total_loss, components)``; components are named scalars for logging."""
 
     @abstractmethod
     def select_metric(self) -> tuple[str, bool]:
@@ -49,10 +45,8 @@ class Task(ABC):
         split: str = "validation",
         teacher: nn.Module | None = None,
     ) -> dict:
-        """Metrics dict containing ``select_metric``'s key. Tasks scored against labels ignore
-        ``teacher``; label-free tasks whose metric *is* teacher agreement require it."""
+        """Metrics containing ``select_metric``'s key. Label-free tasks require ``teacher``."""
 
     def train_teacher(self, cfg: Config) -> str | None:
-        """Fine-tune and save a teacher if the task needs one; return its path.
-        Default: no-op (the pretrained checkpoint is already the teacher)."""
+        """Fine-tune and save a teacher if the task needs one. Default: the checkpoint is it."""
         return None

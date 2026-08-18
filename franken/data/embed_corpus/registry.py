@@ -1,9 +1,7 @@
-"""The mix: one ``Source`` per dataset, and nothing else declares a dataset.
+"""The training mix: one ``Source`` per dataset.
 
-**Every source is scoreable** — it yields (query, positive) records or declares ``Qrels``. No escape
-hatch; `franken/scripts/qwen3/corpus.py` enforces it before a build is paid for. An unscoreable
-slice
-is a permanent blind spot, which is how `code_apps` -53.9% turned out to be measuring coverage.
+Every source is scoreable -- it yields (query, positive) records or declares ``Qrels``, enforced by
+`corpus.py` before a build is paid for. An unscoreable slice is a permanent blind spot.
 """
 
 from __future__ import annotations
@@ -17,13 +15,8 @@ from franken.data.embed_corpus.spec import WEB_SEARCH, Record
 
 @dataclass(frozen=True)
 class Qrels:
-    """Real judgements, for a source whose rows hold no pair. Layouts are not inferrable: BeIR ships
-    query-id/corpus-id in `test`, C-MTEB ships qid/pid in `dev` with queries under config `default`.
-
-    Judged documents are held out of training by `build._judged` (v8): `evalset._from_qrels`
-    force-adds every gold to the pool whatever it hashes to, so `split_of` alone left most of them
-    in the draw. Still weaker than a pair task — the query side is unjudged text the pool inherits.
-    """
+    """Real judgements, for a source whose rows hold no pair. Layouts are not inferrable, hence the
+    explicit repo/split/cols. Judged documents are held out of training by `build._judged`."""
 
     repo: str
     split: str = "test"
@@ -39,26 +32,22 @@ class Source:
     config: str | None
     adapt: Callable[[dict], Record | None]
     weight: float
-    # Column the split is hashed from; None means the dataset ships its own splits. Explicit rather
-    # than derived, because `evalset` must hash the identical string or it scores trained rows.
+    # Column the split is hashed from; None means the dataset ships its own splits. `evalset` must
+    # hash the identical string or it scores trained rows.
     key: str | None = None
     hf_split: str = "train"  # the single upstream split to draw from; unused when key is None
     split_map: Mapping[str, str] = field(default_factory=dict)  # ours -> upstream, when key is None
-    # Task description for the query-side instruction; None leaves the query bare. Baked into the
-    # cached corpus text, so changing it needs a `build._CACHE_VERSION` bump.
+    # Baked into the cached corpus text, so changing it needs a `build._CACHE_VERSION` bump.
     instruct: str | None = None
     qrels: Qrels | None = None
-    # False where the gold is one arbitrary member of an equally valid set (a sibling paragraph, a
-    # related title): the unpromoted siblings sit in the pool as unjudged false negatives, so nDCG
-    # scores an arbitrary tie-break. Such a source still yields pairs -- recall@10 and the split
-    # guarantee both need them -- so this governs REPORTING only, not `corpus.py`'s gate.
+    # False where the gold is one arbitrary member of an equally valid set, so nDCG would score a
+    # tie-break. Governs REPORTING only -- the source still yields pairs for recall@10.
     scores_ndcg: bool = True
 
 
 _WIKI_LANGS = ("zh", "ja", "ar", "ru", "es")  # scripts that move the teacher activation range
 
-# Relative weights, normalised below. Coverage is the motivation, not volume: training text was web
-# + encyclopedia prose while nDCG is measured on biomedical and scientific benchmarks.
+# Relative weights, normalised below. Coverage is the motivation, not volume.
 _MULTI_DOMAIN = [
     Source(
         "msmarco",
@@ -69,8 +58,8 @@ _MULTI_DOMAIN = [
         0.209,
         instruct=WEB_SEARCH,
     ),
-    # `titled`, not a pair: nq packs 35.3 passages per article, so keyed on `_id` the title
-    # straddles splits 60.7% of the time and leaks the query side. Scored on judgements instead.
+    # `titled`, not a pair: keyed on `_id` the title straddles splits 60.7% of the time and leaks
+    # the query side. Scored on judgements instead.
     Source(
         "nq_passage",
         "english_prose",
@@ -93,8 +82,7 @@ _MULTI_DOMAIN = [
         hf_split="corpus",
         qrels=Qrels("BeIR/hotpotqa-qrels"),
     ),
-    # `paragraphs` promotes one sibling to gold and sends the rest to `docs`, where they become
-    # unjudged false negatives -- so nDCG here scores which arbitrary sibling won. Fidelity only.
+    # One sibling is promoted to gold and the rest become unjudged false negatives. Fidelity only.
     Source(
         "wiki_en",
         "english_prose",
@@ -105,12 +93,9 @@ _MULTI_DOMAIN = [
         key="id",
         scores_ndcg=False,
     ),
-    # Informal prose: the `fiqa` domain, -13.5% at depth 19.
     # Every instructed source carries WEB_SEARCH, measured rather than assumed: task-matching
-    # strings written from the dataset cards came in at +0.0017 to -0.0067 against it, i.e. noise or
-    # worse, on all seven. The model keys on the canonical string it was trained with, not on
-    # semantic fit -- so tailoring is only worth it where it beat web by more than the ~0.005 floor,
-    # which happened on exactly two EXTERNAL tasks (see franken.data.external) and no corpus source.
+    # strings came in at +0.0017 to -0.0067 against it. The model keys on the canonical string it
+    # was trained with, not on semantic fit.
     Source(
         "gooaq",
         "informal",
@@ -140,8 +125,7 @@ _MULTI_DOMAIN = [
         0.03,
         key="post1",
     ),
-    # Science bulk, and the query side is a TITLE, not a question. Chosen over a PubMed corpus
-    # because nfcorpus IS PubMed: overlap here measured at 3 rows in 400,000, exact-hash only.
+    # Chosen over a PubMed corpus because nfcorpus IS PubMed; overlap here is 3 rows in 400,000.
     Source(
         "arxiv",
         "science",
@@ -152,10 +136,8 @@ _MULTI_DOMAIN = [
         key="id",
         instruct=WEB_SEARCH,
     ),
-    # NOT "citation sentence -> cited abstract": the card pairs an abstract with "an excerpt or
-    # passage from a cited paper", and both sides measure ~217 / ~280 tokens. Abstract -> abstract
-    # is SYMMETRIC, so there is no query side to instruct -- and the gate agrees, -0.0088 for the
-    # web string, the only negative among the corpus sources.
+    # Abstract -> abstract is SYMMETRIC, so there is no query side to instruct; the gate agrees
+    # (-0.0088 for the web string, the only negative among the corpus sources).
     Source(
         "s2orc",
         "science",
@@ -165,8 +147,7 @@ _MULTI_DOMAIN = [
         0.08,
         key="abstract",
     ),
-    # Title -> *a* related title: many papers are equally related, so the promoted one is arbitrary.
-    # Teacher 0.2921 is the symptom, not the criterion -- the shape is.
+    # Title -> *a* related title: many are equally related, so the promoted one is arbitrary.
     Source(
         "specter",
         "science",
@@ -177,8 +158,7 @@ _MULTI_DOMAIN = [
         key="anchor",
         scores_ndcg=False,
     ),
-    # CSN is library functions; the instruction sets are problem -> solution, i.e. APPS's task shape
-    # without being APPS, so they close that genre gap while `code_apps` stays a clean canary.
+    # APPS's task shape without being APPS, so `code_apps` stays a clean canary.
     Source(
         "code",
         "code",
@@ -209,8 +189,7 @@ _MULTI_DOMAIN = [
         instruct=WEB_SEARCH,
     ),
 ] + [
-    # `datasets` 5.0 removed script loaders, killing miracl/mr-tydi/MLDR; wikipedia is
-    # parquet-native with 323 language configs, so multilingual coverage comes from here.
+    # `datasets` 5.0 removed script loaders, killing miracl/mr-tydi/MLDR.
     Source(
         f"wiki_{lang}",
         "multilingual",
@@ -226,16 +205,15 @@ _MULTI_DOMAIN = [
 
 
 def _normalized(sources: list[Source]) -> list[Source]:
-    # Declared relative so dropping a source is a one-line delete, not a rebalance of 18 numbers.
+    # Relative, so dropping a source is a one-line delete.
     total = sum(s.weight for s in sources)
     return [replace(s, weight=s.weight / total) for s in sources]
 
 
-# Scoreable mixes only — this is what the gates and the eval iterate.
+# Scoreable mixes only -- what the gates and the eval iterate.
 MIXES: dict[str, list[Source]] = {"multi_domain": _normalized(_MULTI_DOMAIN)}
 
-# Buildable presets. `smoke` is a pipeline proof, never a result, so it sits outside MIXES rather
-# than weakening the scoreability rule for everything else.
+# `smoke` is a pipeline proof, never a result, so it sits outside MIXES.
 PRESETS: dict[str, list[Source]] = {
     "smoke": [
         Source(
@@ -247,9 +225,7 @@ PRESETS: dict[str, list[Source]] = {
             1.0,
         )
     ],
-    # The original three-source recipe, kept only so the pre-1024 configs naming it still run. Not
-    # scoreable and not in MIXES: its sources carry no eval pair. Its declared weights never took
-    # effect either -- all three exhaust before 2.1M, so the realized mix was 5.2 / 42.9 / 51.8%.
+    # Kept only so the pre-1024 configs naming it still run. Not scoreable, not in MIXES.
     "mixed": [
         Source(
             "msmarco_query",

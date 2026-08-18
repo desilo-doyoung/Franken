@@ -1,14 +1,5 @@
-"""Token-budgeted batching: fit the batch to the input, not the input to the batch.
-
-Padding to the batch maximum means a fixed sequence count pays for what the longest member does not
-use: on `multi_domain` @1024, 132 real tokens per text against ~950 padded (14% efficiency).
-Holding *tokens* constant gives ~139 padded (95%), turning ~7x into ~1.1x, and bounds activation
-memory by construction -- no micro-batch to size, no gradient accumulation.
-
-Widths are the raw batch maximum, not bucketed. Rounding to 64 cost ~19% padding for nothing:
-`unique_graphs` measured 8 (two per DDP bucket), so `automatic_dynamic_shapes` had already
-generalized over shapes.
-"""
+"""Token-budgeted batching: hold padded tokens constant, let the sequence count float. Bounds
+activation memory by construction and lifts padding efficiency from ~14% to ~95%."""
 
 from __future__ import annotations
 
@@ -20,19 +11,19 @@ def plan_batches(
     token_budget: int,
     max_seqs: int,
     seed: int,
-    mega: int = 50,
+    sort_window: int = 50,
 ) -> list[list[int]]:
     """Index batches of at most ``token_budget`` padded tokens and ``max_seqs`` sequences.
 
-    Sorting is local to a ``mega * max_seqs`` window, not global: fully sorted batches would be
-    single-mode (all queries, then all abstracts), the failure the corpus shuffle exists to prevent.
+    Length-sorting is local to a ``sort_window * max_seqs`` span, not global: fully sorted batches
+    would be single-mode, the failure the corpus shuffle exists to prevent.
     """
     rng = random.Random(seed)
     order = list(range(len(lengths)))
     rng.shuffle(order)
 
     batches: list[list[int]] = []
-    span = mega * max_seqs
+    span = sort_window * max_seqs
     for start in range(0, len(order), span):
         window = sorted(order[start : start + span], key=lambda i: lengths[i])
         batch: list[int] = []
@@ -54,8 +45,7 @@ def plan_batches(
 
 
 def shard(batches: list[list[int]], rank: int, world_size: int) -> list[list[int]]:
-    """Ranks that step a different number of times deadlock in the gradient allreduce, so drop the
-    remainder. Safe without a collective: `plan_batches` touches no global RNG, so every rank builds
-    the identical plan from the identical cached lengths."""
+    """Drop the remainder: ranks that step a different number of times deadlock in the allreduce.
+    Needs no collective -- `plan_batches` touches no global RNG, so every rank plans identically."""
     usable = len(batches) - len(batches) % world_size
     return batches[:usable][rank::world_size]
