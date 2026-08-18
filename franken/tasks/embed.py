@@ -65,6 +65,13 @@ class EmbeddingDistillLoss(nn.Module):
     def __init__(self, cfg: DistillConfig):
         super().__init__()
         self.cfg = cfg
+        # Resolved once, not per step.
+        if cfg.hidden_loss == "relative":
+            self.per_layer = masked_relative_mse_loss
+        elif cfg.hidden_loss == "mse":
+            self.per_layer = masked_mse_loss
+        else:
+            raise ValueError(f"Unknown hidden_loss {cfg.hidden_loss!r}; use mse | relative")
 
     def forward(self, student_emb, teacher_emb, student_hidden, teacher_hidden, attention_mask):
         embed = (1.0 - F.cosine_similarity(student_emb, teacher_emb, dim=-1)).mean()
@@ -73,16 +80,9 @@ class EmbeddingDistillLoss(nn.Module):
         layer_map = resolve_layer_map(
             len(teacher_hidden) - 1, len(student_hidden) - 1, self.cfg.hidden_layer_map
         )
-        if self.cfg.hidden_loss == "relative":
-            per_layer = masked_relative_mse_loss
-        elif self.cfg.hidden_loss == "mse":
-            per_layer = masked_mse_loss
-        else:
-            raise ValueError(f"Unknown hidden_loss {self.cfg.hidden_loss!r}; use mse | relative")
-
         hidden = 0.0
         for s_block, t_block in enumerate(layer_map):
-            hidden = hidden + per_layer(
+            hidden = hidden + self.per_layer(
                 student_hidden[s_block + 1], teacher_hidden[t_block + 1], attention_mask
             )
         hidden = hidden / len(layer_map)

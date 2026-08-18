@@ -10,15 +10,12 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import get_linear_schedule_with_warmup, set_seed
 
-from franken.config import Config
+from franken.config import PRECISIONS, Config
 from franken.distill.batching import plan_batches, shard
 from franken.distill.dist import barrier, init_distributed, per_rank_batch
 from franken.distill.progress import ProgressLogger
 from franken.models import build_backend
 from franken.tasks import build_task
-
-PRECISIONS = ("fp32", "tf32", "bf16")
-
 
 # Reference for sqrt-batch LR scaling (`lr: null`): bs32/lr2e-5, fidelity-verified at depth 24
 # (recall@10 0.9070, identical to fp32/bs8/lr1e-5). sqrt not linear because Adam-family.
@@ -195,12 +192,7 @@ class Distiller:
             if which is None:
                 targets = mods
             else:
-                bad = [i for i in which if not 0 <= i < len(mods)]
-                if bad:
-                    raise ValueError(
-                        f"range_penalty_layers {bad} out of range for a {len(mods)}-layer "
-                        f"student (valid 0..{len(mods) - 1}; STUDENT indices, not teacher's)"
-                    )
+                # Bounds were checked at config load (Config.validate).
                 targets = [mods[i] for i in which]
                 self.log(
                     f"range penalty on student layers {sorted(which)} "

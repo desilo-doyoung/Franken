@@ -10,6 +10,11 @@ from typing import Any
 
 import yaml
 
+# One source for the legal values; the code that consumes them imports these.
+PRECISIONS = ("fp32", "tf32", "bf16")
+HIDDEN_LOSSES = ("mse", "relative")
+_TOP_LEVEL = ("model", "distill", "train")
+
 
 @dataclass
 class ModelConfig:
@@ -26,6 +31,14 @@ class ModelConfig:
     softmax_kwargs: dict[str, Any] = field(default_factory=dict)
     activation: str = "exact"
     activation_kwargs: dict[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> Any:
+        # Returns the activation op: only an instance says what `domain` resolves to. Building
+        # both here is also what rejects a bad op name or a kwarg the op does not take.
+        from franken.ops import build_activation, build_softmax
+
+        _build_op(build_softmax, "softmax", self.softmax, self.softmax_kwargs)
+        return _build_op(build_activation, "activation", self.activation, self.activation_kwargs)
 
 
 @dataclass
@@ -114,13 +127,59 @@ class Config:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> Config:
+        # `_build` guards keys within a block; a misspelled BLOCK used to be dropped in silence.
+        if unknown := set(raw) - set(_TOP_LEVEL):
+            raise ValueError(
+                f"Unknown top-level config keys: {sorted(unknown)}; expected {list(_TOP_LEVEL)}"
+            )
         model_raw = raw.get("model", {})
         model_cls = _model_config_cls(model_raw.get("backend", ModelConfig.backend))
-        return cls(
+        cfg = cls(
             model=_build(model_cls, model_raw),
             distill=_build(DistillConfig, raw.get("distill", {})),
             train=_build_train(raw.get("train", {})),
         )
+        cfg.validate()
+        return cfg
+
+    def validate(self) -> None:
+        """Everything checkable without loading a model, so a typo fails in milliseconds."""
+        # backend/task membership is left to build_backend/build_task, which raise on the first
+        # line of every command: importing those registries here would pull in transformers.
+        activation = self.model.validate()
+
+        if self.train.precision not in PRECISIONS:
+            raise ValueError(
+                f"Unknown train.precision {self.train.precision!r}; use {' | '.join(PRECISIONS)}"
+            )
+        if self.distill.hidden_loss not in HIDDEN_LOSSES:
+            raise ValueError(
+                f"Unknown distill.hidden_loss {self.distill.hidden_loss!r}; "
+                f"use {' | '.join(HIDDEN_LOSSES)}"
+            )
+
+        # Otherwise silent: the trainer skips the penalty when there is no domain, and the run
+        # trains unpenalized while looking healthy.
+        if self.distill.range_penalty > 0 and getattr(activation, "domain", None) is None:
+            raise ValueError(
+                f"distill.range_penalty is {self.distill.range_penalty} but activation "
+                f"{self.model.activation!r} exposes no domain, so the penalty would do nothing. "
+                f"Set activation_kwargs.domain, or set range_penalty to 0."
+            )
+
+        depth = self.model.num_hidden_layers
+        layers = self.distill.range_penalty_layers
+        if layers is not None and (bad := [i for i in layers if not 0 <= i < depth]):
+            raise ValueError(
+                f"distill.range_penalty_layers {bad} out of range for a {depth}-layer student "
+                f"(valid 0..{depth - 1}; STUDENT indices, not teacher's)"
+            )
+        hidden_map = self.distill.hidden_layer_map
+        if hidden_map is not None and len(hidden_map) != depth:
+            raise ValueError(
+                f"distill.hidden_layer_map has {len(hidden_map)} entries for a {depth}-layer "
+                f"student; it names one teacher block per student block."
+            )
 
 
 def _model_config_cls(backend: str) -> type[ModelConfig]:
@@ -134,6 +193,14 @@ def _model_config_cls(backend: str) -> type[ModelConfig]:
 
         return Qwen3ModelConfig
     return ModelConfig
+
+
+def _build_op(builder, kind: str, name: str, kwargs: dict[str, Any]):
+    # An op that takes no `domain` raises TypeError rather than ignoring it; say so plainly.
+    try:
+        return builder(name, **kwargs)
+    except TypeError as e:
+        raise ValueError(f"model.{kind}_kwargs {kwargs} rejected by {kind} {name!r}: {e}") from e
 
 
 def _build(dc_type: type, values: dict[str, Any]):

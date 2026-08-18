@@ -2,12 +2,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from franken.models.qwen3.config import Qwen3ModelConfig
+from franken.models.qwen3.config import ATTN_IMPLS, Qwen3ModelConfig
 from franken.ops import build_softmax
 
 from .rope import apply_rotary_pos_emb
-
-ATTN_IMPLS = ("manual", "sdpa_causal")
 
 
 def repeat_kv(x, repeat):

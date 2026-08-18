@@ -66,3 +66,80 @@ def test_output_namespace_defaults_to_the_backend():
     paths = RunPaths(cfg)
     assert paths.base == os.path.join("outputs", "qwen3")
     assert paths.student_bin() == os.path.join("outputs", "qwen3", "student", "pytorch_model.bin")
+
+
+def test_unknown_top_level_block_is_rejected():
+    # Silently dropped before this check: `trian:` ran a whole experiment at the defaults.
+    with pytest.raises(ValueError, match="trian"):
+        Config.from_dict({"trian": {"seed": 999}})
+
+
+def test_unknown_precision_is_rejected_at_load():
+    with pytest.raises(ValueError, match="precision"):
+        Config.from_dict({"train": {"precision": "fp8"}})
+
+
+def test_unknown_hidden_loss_is_rejected_at_load():
+    with pytest.raises(ValueError, match="hidden_loss"):
+        Config.from_dict({"distill": {"hidden_loss": "l1"}})
+
+
+def test_unknown_op_name_is_rejected_at_load():
+    with pytest.raises(KeyError, match="softmax"):
+        Config.from_dict({"model": {"softmax": "cfg"}})
+
+
+def test_op_kwarg_the_op_does_not_take_is_rejected():
+    # `domain` on an exact activation is a TypeError in the constructor, not a harmless no-op.
+    with pytest.raises(ValueError, match="activation_kwargs"):
+        Config.from_dict({"model": {"activation": "silu", "activation_kwargs": {"domain": 32}}})
+
+
+def test_range_penalty_without_a_domain_is_rejected():
+    # Otherwise the trainer finds no domain, skips the penalty, and the run trains unpenalized.
+    with pytest.raises(ValueError, match="no domain"):
+        Config.from_dict({"model": {"activation": "silu"}, "distill": {"range_penalty": 1.0}})
+
+
+def test_range_penalty_with_a_domain_is_accepted():
+    cfg = Config.from_dict(
+        {
+            "model": {"activation": "quad_silu", "activation_kwargs": {"domain": 32}},
+            "distill": {"range_penalty": 1.0},
+        }
+    )
+    assert cfg.distill.range_penalty == 1.0
+
+
+@pytest.mark.parametrize("layers", [[6], [-1], [0, 99]])
+def test_range_penalty_layers_out_of_range_is_rejected(layers):
+    with pytest.raises(ValueError, match="range_penalty_layers"):
+        Config.from_dict(
+            {
+                "model": {
+                    "num_hidden_layers": 6,
+                    "activation": "quad_silu",
+                    "activation_kwargs": {"domain": 32},
+                },
+                "distill": {"range_penalty": 1.0, "range_penalty_layers": layers},
+            }
+        )
+
+
+def test_hidden_layer_map_length_must_match_student_depth():
+    with pytest.raises(ValueError, match="hidden_layer_map"):
+        Config.from_dict(
+            {"model": {"num_hidden_layers": 6}, "distill": {"hidden_layer_map": [0, 1]}}
+        )
+
+
+def test_sdpa_causal_rejects_an_approximate_softmax():
+    with pytest.raises(ValueError, match="sdpa_causal"):
+        Config.from_dict(
+            {"model": {"backend": "qwen3", "attn_impl": "sdpa_causal", "softmax": "cgf"}}
+        )
+
+
+def test_unknown_attn_impl_is_rejected():
+    with pytest.raises(ValueError, match="attn_impl"):
+        Config.from_dict({"model": {"backend": "qwen3", "attn_impl": "flash"}})
