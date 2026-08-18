@@ -28,10 +28,11 @@ import datasets
 import torch
 
 from franken.data.embed_corpus import instruct, mix, pool
+from franken.encode import embed_texts
+from franken.metrics import K, gold_recall_at_k, ndcg_at_k, ndcg_pool, recall_at_k
 from franken.paths import RunPaths
 from franken.scripts.qwen3 import common
-from franken.scripts.qwen3.common import K, embed_pool, ndcg_at_k, ndcg_pool, teacher_cache
-from franken.tasks.embed import recall_at_k
+from franken.scripts.qwen3.common import embed_pool, teacher_cache
 
 SNIPPET = 58
 LINES = 3  # rows of document text per hit; 1 restores the old one-line snippet
@@ -66,12 +67,6 @@ def _snip(text: str) -> list[str]:
     return rows or [" " * SNIPPET]
 
 
-def _recall(ranked_ids: list[str], gold: dict[str, float]) -> float:
-    # min(K, |gold|): a query with 40 judged docs could never exceed 0.25 otherwise, which reads as
-    # model damage rather than the ceiling it is.
-    return sum(d in gold for d in ranked_ids[:K]) / min(K, len(gold))
-
-
 def _embed_dist(t_emb, s_emb):
     # 1-cos per row, the trainer's `embed_dist`, so the number here is the one it logs. Rows are
     # L2-normed by the backend, so the elementwise product sums to the cosine.
@@ -93,8 +88,8 @@ def _aggregate(p, td, tq, sd, sq):
         for tr, sr, qid in zip(t_top, s_top, p.q_ids[i : i + 256], strict=True):
             t_idx, s_idx = tr.tolist(), sr.tolist()
             agree.append(len(set(t_idx) & set(s_idx)) / K)
-            gold_t.append(_recall([p.d_ids[j] for j in t_idx], p.qrels[qid]))
-            gold_s.append(_recall([p.d_ids[j] for j in s_idx], p.qrels[qid]))
+            gold_t.append(gold_recall_at_k([p.d_ids[j] for j in t_idx], p.qrels[qid]))
+            gold_s.append(gold_recall_at_k([p.d_ids[j] for j in s_idx], p.qrels[qid]))
     return agree, sum(gold_t) / len(gold_t), sum(gold_s) / len(gold_s)
 
 
@@ -141,8 +136,8 @@ def _banner(p, td, tq, sd, sq, name, split, ndcg_ok):
 @torch.no_grad()
 def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
     gold = p.qrels.get(qid, {})
-    tq = common._embed_texts(m.backend, m.teacher, m.tokenizer, m.cfg, [sent], m.device)
-    sq = common._embed_texts(m.backend, m.student, m.tokenizer, m.cfg, [sent], m.device)
+    tq = embed_texts(m.backend, m.teacher, m.tokenizer, m.cfg, [sent], m.device)
+    sq = embed_texts(m.backend, m.student, m.tokenizer, m.cfg, [sent], m.device)
     t_idx, t_cos = _top(tq, td)
     s_idx, s_cos = _top(sq, sd)
     t_rank = {j: r + 1 for r, j in enumerate(t_idx)}
@@ -189,8 +184,8 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
         t_ids = [p.d_ids[j] for j in t_idx]
         got, t_got = sum(d in gold for d in s_ids), sum(d in gold for d in t_ids)
         print(
-            f"recall@10   {_recall(s_ids, gold):.2f}   {got} of {len(gold)} gold"
-            f"          (teacher {_recall(t_ids, gold):.2f}, {t_got} of {len(gold)})"
+            f"recall@10   {gold_recall_at_k(s_ids, gold):.2f}   {got} of {len(gold)} gold"
+            f"          (teacher {gold_recall_at_k(t_ids, gold):.2f}, {t_got} of {len(gold)})"
         )
         if ndcg_ok:
             ns, nt = ndcg_at_k(s_ids, gold), ndcg_at_k(t_ids, gold)

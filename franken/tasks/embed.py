@@ -19,36 +19,14 @@ from franken.data.embed_corpus import load_embed_corpus
 from franken.distill.batching import plan_batches
 from franken.distill.layer_map import resolve_layer_map
 from franken.distill.loss import masked_mse_loss, masked_relative_mse_loss
+from franken.encode import embed_batches
+from franken.metrics import K, recall_at_k
 from franken.models.base import ModelBackend
 from franken.tasks.base import Task
 
 _COLUMNS = ["input_ids", "attention_mask"]  # no token_type_ids for Qwen3
 
-# Neighbourhood size for the selection metric. 10 because that is the scale retrieval is
-# consumed at; the pool is 500 texts, so recall@10 has 5000 slots and a quantum of 0.0002.
-RECALL_K = 10
-_RECALL_KEY = f"recall@{RECALL_K}"
-
-
-def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = RECALL_K) -> float:
-    """Fraction of each text's top-k teacher neighbours the student also retrieves -- *relative*
-    similarity, which is how an embedding model is actually used. This is THE selection metric;
-    per-vector agreement (``embed_dist`` = 1-cos) is logging only, because uniform shrinkage keeps
-    cosine high while destroying the ranking and a global rotation does the reverse. Lives here,
-    not in the eval script, so training-time selection and end-of-run scoring cannot drift.
-
-    ⚠️ Comparable only at a FIXED pool size: difficulty is ``k/(n-1)``, so identical per-vector
-    damage reads 1.000 at n=11, 0.110 at n=500, 0.039 at n=5000. Rows must be L2-normed.
-    """
-    ss, st = student @ student.T, teacher @ teacher.T
-    # Mask self-similarity, else every row's nearest neighbour is itself and both models
-    # agree on it for free.
-    eye = torch.eye(ss.size(0), dtype=torch.bool, device=ss.device)
-    ss.masked_fill_(eye, float("-inf"))
-    st.masked_fill_(eye, float("-inf"))
-    top_s, top_t = ss.topk(k, dim=-1).indices, st.topk(k, dim=-1).indices
-    hits = sum(len(set(a.tolist()) & set(b.tolist())) for a, b in zip(top_s, top_t, strict=True))
-    return hits / (top_s.size(0) * k)
+_RECALL_KEY = f"recall@{K}"
 
 
 class EmbeddingDistillLoss(nn.Module):
@@ -165,13 +143,7 @@ class EmbedSelfDistillTask(Task):
         # Whole-pool embeddings, not a streaming mean: recall@k is a property of the pool's
         # neighbourhood structure, so it cannot be accumulated batch by batch. 500x1024 fp32.
         model.eval()
-        student_emb, teacher_emb = [], []
-        for batch in loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            inputs = self.model_inputs(batch)
-            student_emb.append(backend.forward(model, inputs)["output"].float().cpu())
-            teacher_emb.append(backend.forward(teacher, inputs)["output"].float().cpu())
-        student_emb, teacher_emb = torch.cat(student_emb), torch.cat(teacher_emb)
+        student_emb, teacher_emb = embed_batches(backend, self, loader, device, model, teacher)
 
         mean_cos = F.cosine_similarity(student_emb, teacher_emb, dim=-1).mean().item()
         return {

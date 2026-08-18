@@ -14,9 +14,10 @@ import argparse
 import torch
 
 from franken.config import Config
+from franken.encode import embed_batches
+from franken.metrics import recall_at_k
 from franken.models import build_backend
 from franken.tasks import build_task
-from franken.tasks.embed import recall_at_k
 
 # A bf16 teacher must move the targets by MORE than the comparison band, otherwise the
 # "teacher stays fp32" rule is decoration rather than a real constraint.
@@ -60,25 +61,18 @@ def check_teacher_exclusion(backend, teacher, task, cfg, device):
     """Embed the validation pool with the teacher in fp32 and again under bf16 autocast. If
     those agree within the band, excluding the teacher from autocast buys nothing and this
     check is worthless -- so a PASS here means they DISAGREE."""
+    from torch.utils.data import DataLoader
+
     tokenizer = task.build_tokenizer(cfg)
     data = task.datasets(tokenizer, cfg)
     ds = data["validation"].with_format("torch", columns=task.torch_columns())
-    from torch.utils.data import DataLoader
-
     batches = list(DataLoader(ds, batch_size=16, collate_fn=data["collator"]))
 
-    def embed(autocast):
-        out = []
-        for batch in batches:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            ctx = (
-                torch.autocast("cuda", dtype=torch.bfloat16)
-                if autocast
-                else torch.autocast("cuda", enabled=False)
-            )
-            with ctx:
-                out.append(backend.forward(teacher, task.model_inputs(batch))["output"].float())
-        return torch.cat(out).cpu()
+    def embed(autocast: bool):
+        def ctx():
+            return torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast)
+
+        return embed_batches(backend, task, batches, device, teacher, ctx=ctx)[0]
 
     fp32, bf16 = embed(False), embed(True)
     recall = recall_at_k(bf16, fp32)

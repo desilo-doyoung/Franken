@@ -32,18 +32,10 @@ from scipy.stats import spearmanr
 from torch.utils.data import DataLoader
 
 from franken.data.embed_corpus import WEB_SEARCH, Pool, instruct, mix, pool
+from franken.encode import embed_batches, embed_texts
+from franken.metrics import K, ndcg_pool, recall_at_k
 from franken.scripts.qwen3 import common
-from franken.scripts.qwen3.common import (
-    K,
-    Models,
-    _embed_texts,
-    embed_pool,
-    load,
-    ndcg_pool,
-    score,
-    teacher_cache,
-)
-from franken.tasks.embed import recall_at_k
+from franken.scripts.qwen3.common import Models, embed_pool, load, score, teacher_cache
 
 SUITES = ("fidelity", "corpus", "external")
 
@@ -240,19 +232,14 @@ def fidelity(m: Models) -> dict:
     """
     data = m.task.datasets(m.tokenizer, m.cfg, splits=("validation",))
     ds = data["validation"].with_format("torch", columns=m.task.torch_columns())
-    embs = {"student": [], "teacher": []}
-    for batch in DataLoader(ds, batch_size=16, collate_fn=data["collator"]):
-        batch = {k: v.to(m.device) for k, v in batch.items()}
-        inputs = m.task.model_inputs(batch)
-        for who, model in (("student", m.student), ("teacher", m.teacher)):
-            embs[who].append(m.backend.forward(model, inputs)["output"].float().cpu())
-    s_emb, t_emb = torch.cat(embs["student"]), torch.cat(embs["teacher"])
+    loader = DataLoader(ds, batch_size=16, collate_fn=data["collator"])
+    s_emb, t_emb = embed_batches(m.backend, m.task, loader, m.device, m.student, m.teacher)
 
     stsb = {}
     ds_sts = datasets.load_dataset("nyu-mll/glue", "stsb", split="validation")
     for who, model in (("teacher", m.teacher), ("student", m.student)):
         a, b = (
-            _embed_texts(m.backend, model, m.tokenizer, m.cfg, ds_sts[c], m.device)
+            embed_texts(m.backend, model, m.tokenizer, m.cfg, ds_sts[c], m.device)
             for c in ("sentence1", "sentence2")
         )
         # Label range is [0, 5]; Spearman is rank-based so the scale does not matter.

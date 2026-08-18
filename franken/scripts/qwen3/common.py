@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import math
 import os
 import re
 from dataclasses import dataclass
@@ -13,6 +12,8 @@ from typing import Any
 import torch
 
 from franken.config import Config
+from franken.encode import embed_texts
+from franken.metrics import ndcg_pool
 from franken.models import build_backend
 from franken.tasks import build_task
 
@@ -85,52 +86,11 @@ def load(args) -> Models:
     return Models(cfg, backend, task, tokenizer, teacher, student, device)
 
 
-@torch.no_grad()
-def _embed_texts(backend, model, tokenizer, cfg, texts, device, batch_size: int = 32):
-    """Embed a plain list of strings (tokenize + pool), truncated at `cfg.train.max_seq_len`.
-
-    Here rather than in one scorer, so no two of them can drift on tokenization or truncation.
-
-    Batches are length-sorted and the original order restored afterwards. Unsorted, each batch pads
-    to its longest member: at `max_seq_len` 1024 that is ~1024 tokens per text against a median near
-    130. Longest-first, so an over-large batch fails on step 1 rather than 90% of the way in.
-    """
-    order = sorted(range(len(texts)), key=lambda i: len(texts[i]), reverse=True)
-    out: list[torch.Tensor] = [None] * len(texts)
-    for i in range(0, len(order), batch_size):
-        chunk = order[i : i + batch_size]
-        enc = tokenizer(
-            [texts[j] for j in chunk],
-            padding=True,
-            truncation=True,
-            max_length=cfg.train.max_seq_len,
-            return_tensors="pt",
-        ).to(device)
-        inputs = {"input_ids": enc["input_ids"], "attention_mask": enc["attention_mask"]}
-        emb = backend.forward(model, inputs)["output"].float().cpu()
-        for k, j in enumerate(chunk):
-            out[j] = emb[k]
-    return torch.stack(out)
-
-
-# --------------------------------------------------------------- retrieval scoring
-
-K = 10  # nDCG@K and recall@K everywhere; retrieval is consumed at this scale
+# --------------------------------------------------------------- pool embedding cache
 
 # Teacher embeddings for a given pool never change, so compute once and reuse.
 _NDCG_CACHE = "outputs/ndcg_cache"
 _NDCG_CACHE_VERSION = 2  # v2: Pool-based pools, rebuilt by the adapter rewrite
-
-
-def ndcg_at_k(ranked_ids, relevant: dict[str, float], k: int = K) -> float:
-    # Exponential gain 2^rel-1, log2(rank+1) discount — what trec_eval/MTEB compute.
-    dcg = sum(
-        (2.0 ** relevant.get(did, 0.0) - 1.0) / math.log2(rank + 2)
-        for rank, did in enumerate(ranked_ids[:k])
-    )
-    ideal = sorted(relevant.values(), reverse=True)[:k]
-    idcg = sum((2.0**rel - 1.0) / math.log2(rank + 2) for rank, rel in enumerate(ideal))
-    return dcg / idcg if idcg > 0 else 0.0
 
 
 def teacher_cache(suite: str, task: str, cfg) -> str:
@@ -157,8 +117,8 @@ def embed_pool(m: Models, model, pool, cache: str | None = None):
         blob = torch.load(cache, weights_only=True)
         if blob.get("digest") == digest:
             return blob["d"], blob["q"]
-    d = _embed_texts(m.backend, model, m.tokenizer, m.cfg, pool.d_texts, m.device)
-    q = _embed_texts(m.backend, model, m.tokenizer, m.cfg, pool.q_texts, m.device)
+    d = embed_texts(m.backend, model, m.tokenizer, m.cfg, pool.d_texts, m.device)
+    q = embed_texts(m.backend, model, m.tokenizer, m.cfg, pool.q_texts, m.device)
     if cache:
         os.makedirs(os.path.dirname(cache), exist_ok=True)
         torch.save({"d": d, "q": q, "digest": digest}, cache)
@@ -168,18 +128,3 @@ def embed_pool(m: Models, model, pool, cache: str | None = None):
 @torch.no_grad()
 def score(m: Models, model, pool, cache: str | None = None) -> float:
     return ndcg_pool(pool, *embed_pool(m, model, pool, cache))
-
-
-def ndcg_pool(pool, d_emb, q_emb) -> float:
-    """Mean nDCG@K over the pool's queries. The backend L2-norms its output, so this is cosine.
-
-    Split from the embedding step so a caller can reuse the embeddings — per-task fidelity
-    (recall@K, embed_dist) is then free rather than a second pass over the pool.
-    """
-    total = 0.0
-    for i in range(0, len(pool.q_ids), 256):  # the full queries x docs matrix is needlessly big
-        sims = q_emb[i : i + 256] @ d_emb.T
-        top = sims.topk(min(K, sims.size(-1)), dim=-1).indices
-        for row, qid in zip(top, pool.q_ids[i : i + 256], strict=True):
-            total += ndcg_at_k([pool.d_ids[j] for j in row.tolist()], pool.qrels[qid])
-    return total / len(pool.q_ids)
