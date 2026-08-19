@@ -62,10 +62,11 @@ class OptimConfig:
     batch_size: int = 32
     warmup_ratio: float = 0.1
     weight_decay: float = 0.01
-    # Padded tokens per batch, sequence count floating to fit; supersedes `batch_size`.
-    # PER RANK, unlike `batch_size`, which is global and divided by world size.
-    token_budget: int | None = None
-    max_seqs: int = 256  # ceiling on sequences per batch
+    # GLOBAL padded tokens per optimizer step, sequence count floating to fit; supersedes
+    # `batch_size`. Machine-independent: the per-GPU slice and any gradient accumulation are derived
+    # from world size and dist.max_tokens_per_rank(). Sets the step count --
+    # steps = tokens_per_epoch * epochs / tokens_per_step.
+    tokens_per_step: int | None = None
 
 
 @dataclass
@@ -76,7 +77,9 @@ class TrainConfig:
     task: str = "mrpc"  # franken.tasks registry
     # A named preset, not a dataset id, so a mix stays one config value. Ignored by MRPC.
     corpus: str = "smoke"
-    corpus_size: int = 2000
+    # UNIQUE tokens per pass; total passes = this * distill.epochs, so `epochs` no longer resizes
+    # the corpus. Nominal -- it names a corpus; the build reports the realized count.
+    tokens_per_epoch: float | None = None
     run_name: str | None = None  # output namespace; None = the backend name
     max_seq_len: int = 128
     seed: int = 42
@@ -142,6 +145,21 @@ class Config:
                 f"{self.model.activation!r} exposes no domain, so the penalty would do nothing. "
                 f"Set activation_kwargs.domain, or set range_penalty to 0."
             )
+
+        # MRPC brings its own data; a corpus task must say how much to draw.
+        if self.train.task != "mrpc":
+            if self.train.tokens_per_epoch is None:
+                raise ValueError(
+                    f"train.task {self.train.task!r} needs train.tokens_per_epoch: unique tokens "
+                    "in one pass over the corpus."
+                )
+            # YAML 1.1 reads `1.0e9` as a STRING -- only a signed exponent is a float. Caught here
+            # because the alternative is a TypeError an hour later, after the corpus gate.
+            if isinstance(self.train.tokens_per_epoch, str):
+                raise ValueError(
+                    f"train.tokens_per_epoch {self.train.tokens_per_epoch!r} parsed as a string: "
+                    "YAML needs `1_000_000_000` or `1.0e+9`, not `1.0e9`."
+                )
 
         depth = self.model.num_hidden_layers
         layers = self.distill.range_penalty_layers

@@ -17,8 +17,10 @@ class ProgressLogger:
         self._tokens = torch.zeros((), device=device)
         self._t0 = time.monotonic()
 
-    def step(self, loss, batch):
-        self.step_i += 1
+    def step(self, loss, batch, advance=True):
+        # Tokens accumulate every micro-batch; `step_i` counts optimizer steps, or the ETA is off
+        # by the accumulation factor.
+        self.step_i += advance
         # Reading the accumulators off rank 0 would sync the GPU for nothing.
         if not self.enabled:
             return
@@ -26,7 +28,7 @@ class ProgressLogger:
         mask = batch.get("attention_mask")
         if mask is not None:
             self._tokens += mask.sum()
-        if self.step_i % self.every:
+        if not advance or self.step_i % self.every:
             return
 
         elapsed = time.monotonic() - self._t0

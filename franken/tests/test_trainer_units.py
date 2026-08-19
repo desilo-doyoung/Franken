@@ -181,19 +181,47 @@ def test_fixed_batch_size_gives_ceiling_steps_per_epoch():
     assert b.global_batch == 4.0
 
 
+LENGTHS = list(range(1, 61))
+
+
 def test_token_budget_replaces_the_sequence_count():
-    b = loader_for({"token_budget": 12, "max_seqs": 4}, list(range(1, 21)))
+    b = loader_for({"tokens_per_step": 64}, LENGTHS)
     assert b.plan is not None and len(b) == len(b.plan)
-    # Every batch fits the budget, so the realized global batch is below the seq cap.
-    assert 0 < b.global_batch <= 4.0
+    assert b.accum_steps == 1  # fits one rank, so no accumulation
+    for batch in b.plan:
+        if len(batch) > 1:
+            assert len(batch) * max(LENGTHS[i] for i in batch) <= 64
+    assert b.global_batch == pytest.approx(len(LENGTHS) / len(b.plan))
 
 
 def test_replanning_never_changes_steps_per_epoch():
     # steps/epoch drives the LR schedule; only the order may move between epochs.
-    b = loader_for({"token_budget": 12, "max_seqs": 4}, list(range(1, 21)))
+    b = loader_for({"tokens_per_step": 64}, LENGTHS)
     first = list(b.loader(0).batch_sampler)
     steps = len(b)
     second = list(b.loader(1).batch_sampler)
     assert len(b) == steps
     assert sorted(map(sorted, first)) == sorted(map(sorted, second))
     assert first != second
+
+
+SHORT = [4, 5, 6, 7, 8] * 40  # well under the budget, so packing is in the linear regime
+
+
+def test_the_machine_ceiling_only_changes_how_the_step_is_chopped(monkeypatch):
+    # The whole point: a smaller card costs speed, it does not train a different model.
+    seen = {}
+    for ceiling in (32, 64, 128):
+        monkeypatch.setenv("FRANKEN_MAX_TOKENS_PER_RANK", str(ceiling))
+        b = loader_for({"tokens_per_step": 128}, SHORT)
+        assert b.micro_tokens * b.accum_steps == 128  # world_size 1; exact by construction
+        seen[ceiling] = (b.accum_steps, b.global_batch)
+    assert [a for a, _g in seen.values()] == [4, 2, 1]
+    batches = {g for _a, g in seen.values()}
+    assert max(batches) - min(batches) < 0.5, seen
+
+
+def test_an_indivisible_step_is_rejected(monkeypatch):
+    monkeypatch.setenv("FRANKEN_MAX_TOKENS_PER_RANK", "30")
+    with pytest.raises(ValueError, match="not divisible"):
+        loader_for({"tokens_per_step": 64}, LENGTHS)

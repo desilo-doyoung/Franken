@@ -22,7 +22,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain # the real mix, so a dead source or renamed column still fails here
-  corpus_size: 20000
+  tokens_per_epoch: 1_930_000 # unique tokens per pass
   output_dir: outputs
   run_name: qwen3_smoke
   max_seq_len: 256
@@ -41,7 +41,6 @@ train:
   distill:
     lr: null # exercises the sqrt-batch derivation path
     epochs: 1
-    token_budget: 4096
-    max_seqs: 64
+    tokens_per_step: 4_096 # GLOBAL tokens per optimizer step
     warmup_ratio: 0.1
     weight_decay: 0.01

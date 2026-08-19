@@ -17,12 +17,12 @@ import datasets
 from franken.config import Config
 from franken.data.embed_corpus import (
     SPLITS,
-    cache_path,
     describe,
     mix,
     profile,
     realized_mix,
     source_texts,
+    train_cache_path,
 )
 from franken.tasks import build_task
 
@@ -69,10 +69,10 @@ def check(sources) -> bool:
     return ok
 
 
-def measure(cfg, sources, tokenizer) -> tuple[bool, int]:
-    """Per-source token length -> the `corpus_size` that spends TOKEN_TARGET, plus the
-    scoreability gate."""
-    cap, epochs = cfg.train.max_seq_len, cfg.train.distill.epochs
+def measure(cfg, sources, tokenizer) -> tuple[bool, float]:
+    """Per-source token length, plus the scoreability gate. Reports only -- `build._calibrate`
+    re-measures this at build time to size the corpus."""
+    cap = cfg.train.max_seq_len
     print(f"\n{cfg.train.corpus}: {len(sources)} sources, max_seq_len {cap}")
     # mean/p50 are post-cap; cut%/max* are untruncated. The max, not a percentile: FHE has no
     # clamp.
@@ -95,31 +95,25 @@ def measure(cfg, sources, tokenizer) -> tuple[bool, int]:
     covered = sum(r.weight for r in good)
     if not covered:
         print("\nno source produced a sample")
-        return False, 0
+        return False, 0.0
     # Rescaled, so a failed source does not read as zero-length.
     full = sum(r.weight * r.mean for r in good) / covered
-    size = int(round(TOKEN_TARGET / epochs / full / 1e5) * 1e5)
-    print(
-        f"\ntok/text {full:.1f} over {covered:.3f} of the mix -> corpus_size {size:,} "
-        f"= {size * full / 1e9:.2f}B/epoch, x{epochs} epochs = {size * full * epochs / 1e9:.2f}B"
-    )
+    print(f"\ntok/text {full:.1f} over {covered:.3f} of the mix ({SAMPLE} texts/source)")
+    print(f"  -> ~{round(cfg.train.tokens_per_epoch / full):,} texts for the configured budget")
     if failed := [r.name for r in rows if r.error]:
         print(f"NO SAMPLE: {', '.join(failed)} — excluded from the mean above")
     if blind := [r.name for r in good if r.scoreable == "none"]:
         print(f"NOT SCOREABLE: {', '.join(blind)} — needs an eval pair or a Qrels declaration")
-    return not (failed or blind), size
+    return not (failed or blind), full
 
 
 def build(cfg, task, tokenizer, sources) -> None:
-    """Build and cache if needed, then report what the artifact holds. The token count is a
-    report, not a gate -- `tok/text` is sampled, so landing a few percent off is expected. It
-    prints on cache hits too, since that is the only place a stale `corpus_size` shows up."""
-    cap = cfg.train.max_seq_len
-    cached = os.path.isdir(
-        cache_path(cfg.train.corpus, "train", cfg.train.corpus_size, cap, tokenizer)
-    )
+    """Build and cache if needed, then report what the artifact holds. Prints on cache hits too,
+    the only place the realized token count shows up."""
+    cap, tokens = cfg.train.max_seq_len, cfg.train.tokens_per_epoch
+    cached = os.path.isdir(train_cache_path(cfg.train.corpus, tokens, cap, tokenizer))
     verb = "loading" if cached else "BUILDING (hours)"
-    print(f"\n{verb} {cfg.train.corpus} size={cfg.train.corpus_size:,} max_seq_len={cap}\n")
+    print(f"\n{verb} {cfg.train.corpus} tokens={tokens:,.0f} max_seq_len={cap}\n")
     start = time.time()
     data = task.datasets(tokenizer, cfg)
     print(f"\nready in {(time.time() - start) / 60:.1f} min\n")
@@ -141,12 +135,14 @@ def build(cfg, task, tokenizer, sources) -> None:
             )
 
     epochs = cfg.train.distill.epochs
-    passes = stats["train"].tokens * epochs
-    off = passes / TOKEN_TARGET - 1
-    print(f"\ntoken-passes at {epochs} epochs: {passes:,} (target {TOKEN_TARGET:,.0f}, {off:+.1%})")
+    unique, passes = stats["train"].tokens, stats["train"].tokens * epochs
     print(
-        f"corpus_size {cfg.train.corpus_size:,} spends that; "
-        f"{round(cfg.train.corpus_size / (1 + off) / 1e5) * 100_000:,} would spend the target"
+        f"\nrealized {unique:,} unique tokens over {stats['train'].n:,} texts "
+        f"— asked {tokens:,.0f} ({unique / tokens - 1:+.1%})"
+    )
+    print(
+        f"token-passes at {epochs} epochs: {passes:,} "
+        f"(reference target {TOKEN_TARGET:,.0f}, {passes / TOKEN_TARGET - 1:+.1%})"
     )
 
 
@@ -164,13 +160,8 @@ def main(argv: list[str] | None = None) -> bool:
     sources = mix(cfg.train.corpus)
 
     ok = check(sources)
-    scoreable, size = measure(cfg, sources, tokenizer)
+    scoreable, _measured = measure(cfg, sources, tokenizer)
     ok = ok and scoreable
-    if ok and size and size != cfg.train.corpus_size:
-        print(
-            f"\nconfig corpus_size {cfg.train.corpus_size:,} != measured {size:,} "
-            f"({cfg.train.corpus_size / size - 1:+.1%}) — the config's value is what gets built."
-        )
     if ok:
         build(cfg, task, tokenizer, sources)
 

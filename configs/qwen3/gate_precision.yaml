@@ -29,7 +29,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: mixed
-  corpus_size: 2100000 # saturates the corpus: 1,575,039 texts, cached
+  tokens_per_epoch: 150_000_000 # over-asks, so it saturates the corpus
   output_dir: outputs
   run_name: qwen3_gate_precision
   max_seq_len: 128

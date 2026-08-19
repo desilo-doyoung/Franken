@@ -213,6 +213,7 @@ def _normalized(sources: list[Source]) -> list[Source]:
 # Scoreable mixes only -- what the gates and the eval iterate.
 MIXES: dict[str, list[Source]] = {"multi_domain": _normalized(_MULTI_DOMAIN)}
 
+
 # `smoke` is a pipeline proof, never a result, so it sits outside MIXES.
 PRESETS: dict[str, list[Source]] = {
     "smoke": [

@@ -12,7 +12,12 @@ from transformers import get_linear_schedule_with_warmup, set_seed
 
 from franken.config import PRECISIONS, Config
 from franken.distill.batching import plan_batches, shard
-from franken.distill.dist import barrier, init_distributed, per_rank_batch
+from franken.distill.dist import (
+    barrier,
+    init_distributed,
+    max_tokens_per_rank,
+    per_rank_batch,
+)
 from franken.distill.progress import ProgressLogger
 from franken.models import build_backend
 from franken.tasks import build_task
@@ -56,6 +61,29 @@ def resolve_lr(opt, global_batch: float, log) -> float:
     return lr
 
 
+def _no_sync(student):
+    """DDP-only; a bare module has no no_sync."""
+    return student.no_sync() if hasattr(student, "no_sync") else nullcontext()
+
+
+def _split_step(tokens_per_step: int, world_size: int) -> tuple[int, int]:
+    """GLOBAL tokens/step -> (per-rank micro-batch tokens, accumulation steps). The machine ceiling
+    only decides how the step is chopped up, never how big it is."""
+    micro = min(tokens_per_step // world_size, max_tokens_per_rank())
+    if micro < 1:
+        raise ValueError(
+            f"tokens_per_step {tokens_per_step:,} is below world_size {world_size}: "
+            "fewer than one token per rank."
+        )
+    if tokens_per_step % (micro * world_size):
+        raise ValueError(
+            f"tokens_per_step {tokens_per_step:,} is not divisible by "
+            f"{micro:,} tokens x {world_size} ranks; the global batch must be exact or runs on "
+            f"different machines stop being comparable. Try a multiple of {micro * world_size:,}."
+        )
+    return micro, tokens_per_step // (micro * world_size)
+
+
 class BatchLoader:
     """Token-budgeted plan, DistributedSampler, or plain shuffle. Owns the per-epoch loader:
     steps/epoch must not move, or the LR schedule stops matching the recorded runs."""
@@ -65,19 +93,24 @@ class BatchLoader:
         self.dist, self.dataset, self.collator = dist, dataset, collator
         self.seed = cfg.train.seed
         self.sampler = self.plan = None
+        self.accum_steps = 1
 
-        if self.opt.token_budget:
+        if self.opt.tokens_per_step:
+            self.micro_tokens, self.accum_steps = _split_step(
+                self.opt.tokens_per_step, dist.world_size
+            )
             lengths = pc.list_value_length(dataset.data.column("input_ids")).to_numpy(
                 zero_copy_only=False
             )
             self.plan = shard(
-                plan_batches(lengths, self.opt.token_budget, self.opt.max_seqs, self.seed),
+                plan_batches(lengths, self.micro_tokens, self.seed),
                 dist.rank,
                 dist.world_size,
             )
             log(
-                f"token-budgeted batching: {len(self.plan):,} steps/epoch/rank, "
-                f"{self.opt.token_budget:,} tokens x {dist.world_size} ranks per step"
+                f"token-budgeted batching: {self.opt.tokens_per_step:,} tokens/step "
+                f"= {self.micro_tokens:,} x {dist.world_size} ranks x {self.accum_steps} accum; "
+                f"{len(self.plan) // self.accum_steps:,} optimizer steps/epoch"
             )
         elif dist.enabled:
             # Single-process keeps the literal shuffle=True path: DistributedSampler permutes
@@ -123,7 +156,12 @@ class BatchLoader:
         return self._loader
 
     def __len__(self) -> int:
+        """Micro-batches per epoch. `optimizer_steps` is what the LR schedule counts."""
         return len(self._loader)
+
+    @property
+    def optimizer_steps(self) -> int:
+        return len(self._loader) // self.accum_steps
 
     @property
     def global_batch(self) -> float:
@@ -131,7 +169,7 @@ class BatchLoader:
         if self.plan is None:
             return float(self.opt.batch_size)  # already the GLOBAL batch
         seqs = sum(len(b) for b in self.plan) / max(len(self.plan), 1)
-        return seqs * self.dist.world_size
+        return seqs * self.dist.world_size * self.accum_steps
 
 
 class RangePenalty:
@@ -264,10 +302,16 @@ class Distiller:
             )
         return _maybe_compile(student, self.cfg), _maybe_compile(self.teacher, self.cfg)
 
-    def _run_epoch(self, loader, student, teacher, optimizer, scheduler, penalty, progress):
+    def _run_epoch(
+        self, batches, loader, student, teacher, optimizer, scheduler, penalty, progress
+    ):
         """Returns the last batch's loss components, for the epoch line."""
         components = {}
-        for batch in loader:
+        # A trailing group of <accum micro-batches never reaches a step; its gradients are dropped
+        # here, and `optimizer_steps` already floors to match.
+        accum = batches.accum_steps
+        optimizer.zero_grad()
+        for micro, batch in enumerate(loader):
             batch = {k: v.to(self.device) for k, v in batch.items()}
             inputs = self.task.model_inputs(batch)
 
@@ -287,12 +331,18 @@ class Distiller:
                 if term is not None:
                     loss = loss + penalty.weight * term
 
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
-            optimizer.step()
-            scheduler.step()
-            progress.step(loss, batch)
+            # no_sync or DDP allreduces every micro-batch and accumulation costs more than it
+            # saves. `loss / accum` weights micro-batches equally, not per sequence: zero-mean
+            # given the shuffled plan, and moot at accum 1.
+            boundary = (micro + 1) % accum == 0
+            with nullcontext() if boundary else _no_sync(student):
+                (loss / accum).backward()
+            if boundary:
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+            progress.step(loss, batch, advance=boundary)
         return components
 
     def train(self):
@@ -302,7 +352,7 @@ class Distiller:
         opt = self.cfg.train.distill
 
         batches = BatchLoader(self.cfg, self.dist, train_data, data["collator"], self.log)
-        total_steps = len(batches) * opt.epochs
+        total_steps = batches.optimizer_steps * opt.epochs  # LR schedule counts OPTIMIZER steps
         lr = resolve_lr(opt, batches.global_batch, self.log)
         optimizer = AdamW(self.student.parameters(), lr=lr, weight_decay=opt.weight_decay)
         warmup = min(int(total_steps * opt.warmup_ratio), MAX_WARMUP_STEPS)
@@ -324,6 +374,7 @@ class Distiller:
         with RangePenalty(self.backend, self.student, self.cfg, self.log) as penalty:
             for epoch in range(opt.epochs):
                 components = self._run_epoch(
+                    batches,
                     batches.loader(epoch),
                     student,
                     teacher,

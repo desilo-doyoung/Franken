@@ -13,7 +13,6 @@ SCRIPTS = [
     "franken.scripts.qwen3.act_range",
     "franken.scripts.qwen3.corpus",
     "franken.scripts.qwen3.eval",
-    "franken.scripts.qwen3.gen_sweep",
     "franken.scripts.qwen3.parity_gate",
     "franken.scripts.qwen3.precision_gate",
     "franken.scripts.qwen3.run_experiments",

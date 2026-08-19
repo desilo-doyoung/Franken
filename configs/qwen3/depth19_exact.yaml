@@ -2,6 +2,9 @@
 # The exact-op control for depth19_quad — every other lever is held, so the pair isolates
 # what the FHE ops cost. See depth19_quad.yaml for the shared setup.
 
+# ⚠️ 2026-08-19 rebase: 2.0 Gtok seen ONCE, global tokens_per_step, lr derived. The archived -8.4%
+#    ran at global 16,384 on 1 rank and is not reproduced here.
+
 model:
   backend: qwen3
   num_hidden_layers: 19
@@ -22,8 +25,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  # v8 mix (pubmed -> arxiv) measures 110.3 tok/text: 2.01B token-passes over 2 epochs.
-  corpus_size: 9100000
+  tokens_per_epoch: 2_000_000_000 # unique tokens; seen once, not 1.0 Gtok twice
   output_dir: outputs
   run_name: qwen3_depth19_exact
   max_seq_len: 1024
@@ -40,9 +42,8 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 3.4e-5
-    epochs: 2
-    token_budget: 16384 # per RANK, measured at depth 28
-    max_seqs: 256
+    lr: null # sqrt-batch from trainer.BASE_LR; 3.4e-5 was set for a retired batch
+    epochs: 1
+    tokens_per_step: 32_768 # GLOBAL tokens per optimizer step
     warmup_ratio: 0.1
     weight_decay: 0.01

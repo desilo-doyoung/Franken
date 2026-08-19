@@ -21,6 +21,8 @@ def test_every_shipped_config_loads(path):
     cfg = Config.from_yaml(path)
     assert cfg.model.num_hidden_layers > 0
     assert cfg.train.task
+    if cfg.train.task != "mrpc":
+        assert cfg.train.tokens_per_epoch > 0
 
 
 @pytest.mark.parametrize(
@@ -143,3 +145,51 @@ def test_sdpa_causal_rejects_an_approximate_softmax():
 def test_unknown_attn_impl_is_rejected():
     with pytest.raises(ValueError, match="attn_impl"):
         Config.from_dict({"model": {"backend": "qwen3", "attn_impl": "flash"}})
+
+
+def test_epochs_does_not_resize_the_corpus():
+    # The whole point: `epochs` means passes, nothing else.
+    sizes = {
+        e: Config.from_dict(
+            {
+                "train": {
+                    "task": "embed",
+                    "corpus": "multi_domain",
+                    "tokens_per_epoch": 1_000_000_000,
+                    "distill": {"epochs": e},
+                }
+            }
+        ).train.tokens_per_epoch
+        for e in (1, 2, 4)
+    }
+    assert len(set(sizes.values())) == 1, sizes
+
+
+def test_a_corpus_task_needs_a_token_budget():
+    with pytest.raises(ValueError, match="tokens_per_epoch"):
+        Config.from_dict({"train": {"task": "embed"}})
+
+
+def test_corpus_size_in_texts_is_no_longer_accepted():
+    # The text count is derived at build time now; a stale config must fail, not size a corpus
+    # from a number that no longer means anything.
+    with pytest.raises(ValueError, match="corpus_size"):
+        Config.from_dict({"train": {"task": "embed", "corpus_size": 9_100_000}})
+
+
+def test_mrpc_needs_no_token_budget():
+    assert Config.from_dict({"train": {"task": "mrpc"}}).train.tokens_per_epoch is None
+
+
+@pytest.mark.parametrize("stale", ["max_seqs", "token_budget", "token_budget_per_rank"])
+def test_retired_batching_keys_are_rejected(stale):
+    # All three were per-rank or cap knobs; a stale config must fail, not silently train something
+    # else at a different world size.
+    with pytest.raises(ValueError, match=stale):
+        Config.from_dict({"train": {"distill": {stale: 256}}})
+
+
+def test_yaml_unsigned_exponent_is_rejected_with_the_fix():
+    # `1.0e9` is a str under YAML 1.1; otherwise a TypeError an hour after the gate.
+    with pytest.raises(ValueError, match="1_000_000_000"):
+        Config.from_dict({"train": {"task": "embed", "tokens_per_epoch": "1.0e9"}})

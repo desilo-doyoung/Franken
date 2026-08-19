@@ -4,7 +4,7 @@ Per config: corpus gates (once per corpus), distill, then eval. Numbers come fro
 `--json`, never scraped from prose. A crashed run degrades to one FAILED row with its log tail.
 
 Configs are a work queue over the cards; `--ddp` instead runs one config at a time across all of
-them. Pass only cards you own. `token_budget` is PER RANK, so tokens/step scales with the count.
+them. Pass only cards you own. `tokens_per_step` is global, so results do not move with it.
 
 Usage:
     uv run python -m franken.scripts.qwen3.run_experiments --devices 2,3 configs/qwen3/depth19*.yaml
@@ -256,19 +256,21 @@ def report(results: list[dict], out_dir: str) -> None:
 
 
 # Below this a rebuild is seconds, so a missing cache is not worth blocking on.
-_PREBUILD_THRESHOLD = 100_000
+_PREBUILD_TOKENS = 1e7
 
 
 def _cache_missing(cfg) -> bool:
     # Runs go one per device concurrently, so with no cache each tokenizes the whole corpus.
-    from franken.data.embed_corpus import cache_path  # noqa: PLC0415  (heavy import, rare path)
+    from franken.data.embed_corpus import (
+        train_cache_path,  # noqa: PLC0415  (heavy import, rare path)
+    )
     from franken.tasks import build_task  # noqa: PLC0415
 
     tokenizer = build_task(cfg.train.task).build_tokenizer(cfg)
     cached = os.path.join(
         _ROOT,
-        cache_path(
-            cfg.train.corpus, "train", cfg.train.corpus_size, cfg.train.max_seq_len, tokenizer
+        train_cache_path(
+            cfg.train.corpus, cfg.train.tokens_per_epoch, cfg.train.max_seq_len, tokenizer
         ),
     )
     return not os.path.isdir(cached)
@@ -276,7 +278,7 @@ def _cache_missing(cfg) -> bool:
 
 def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:
     # Pure checks, cheap next to a distill. corpus.py decides whether to build; `build` logs it.
-    if cfg.train.task != "embed" or cfg.train.corpus_size < _PREBUILD_THRESHOLD:
+    if cfg.train.task != "embed" or cfg.train.tokens_per_epoch < _PREBUILD_TOKENS:
         return
     log = os.path.join(out_dir, "corpus.log")
     _say(f"corpus: gates{' + BUILD (hours)' if build else ''} -> {log}")
@@ -324,7 +326,8 @@ def main(argv: list[str] | None = None) -> None:
             if args.eval_only and missing:
                 raise SystemExit(
                     f"{config}: no corpus cache for {cfg.train.corpus} "
-                    f"({cfg.train.corpus_size:,} texts) and --eval-only will not build one.\n"
+                    f"({cfg.train.tokens_per_epoch:,.0f} tokens) and --eval-only will not\n"
+                    f"    build one.\n"
                     f"    uv run python -m franken.scripts.qwen3.corpus --config {config}"
                 )
             if not args.eval_only:

@@ -33,7 +33,7 @@ train:
   teacher_ckpt: null # pretrained checkpoint IS the teacher (no fine-tune)
   task: embed # embedding self-distillation (no labels)
   corpus: mixed # 20% instruct-prefixed queries / 40% MS MARCO passages / 40% wikitext-103
-  corpus_size: 2000
+  tokens_per_epoch: 140_000
   output_dir: outputs
   max_seq_len: 128
   seed: 42

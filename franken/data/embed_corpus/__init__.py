@@ -13,6 +13,7 @@ from franken.data.embed_corpus.build import (
     profile,
     realized_mix,
     source_texts,
+    train_cache_path,
 )
 from franken.data.embed_corpus.evalset import Pool, pool
 from franken.data.embed_corpus.registry import Qrels, Source, mix
@@ -34,4 +35,5 @@ __all__ = [
     "profile",
     "realized_mix",
     "source_texts",
+    "train_cache_path",
 ]

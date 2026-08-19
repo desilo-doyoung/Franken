@@ -8,7 +8,7 @@ import re
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import cache, lru_cache
+from functools import cache
 from typing import Any
 
 import datasets
@@ -22,7 +22,7 @@ from franken.data.embed_corpus.spec import Record, corpus_texts, eval_pair, spli
 _CACHE_DIR = "outputs/corpus_cache"
 # Bump when a source, weight or adapter changes: the key covers the request, not the recipe that
 # answered it. Manual, not a digest, which would discard an hours-long build on a typo.
-_CACHE_VERSION = 8  # v8: Qrels-judged docs held out of training; pubmed dropped
+_CACHE_VERSION = 9  # v9: keyed on a token budget, not a text count
 
 # Shard-order shuffling does the global mixing, so the buffer stays small.
 _SHUFFLE = 10_000
@@ -30,6 +30,8 @@ _SHUFFLE = 10_000
 # Deliberately NOT a config knob: recall@10 is strongly pool-size dependent, so a per-run value
 # would silently void every comparison.
 VAL_POOL = 500
+
+CALIB = 2000  # texts/source for the tokens->texts calibration; +-0.9% on the mix mean
 
 
 def _stream(repo: str, config: str | None, hf_split: str):
@@ -92,10 +94,34 @@ def _mix(sources: list[Source], split: str, n: int) -> tuple[list[str], list[int
     return [t for t, _i in rows], [i for _t, i in rows]
 
 
-def cache_path(name: str, split: str, n: int, max_seq_len: int, tokenizer: Any) -> str:
-    """Public: `run_experiments` checks the cache before launching a concurrent batch."""
+def _tokens_label(tokens: float) -> str:
+    return f"{int(tokens)}tok"
+
+
+def cache_path(name: str, split: str, size_label: str, max_seq_len: int, tokenizer: Any) -> str:
+    """`size_label` is a token budget for train (`…-2000000000tok-…`) and a text count for the
+    fixed validation pool. Public: `run_experiments` checks the cache before launching a batch."""
     tok_id = re.sub(r"[^\w.-]", "_", str(getattr(tokenizer, "name_or_path", "tokenizer")))
-    return os.path.join(_CACHE_DIR, f"v{_CACHE_VERSION}-{name}-{split}-{n}-{max_seq_len}-{tok_id}")
+    return os.path.join(
+        _CACHE_DIR, f"v{_CACHE_VERSION}-{name}-{split}-{size_label}-{max_seq_len}-{tok_id}"
+    )
+
+
+def train_cache_path(name: str, tokens: float, max_seq_len: int, tokenizer: Any) -> str:
+    return cache_path(name, "train", _tokens_label(tokens), max_seq_len, tokenizer)
+
+
+def _calibrate(name: str, max_seq_len: int, tokenizer: Any, tokens: float) -> int:
+    """How many texts sum to `tokens`. Measured here, not declared: tok/text depends on the mix AND
+    the cap (~110 at 1024, ~97 at 256). The cache is keyed on the token budget, so sampling error
+    moves the text count and can never rename a corpus."""
+    rows = [r for r in profile(PRESETS[name], tokenizer, max_seq_len, n=CALIB) if not r.error]
+    covered = sum(r.weight for r in rows)
+    if not covered:
+        raise RuntimeError(f"No source in {name!r} produced a sample; cannot size the corpus.")
+    mean = sum(r.weight * r.mean for r in rows) / covered  # rescaled, so a dead source is not 0
+    print(f"calibration: {mean:.1f} tok/text over {covered:.3f} of the mix", flush=True)
+    return max(1, round(tokens / mean))
 
 
 def _save_atomic(ds, path: str) -> None:
@@ -109,44 +135,59 @@ def _save_atomic(ds, path: str) -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-@lru_cache(maxsize=4)
-def _build_split(name: str, split: str, n: int, max_seq_len: int, tokenizer: Any):
+_MEMO: dict[str, Any] = {}
+
+
+def _build_split(name, split, size_label, max_seq_len, tokenizer, resolve_n):
     """One tokenized split, memoized in-process and on disk: a rebuild re-pays network and parsing,
-    hours at 10M texts, per rank."""
+    hours at 10M texts, per rank. `resolve_n` is called only on a miss, so a cache hit never pays
+    for calibration."""
     if name not in PRESETS:
         raise KeyError(f"Unknown corpus {name!r}; available: {sorted(PRESETS)}")
 
-    cached = cache_path(name, split, n, max_seq_len, tokenizer)
+    cached = cache_path(name, split, size_label, max_seq_len, tokenizer)
+    if cached in _MEMO:
+        return _MEMO[cached]
     if os.path.isdir(cached):
-        return datasets.load_from_disk(cached)
+        return _MEMO.setdefault(cached, datasets.load_from_disk(cached))
 
     def tok(batch):
         return tokenizer(batch["text"], truncation=True, max_length=max_seq_len)
 
-    texts, source_ids = _mix(PRESETS[name], split, n)
+    texts, source_ids = _mix(PRESETS[name], split, resolve_n())
     # Provenance, so the realized mix can be verified after the fact. uint8: 10M rows cost 10 MB.
     ds = datasets.Dataset.from_dict({"text": texts, "source": source_ids})
     ds = ds.cast_column("source", datasets.Value("uint8"))
     ds = ds.map(tok, batched=True, remove_columns=["text"])
     _save_atomic(ds, cached)
-    return ds
+    return _MEMO.setdefault(cached, ds)
 
 
 def load_embed_corpus(
     tokenizer: Any,
     name: str,
-    size: int,
+    tokens_per_epoch: float,
     max_seq_len: int = 128,
     val_size: int = VAL_POOL,
     splits: tuple[str, ...] = ("train", "validation"),
 ) -> dict[str, Any]:
-    """Tokenized splits plus a collator, the shape `load_mrpc` returns."""
-    out: dict[str, Any] = {
-        split: _build_split(
-            name, split, size if split == "train" else val_size, max_seq_len, tokenizer
-        )
-        for split in splits
-    }
+    """Tokenized splits plus a collator, the shape `load_mrpc` returns. `tokens_per_epoch` sizes
+    train; validation is a fixed TEXT count, since recall@10 is pool-size dependent."""
+    out: dict[str, Any] = {}
+    for split in splits:
+        if split == "train":
+            out[split] = _build_split(
+                name,
+                split,
+                _tokens_label(tokens_per_epoch),
+                max_seq_len,
+                tokenizer,
+                lambda: _calibrate(name, max_seq_len, tokenizer, tokens_per_epoch),
+            )
+        else:
+            out[split] = _build_split(
+                name, split, str(val_size), max_seq_len, tokenizer, lambda: val_size
+            )
     out["collator"] = transformers.DataCollatorWithPadding(tokenizer)
     out["sources"] = [s.name for s in PRESETS[name]]
     return out

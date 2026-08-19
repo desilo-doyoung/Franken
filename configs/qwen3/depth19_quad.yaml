@@ -1,16 +1,17 @@
 # multi_domain ladder, FHE-ops arm: depth 19 + quad_silu d32 + range penalty on EVERY layer.
-# Pairs with depth28_exact (setup baseline) and depth19_exact (layer cut alone). Corpus, length,
-# batching, schedule and seed are identical across the three, so one cache serves all and each
-# consecutive pair differs by exactly one lever. Derivations live in PROGRESS.md.
+# Pairs with depth28_exact (setup baseline) and depth19_exact (layer cut alone) — every other lever
+# is held, so each consecutive pair isolates one. Derivations in PROGRESS.md.
 #
-# Penalising every layer is the WORST CASE for activation cost, not the deployable recipe: it asks how
-# much the polynomial activation can cost when no layer is left free. The targeted variant
-# (range_penalty_layers: [2, 18]) measured 8.2 recall points cheaper at depth 28 — recover it with
-# `git show a3636dc:configs/qwen3/depth19_multi_domain.yaml`, which is this file's pre-rename path
-# and is what git needs at that commit.
+# Penalising every layer is the WORST CASE, not the deployable recipe: it asks what the polynomial
+# activation can cost with no layer left free. The targeted variant (range_penalty_layers: [2, 18])
+# measured 8.2 recall points cheaper at depth 28 —
+# `git show a3636dc:configs/qwen3/depth19_multi_domain.yaml` (this file's pre-rename path).
 #
-# Build the cache first, or each concurrent run re-streams 9.0M texts:
-#     uv run python scripts/qwen3/corpus.py --config configs/qwen3/depth19_quad.yaml
+# ⚠️ 2026-08-19 rebase: 2.0 Gtok seen ONCE (was 1.0 Gtok x 2ep), global tokens_per_step, lr derived.
+#    Reproduces neither archived depth-19 result (-10.5% at global 16,384 on 1 rank, -10.7% at 131,072).
+#
+# Build the cache first, or every concurrent rank re-streams the corpus:
+#     uv run python -m franken.scripts.qwen3.corpus --config configs/qwen3/depth19_quad.yaml
 
 model:
   backend: qwen3
@@ -35,8 +36,7 @@ train:
   teacher_ckpt: null
   task: embed
   corpus: multi_domain
-  # v8 mix (pubmed -> arxiv) measures 110.3 tok/text: 2.01B token-passes over 2 epochs.
-  corpus_size: 9100000
+  tokens_per_epoch: 2_000_000_000 # unique tokens; seen once, not 1.0 Gtok twice
   output_dir: outputs
   # Distinct from the targeted-penalty era: a result under the bare name means [2, 18].
   run_name: qwen3_depth19_quad
@@ -54,9 +54,8 @@ train:
     weight_decay: 0.01
 
   distill:
-    lr: 3.4e-5
-    epochs: 2
-    token_budget: 16384 # per RANK, measured at depth 28
-    max_seqs: 256
+    lr: null # sqrt-batch from trainer.BASE_LR; 3.4e-5 was set for a retired batch
+    epochs: 1
+    tokens_per_step: 32_768 # GLOBAL tokens per optimizer step
     warmup_ratio: 0.1
     weight_decay: 0.01

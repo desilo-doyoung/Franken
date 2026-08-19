@@ -15,6 +15,7 @@ from transformers import AutoTokenizer
 from franken.config import Config, DistillConfig
 from franken.data.embed_corpus import load_embed_corpus
 from franken.distill.batching import plan_batches
+from franken.distill.dist import max_tokens_per_rank
 from franken.distill.layer_map import resolve_layer_map
 from franken.distill.loss import masked_mse_loss, masked_relative_mse_loss
 from franken.encode import embed_batches
@@ -77,7 +78,7 @@ class EmbedSelfDistillTask(Task):
         return load_embed_corpus(
             tokenizer,
             cfg.train.corpus,
-            cfg.train.corpus_size,
+            cfg.train.tokens_per_epoch,
             cfg.train.max_seq_len,
             splits=splits,
         )
@@ -120,11 +121,14 @@ class EmbedSelfDistillTask(Task):
         # Batched like training so one knob bounds memory everywhere; recall@10 is bit-identical
         # across eval batch sizes anyway.
         opt = cfg.train.distill
-        if opt.token_budget:
+        if opt.tokens_per_step:
             lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(
                 zero_copy_only=False
             )
-            plan = plan_batches(lengths, opt.token_budget, opt.max_seqs, cfg.train.seed)
+            # Eval is single-process, so the whole step lands on one device; cap it at what the
+            # machine holds rather than assuming the training world size.
+            budget = min(opt.tokens_per_step, max_tokens_per_rank())
+            plan = plan_batches(lengths, budget, cfg.train.seed)
             loader = DataLoader(ds, batch_sampler=plan, collate_fn=data["collator"])
         else:
             loader = DataLoader(ds, batch_size=opt.batch_size, collate_fn=data["collator"])
