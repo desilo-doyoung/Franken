@@ -96,6 +96,42 @@ def test_render_warns_when_the_teacher_differs_across_runs():
     assert not any("WARNING" in ln for ln in render([run_row(), run_row(stem="other")]))
 
 
+def test_render_pairs_the_two_gold_free_fidelity_columns():
+    # recall@10 catches a moved ranking, embed_dist a moved geometry; the table needs both.
+    line = next(ln for ln in render([run_row(embed_dist=0.022520)]) if ln.startswith("| d19_quad"))
+    assert "0.9000" in line  # recall@10
+    assert "0.022520" in line  # embed_dist, at full precision -- it lives in the 3rd decimal
+
+
+def test_render_omits_in_dist_and_the_coverage_gap():
+    # Both are ~constant across every run measured, so gap == external minus a constant. They stay
+    # in results.json; a column that never moves is not a column.
+    row = run_row(macro_pair={"teacher": 0.9, "student": 0.8982, "n": 9}, coverage_gap=-8.3)
+    line = next(ln for ln in render([row]) if ln.startswith("| d19_quad"))
+    assert "-8.3%" not in line
+    assert line.count("|") == 8  # run, depth, ops, recall, embed_dist, external, min
+
+
+def test_render_shows_per_task_external_as_relative_deltas():
+    # The macro averages a destroyed task with a flat one; only the per-task row shows that.
+    row = run_row(
+        ndcg_tasks={
+            "code_apps": {"teacher": 0.7317, "student": 0.4920},
+            "scifact": {"teacher": 0.7015, "student": 0.7019},
+        }
+    )
+    lines = render([row])
+    task_line = [ln for ln in lines if ln.startswith("| d19_quad")][-1]
+    assert "-32.8%" in task_line and "+0.1%" in task_line
+
+
+def test_render_survives_a_run_with_no_external_suite():
+    line = next(
+        ln for ln in render([run_row(ndcg=None, ndcg_teacher=None)]) if ln.startswith("| d19_quad")
+    )
+    assert line.count("—") >= 1
+
+
 def test_render_is_pure():
     results = [run_row()]
     before = repr(results)

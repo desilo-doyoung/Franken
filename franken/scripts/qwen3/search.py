@@ -74,7 +74,7 @@ def _embed_dist(t_emb, s_emb):
 def _top(q_vec, d_emb):
     sims = (q_vec @ d_emb.T).squeeze(0)
     top = sims.topk(min(K, sims.numel()))
-    return top.indices.tolist(), top.values.tolist()
+    return sims, top.indices.tolist(), top.values.tolist()
 
 
 @torch.no_grad()
@@ -109,7 +109,9 @@ def _banner(p, td, tq, sd, sq, name, split, ndcg_ok):
     print(f"\n== {name}/{split} -- the reported numbers, before you eyeball anything ==")
     print(
         f"  recall@10  docs    {recall_at_k(sd, td, K):.4f}    student vs teacher NEIGHBOURS over"
-        f" {len(p.d_ids):,} docs --\n{pad}what the tracker quotes. Teacher 1.0 by construction."
+        f" {len(p.d_ids):,} docs;\n{pad}teacher 1.0 by construction. The tracker's METRIC, not its"
+        f" number -- that one\n{pad}pools 500 mixed validation texts of the whole mix. Pool-size"
+        f" dependent,\n{pad}so read it across runs, never as an absolute."
     )
     print(f"  agree@10   queries {mean_agree:.4f}    the same, query side")
     dq, dd = _embed_dist(tq, sq), _embed_dist(td, sd)
@@ -136,9 +138,12 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
     gold = p.qrels.get(qid, {})
     tq = embed_texts(m.backend, m.teacher, m.tokenizer, m.cfg, [sent], m.device)
     sq = embed_texts(m.backend, m.student, m.tokenizer, m.cfg, [sent], m.device)
-    t_idx, t_cos = _top(tq, td)
-    s_idx, s_cos = _top(sq, sd)
-    t_rank = {j: r + 1 for r, j in enumerate(t_idx)}
+    t_sims, t_idx, t_cos = _top(tq, td)
+    _, s_idx, s_cos = _top(sq, sd)
+    t_top = set(t_idx)
+    # Rank in the teacher's FULL ranking: a swap it put 11th and one it put 4000th are not the
+    # same damage, and both sit outside its top-10.
+    t_rank = {j: int((t_sims > t_sims[j]).sum()) + 1 for j in t_top | set(s_idx)}
 
     print("\n" + "-" * 96)
     origin = f"{qid}   pool query, {len(gold)} gold" if qid else "free-form, no judgements"
@@ -146,13 +151,13 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
     for i, line in enumerate(sent.split("\n")):
         print(f"{'sent' if i == 0 else '':<7} {line}")
 
-    print("\nSTUDENT top-10        t@ = the teacher's rank of the same doc, - = outside its top-10")
+    print("\nSTUDENT top-10        t@ = the teacher's rank of the same doc, over the whole pool")
     print(f"{'rank':>4} {'cos':>6} {'t@':>4}  {'id':<8}{'document':<{SNIPPET}} mark")
     for r, (j, c) in enumerate(zip(s_idx, s_cos, strict=True), 1):
-        mark = "=" if j in t_rank else "x"
+        mark = "=" if j in t_top else "x"
         mark += "  G" if p.d_ids[j] in gold else ""
         head, *rest = _snip(p.d_texts[j])
-        print(f"{r:>4} {c:>6.4f} {t_rank.get(j, '-'):>4}  {p.d_ids[j]:<8}{head} {mark}")
+        print(f"{r:>4} {c:>6.4f} {t_rank[j]:>4}  {p.d_ids[j]:<8}{head} {mark}")
         for row in rest:
             print(f"{PAD}{row}")
 

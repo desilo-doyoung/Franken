@@ -32,6 +32,26 @@ _ROOT = common.ROOT
 _PRINT_LOCK = threading.Lock()
 
 
+def deficits(r: dict) -> dict:
+    """The derived columns, out of the f-strings so they can be checked without a GPU run. Empty
+    when a suite did not run, so callers test the dict instead of each ingredient."""
+    if any(r.get(k) is None for k in ("recall", "ndcg", "ndcg_teacher", "stsb_teacher")):
+        return {}
+    # recall@10 is already teacher-relative, so its deficit is 1 - recall.
+    recall_def = 1.0 - r["recall"]
+    ndcg_def = (r["ndcg_teacher"] - r["ndcg"]) / r["ndcg_teacher"]
+    delta = r["stsb_student"] - r["stsb_teacher"]
+    return {
+        "recall_def": recall_def,
+        "ndcg_def": ndcg_def,
+        # Undefined when the student matched the teacher.
+        "ratio": ndcg_def / recall_def if recall_def > 1e-9 else None,
+        "stsb_delta": delta,
+        # Relative to the teacher's own STS-B, the reference the claim is about.
+        "stsb_rel": 100 * delta / r["stsb_teacher"],
+    }
+
+
 def _say(msg: str) -> None:
     with _PRINT_LOCK:
         print(msg, flush=True)
@@ -148,6 +168,9 @@ def one_experiment(
         "macro_qrels": ev.get("corpus", {}).get("macro_qrels"),
         "coverage_gap": ev.get("coverage_gap"),
     }
+    # Folded in, not left to render(): otherwise the derived columns reach neither results.json
+    # nor the table once a column is demoted.
+    result |= deficits(result)
     _say(
         f"{tag}: recall@{result['k']} {result['recall']:.4f}  "
         f"nDCG@10 {result['ndcg']:.4f} (teacher {result['ndcg_teacher']:.4f})  "
@@ -158,43 +181,30 @@ def one_experiment(
     return result
 
 
-def deficits(r: dict) -> dict:
-    """The derived columns, out of the f-strings so they can be checked without a GPU run."""
-    # recall@10 is already teacher-relative, so its deficit is 1 - recall.
-    recall_def = 1.0 - r["recall"]
-    ndcg_def = (r["ndcg_teacher"] - r["ndcg"]) / r["ndcg_teacher"]
-    delta = r["stsb_student"] - r["stsb_teacher"]
-    return {
-        "recall_def": recall_def,
-        "ndcg_def": ndcg_def,
-        # Undefined when the student matched the teacher.
-        "ratio": ndcg_def / recall_def if recall_def > 1e-9 else None,
-        "stsb_delta": delta,
-        # Relative to the teacher's own STS-B, the reference the claim is about.
-        "stsb_rel": 100 * delta / r["stsb_teacher"],
-    }
+def _rel(macro: dict | None) -> str:
+    if not macro or not macro.get("teacher"):
+        return "—"
+    return f"{100 * (macro['student'] - macro['teacher']) / macro['teacher']:+.1f}%"
 
 
 def render(results: list[dict]) -> list[str]:
     """The results block, as lines. Pure: no printing, no files, no GPU."""
     ok = [r for r in results if not r.get("error")]
     out: list[str] = ["\n" + "=" * 78, "RESULTS — paste into franken/models/qwen3/PROGRESS.md\n"]
-    out.append(
-        "| run | depth | ops | recall@10 | vs teacher | nDCG@10 | vs teacher | ratio¹ "
-        "| embed_dist | STS-B | Δ teacher | relative | min |"
-    )
-    out.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    out.append("| run | depth | ops | recall@10¹ | embed_dist¹ | external² | min |")
+    out.append("|---|---|---|---|---|---|---|")
     for r in ok:
         d = deficits(r)
-        mins = f"{r['minutes']:.0f}" if r.get("minutes") else "—"
-        ratio = f"{d['ratio']:.2f}" if d["ratio"] is not None else "—"
-        out.append(
-            f"| {r['stem']} | {r['depth']} | {r['softmax']}/{r['activation']} "
-            f"| {r['recall']:.4f} | {-100 * d['recall_def']:+.1f}% "
-            f"| {r['ndcg']:.4f} | {-100 * d['ndcg_def']:+.1f}% | {ratio} "
-            f"| {r['embed_dist']:.5f} | {r['stsb_student']:.4f} "
-            f"| {d['stsb_delta']:+.4f} | {d['stsb_rel']:+.1f}% | {mins} |"
-        )
+        cells = [
+            r["stem"],
+            str(r["depth"]),
+            f"{r['softmax']}/{r['activation']}",
+            f"{r['recall']:.4f}" if r.get("recall") is not None else "—",
+            f"{r['embed_dist']:.6f}" if r.get("embed_dist") is not None else "—",
+            f"{-100 * d['ndcg_def']:+.1f}%" if d else "—",
+            f"{r['minutes']:.0f}" if r.get("minutes") else "—",
+        ]
+        out.append("| " + " | ".join(cells) + " |")
 
     # Out of the table so it stays pasteable, but listed loudly.
     for r in results:
@@ -203,28 +213,37 @@ def render(results: list[dict]) -> list[str]:
             out.append(f"\nFAILED {r['stem']}: {r['error']}{log}")
 
     out.append(
-        "\n¹ nDCG deficit ÷ recall deficit. <1 means recall@10 overstates the damage; >1 means it "
-        "understates it. Measured 1.6 for the depth-19 cut once every task is in the macro — it "
-        "read 0.08 on the old 2-task one."
+        "\n¹ both gold-free, both vs THIS teacher on the held-out validation pool. They fail "
+        "differently and that is the\n  point: recall@10 catches a moved RANKING, embed_dist "
+        "(1 − mean cosine) catches moved GEOMETRY that a\n  ranking metric can absorb. "
+        "embed_dist is also pool-size independent, where recall@10's difficulty is k/(n−1).\n"
+        "² nDCG@10 vs teacher, macro over the external tasks. In-distribution retention is not a "
+        "column because it does\n  not move — −0.2%/−0.2%/+0.1% across a 9-layer cut plus op "
+        "replacement — so the coverage gap equals this\n  column minus a constant. It stays in "
+        "results.json. The MAGNITUDE here is diluted (scifact and xpqa_cmn are\n  flat across the "
+        "same cut); read the per-task table, and calibrate against depth28_exact at +0.3%."
     )
 
-    # The macro averages domains that move in opposite directions; only this shows that.
+    # The macro averages tasks that move in opposite directions; only this shows that.
     names = sorted({t for r in ok for t in r.get("ndcg_tasks", {})})
     if names:
-        out.append(f"\nper-task nDCG@10, student (teacher) — the {len(names)} tasks in the macro\n")
+        out.append(
+            f"\nper-task external nDCG@{10}, relative to teacher — the {len(names)} tasks "
+            f"in the macro\n"
+        )
         out.append("| run | " + " | ".join(names) + " |")
         out.append("|---" * (len(names) + 1) + "|")
         for r in ok:
             cells = []
             for name in names:
                 task = r.get("ndcg_tasks", {}).get(name)
-                cells.append(f"{task['student']:.4f} ({task['teacher']:.4f})" if task else "—")
+                cells.append(_rel(task) if task else "—")
             out.append(f"| {r['stem']} | " + " | ".join(cells) + " |")
-    ndcg_teachers = {round(r["ndcg_teacher"], 4) for r in ok}
+    ndcg_teachers = {round(r["ndcg_teacher"], 4) for r in ok if r.get("ndcg_teacher")}
     if ndcg_teachers:
-        out.append(f"teacher nDCG@10: {', '.join(f'{t:.4f}' for t in sorted(ndcg_teachers))}")
+        out.append(f"\nteacher nDCG@10: {', '.join(f'{t:.4f}' for t in sorted(ndcg_teachers))}")
 
-    teachers = {round(r["stsb_teacher"], 4) for r in ok}
+    teachers = {round(r["stsb_teacher"], 4) for r in ok if r.get("stsb_teacher")}
     if teachers:
         # The teacher is deterministic, so a second value means the runs are not comparable.
         out.append(f"\nteacher STS-B: {', '.join(f'{t:.4f}' for t in sorted(teachers))}")

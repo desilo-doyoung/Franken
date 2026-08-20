@@ -10,7 +10,7 @@ K = 10  # nDCG@K and recall@K everywhere; the scale retrieval is consumed at
 
 
 def recall_at_k(student: torch.Tensor, teacher: torch.Tensor, k: int = K) -> float:
-    """Fraction of each text's top-k teacher neighbours the student also retrieves. THE selection
+    """Fraction of each text's top-k teacher neighbours the student also retrieves. THE fidelity
     metric: per-vector cosine survives a shrinkage that destroys the ranking, and vice versa.
 
     Comparable only at a FIXED pool size (difficulty is ``k/(n-1)``). Rows must be L2-normed.

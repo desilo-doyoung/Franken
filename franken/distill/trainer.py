@@ -243,7 +243,8 @@ class RangePenalty:
 
 
 class BestCheckpoint:
-    """Best-scoring student weights seen so far, by the task's own selection metric."""
+    """Best-scoring student weights seen so far, by the task's own selection metric. Scored once
+    per epoch, so at `distill.epochs: 1` there is one candidate and this selects nothing."""
 
     def __init__(self, metric_name: str, higher_is_better: bool):
         self.metric_name, self.higher_is_better = metric_name, higher_is_better
