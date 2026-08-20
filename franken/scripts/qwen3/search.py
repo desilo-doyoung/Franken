@@ -151,8 +151,13 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
     for i, line in enumerate(sent.split("\n")):
         print(f"{'sent' if i == 0 else '':<7} {line}")
 
-    print("\nSTUDENT top-10        t@ = the teacher's rank of the same doc, over the whole pool")
-    print(f"{'rank':>4} {'cos':>6} {'t@':>4}  {'id':<8}{'document':<{SNIPPET}} mark")
+    # Named s_cos/t_cos because "cos" is three different pairs in this output: within-student,
+    # within-teacher, and teacher-vs-student on one text (embed_dist, below).
+    print("\nSTUDENT top-10        s_cos = the STUDENT's own query->doc score. NOT comparable to")
+    print(f"{'':<22}t_cos below -- each model has its own cosine scale. t@ (the teacher's")
+    print(f"{'':<22}RANK of the same doc, whole pool) is the cross-model view: a rank")
+    print(f"{'':<22}survives the rescaling a raw cosine does not.")
+    print(f"{'rank':>4} {'s_cos':>6} {'t@':>4}  {'id':<8}{'document':<{SNIPPET}} mark")
     for r, (j, c) in enumerate(zip(s_idx, s_cos, strict=True), 1):
         mark = "=" if j in t_top else "x"
         mark += "  G" if p.d_ids[j] in gold else ""
@@ -165,7 +170,8 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
         (r, j, c) for r, (j, c) in enumerate(zip(t_idx, t_cos, strict=True), 1) if j not in s_idx
     ]
     if missed:
-        print(f"\nTEACHER top-10 the student missed{'':<32}cos is the TEACHER's")
+        print(f"\nTEACHER top-10 the student missed{'':<4}t_cos = the TEACHER's own scale")
+        print(f"{'rank':>4} {'t_cos':>6} {'':>4}  {'id':<8}{'document':<{SNIPPET}}")
         for r, j, c in missed:
             g = "  G" if p.d_ids[j] in gold else ""
             head, *rest = _snip(p.d_texts[j])
@@ -174,9 +180,18 @@ def _show(m, p, td, sd, sent, qid, mean_agree, ndcg_ok):
                 print(f"{PAD}{row}")
 
     hits = len(set(t_idx) & set(s_idx))
+    diff = td[s_idx[0]] - sd[s_idx[0]]
     print(
-        f"\nembed_dist  {float(_embed_dist(tq[0], sq[0])):.6f}   1-cos, teacher vs student on THIS"
-        f" query   (top-10 docs {float(_embed_dist(td[s_idx], sd[s_idx]).mean()):.6f})"
+        f"\nembed_dist  q {float(_embed_dist(tq[0], sq[0])):.6f}"
+        f"   top1 {float(_embed_dist(td[s_idx[0]], sd[s_idx[0]])):.6f}"
+        f"   top10 {float(_embed_dist(td[s_idx], sd[s_idx]).mean()):.6f}"
+        f"    1-cos, teacher vs student"
+    )
+    # mse is 1-cos in other units -- rows are unit-norm, so it is exactly 2*(1-cos)/dims. max|d| is
+    # the one the cosine cannot see: an L-inf view of the same gap.
+    print(
+        f"top1 doc    mse {float((diff**2).mean()):.3e}   max|d| {float(diff.abs().max()):.3e}"
+        f"   over {diff.numel()} dims;  mse = 2*(1-cos)/dims, so only max|d| is independent"
     )
     print(
         f"agree@10    {hits / K:.2f}   {hits} of the teacher's top-10"
