@@ -299,7 +299,12 @@ class Distiller:
         student = self.student
         if self.dist.enabled:
             student = DistributedDataParallel(
-                student, device_ids=[self.dist.local_rank], gradient_as_bucket_view=True
+                student,
+                device_ids=[self.dist.local_rank],
+                gradient_as_bucket_view=True,
+                # The default re-broadcasts every buffer from rank 0 each forward, for buffers
+                # that mutate in forward. RoPE inv_freq does not -- it is already identical.
+                broadcast_buffers=False,
             )
         return _maybe_compile(student, self.cfg), _maybe_compile(self.teacher, self.cfg)
 
@@ -355,7 +360,9 @@ class Distiller:
         batches = BatchLoader(self.cfg, self.dist, train_data, data["collator"], self.log)
         total_steps = batches.optimizer_steps * opt.epochs  # LR schedule counts OPTIMIZER steps
         lr = resolve_lr(opt, batches.global_batch, self.log)
-        optimizer = AdamW(self.student.parameters(), lr=lr, weight_decay=opt.weight_decay)
+        optimizer = AdamW(
+            self.student.parameters(), lr=lr, weight_decay=opt.weight_decay, fused=True
+        )
         warmup = min(int(total_steps * opt.warmup_ratio), MAX_WARMUP_STEPS)
         self.log(f"schedule: {total_steps:,} steps, {warmup:,} warmup")
         scheduler = get_linear_schedule_with_warmup(optimizer, warmup, total_steps)
@@ -363,7 +370,10 @@ class Distiller:
         best = BestCheckpoint(*self.task.select_metric())
 
         # Baseline before any update -- the student starts from teacher weights. Not a candidate.
-        self.log(f"init: {self.evaluate()}")
+        # Rank 0 only: `log` filtered the output, but every rank still paid for the eval.
+        if self.dist.is_main:
+            self.log(f"init: {self.evaluate()}")
+        barrier(self.dist)
 
         self.student.train()
         _apply_precision(self.cfg.train.precision)
