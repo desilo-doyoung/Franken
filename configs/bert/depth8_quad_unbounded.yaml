@@ -7,7 +7,7 @@
 # ~0.88 @8L (matches cheb@8 0.879) and ~0.89 @12L (reproduces MPCFormer 0.887).
 # A plain beta=1 gets stuck near the majority-class baseline. (An alternative
 # recovery is staged/multi-stage KD, not wired here — beta=10 matched it at 8L.)
-#   distill: uv run main.py distill --config configs/quad.yaml
+#   distill: uv run main.py distill --config configs/bert/depth8_quad_unbounded.yaml
 
 model:
   num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)

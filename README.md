@@ -59,7 +59,7 @@ franken/
     stage_distill.py op-curriculum (staged op-replacement) distillation — model-agnostic
     bert/            MRPC-specific: evaluate.py, act_range.py, seed_sweep.py
     qwen3/           corpus.py, eval.py, gates, orchestration (see its README)
-configs/<model>/     e.g. configs/bert/{default,fhe_gelu,fhe_full,quad,quad_fhe,quad_cgf_fhe}.yaml
+configs/<model>/     depth<L>_<activation>[_<range>][_cgf].yaml — see "Recipe names" below
 outputs/<model>/     teacher/, student/, stage*/ (gitignored)
 ```
 
@@ -69,15 +69,34 @@ outputs/<model>/     teacher/, student/, stage*/ (gitignored)
 uv sync                 # Python >=3.11; installs torch (CUDA), transformers, datasets, sklearn
 
 # 1. prepare the task's teacher (MRPC: fine-tune google-bert/bert-base-uncased)
-uv run python main.py train-teacher --config configs/bert/default.yaml
+uv run python main.py train-teacher --config configs/bert/depth8_exact.yaml
 # 2. distill a student (teacher_ckpt in the config points at outputs/bert/teacher)
-uv run python main.py distill --config configs/bert/default.yaml
+uv run python main.py distill --config configs/bert/depth8_exact.yaml
 # 3. evaluate teacher + student (delegates to franken/scripts/<backend>/)
-uv run python main.py eval --config configs/bert/default.yaml --ckpt outputs/bert/student
+uv run python main.py eval --config configs/bert/depth8_exact.yaml --ckpt outputs/bert/student
 ```
 
 Swap ops by editing the config (`model.softmax: cgf`, `model.activation: cheb_gelu` or `quad`, with per-op
 `*_kwargs`) and re-running `distill`, or start from a recipe in `configs/bert/`.
+
+#### Recipe names
+
+A filename names the three axes that define the experiment: `depth<L>_<activation>[_<range>][_cgf]`.
+The activation carries its degree where it has one (`cheb52`), the range term is the
+`activation_kwargs.domain` the range penalty pins to (`dom32`) or `unbounded` when there is no penalty,
+and the softmax is only named when it departs from exact. So:
+
+| config | layers | activation | output range | softmax | MRPC test F1 |
+|---|:-:|---|---|---|:-:|
+| `depth8_exact.yaml` | 8 | exact GELU | unbounded | exact | 0.883 |
+| `depth8_quad_unbounded.yaml` | 8 | quad (mult-depth 1) | unbounded (~700) | exact | 0.881 |
+| `depth8_quad_dom32.yaml` | 8 | quad | dom 32 (~120) | exact | 0.874 |
+| `depth8_cheb52_dom32.yaml` | 8 | cheb GELU deg 52 (depth ~6) | dom 32 (~30) | exact | 0.879 |
+| `depth8_quad_dom32_cgf.yaml` | 8 | quad | dom 32 | **cgf** | 0.873 (op-curriculum) |
+| `depth8_cheb52_dom32_cgf.yaml` | 8 | cheb GELU deg 52 | dom 32 | **cgf** | 0.866 |
+
+`beta` and the distill epoch count follow the activation, not the name: quad needs `beta: 10` and 12
+epochs, cheb and exact train at `beta: 1` / 6 epochs. Same scheme as `configs/qwen3/depth19_quad.yaml`.
 
 ### Qwen3-Embedding track
 
@@ -116,10 +135,10 @@ the teacher, so every delta must read ~0.
 # Op-curriculum: distill the easier op set first, then warm-start and swap in the harder op.
 # Helps when two aggressive ops interact (e.g. quad GELU + cgf softmax); see PROGRESS.md.
 uv run python -m franken.scripts.stage_distill \
-  --config-a configs/bert/quad_fhe.yaml --config-b configs/bert/quad_cgf_fhe.yaml
+  --config-a configs/bert/depth8_quad_dom32.yaml --config-b configs/bert/depth8_quad_dom32_cgf.yaml
 
 # Verify a polynomial-op student stays in-domain (FHE self-containment) + write a histogram.
-uv run python -m franken.scripts.bert.act_range --config configs/bert/quad_cgf_fhe.yaml \
+uv run python -m franken.scripts.bert.act_range --config configs/bert/depth8_quad_dom32_cgf.yaml \
   --student-ckpt outputs/bert/stageB_quad_cgf/pytorch_model.bin --out preact.png
 ```
 

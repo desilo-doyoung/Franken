@@ -3,7 +3,7 @@ and the activation output range. Self-contained means every pre-activation stays
 so the deployed bare poly is never fed out-of-domain. Also writes a histogram PNG.
 
 Usage:
-    python -m franken.scripts.bert.act_range --config configs/bert/quad_cgf_fhe.yaml \
+    python -m franken.scripts.bert.act_range --config configs/bert/depth8_quad_dom32_cgf.yaml \
         --out preact.png
 """
 
@@ -24,7 +24,7 @@ from franken.tasks import build_task
 @torch.no_grad()
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="configs/bert/quad_cgf_fhe.yaml")
+    p.add_argument("--config", default="configs/bert/depth8_quad_dom32_cgf.yaml")
     p.add_argument("--student-ckpt", default=None)
     p.add_argument("--splits", nargs="+", default=["validation", "test"])
     p.add_argument("--batch-size", type=int, default=64)

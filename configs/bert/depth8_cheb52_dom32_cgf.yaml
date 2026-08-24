@@ -1,7 +1,7 @@
-# Depth-6 FHE-friendly GELU student: 8 layers + Chebyshev-GELU (domain 32, deg 52)
-# held in-domain by the squash penalty. Softmax left exact (swap to cgf separately).
-# Same teacher/optim as default.yaml; only the student op + range penalty differ.
-#   distill: uv run main.py distill --config configs/fhe_gelu.yaml
+# Full HE-friendly student: 8 layers + Chebyshev-GELU (domain 32, deg 52, held
+# in-domain by the squash penalty) + CGF softmax. All three student ops are
+# FHE-friendly. MRPC test F1 ~0.866 (teacher 0.881), self-contained ~[-31, 25].
+#   distill: uv run main.py distill --config configs/bert/depth8_cheb52_dom32_cgf.yaml
 
 model:
   num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
@@ -10,10 +10,10 @@ model:
   intermediate_size: 3072
   num_labels: 2
 
-  softmax: exact # exact | cgf (CGF softmax, FHE-friendly)
+  softmax: cgf # CGF (cumulant) softmax, FHE-friendly
   softmax_kwargs: {}
   activation: cheb_gelu # degree-52 Chebyshev GELU, FHE mult-depth ~6
-  activation_kwargs: {degree: 52, domain: 32} # self-contains observed acts ~[-30, 22]
+  activation_kwargs: {degree: 52, domain: 32} # self-contains observed acts ~[-31, 25]
 
 distill:
   alpha: 0.5 # weight on logit KL vs hard-label CE

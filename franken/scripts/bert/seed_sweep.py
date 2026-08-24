@@ -6,7 +6,7 @@ DataParallel would change the effective batch size and break bit-reproducibility
 
 Usage:
     # Orchestrate across GPUs 2 and 3 (default):
-    uv run python -m franken.scripts.bert.seed_sweep --config configs/bert/default.yaml \
+    uv run python -m franken.scripts.bert.seed_sweep --config configs/bert/depth8_exact.yaml \
         --seeds 42-51 --gpus 2,3 --sweep-dir outputs/bert/seed_sweep \
         --student-out outputs/bert/student
 """
@@ -376,7 +376,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # orchestrate is the default when no subcommand is given.
     def add_common(sp):
-        sp.add_argument("--config", default="configs/bert/default.yaml")
+        sp.add_argument("--config", default="configs/bert/depth8_exact.yaml")
         sp.add_argument("--seeds", default="42-51", help="e.g. '42-51' or '42,43,44'")
         sp.add_argument("--sweep-dir", default="outputs/bert/seed_sweep")
 

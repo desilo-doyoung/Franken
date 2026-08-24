@@ -1,21 +1,22 @@
-# FHE-safe depth-1 GELU: MPCFormer quadratic (0.125x^2+0.25x+0.5) with its output
-# dynamic range bounded. The quad's x^2 amplifies (output ~700 unbounded), so the
-# range penalty squashes pre-activations into [-domain, domain] -> output ~0.125*domain^2.
+# Full FHE-friendly student (minimal mult-depth GELU): 8 layers + MPCFormer
+# quadratic GELU (0.125x^2+0.25x+0.5, degree 2 / mult-depth 1) with its output
+# bounded by the range penalty (domain 32) + CGF softmax. All student ops are
+# FHE-friendly and the GELU is the cheapest possible (depth 1) rather than the
+# deg-52 cheb_gelu used in depth8_cheb52_dom32_cgf.yaml (mult-depth ~6).
 #
-# Verified (MRPC test): F1 ~0.874, self-contained (pre-act ~[-24, 30] <= 32),
-# max quad output ~120 (below the teacher's own GELU output of 143). vs unbounded
-# quad 0.881/out~700, and cheb_gelu 0.879/out~30/depth-6. This is the minimal-depth
-# (mult-depth 1) FHE GELU; cheb_gelu trades +1pt accuracy & tighter range for depth 6.
-#   distill: uv run main.py distill --config configs/quad_fhe.yaml
+# Companion to depth8_cheb52_dom32_cgf.yaml (8L + cheb_gelu + cgf, test F1
+# ~0.866). This swaps cheb_gelu -> quad to trade GELU accuracy/range for minimal
+# mult-depth. Best full-FHE stack via op-curriculum: test F1 ~0.873.
+#   distill: uv run main.py distill --config configs/bert/depth8_quad_dom32_cgf.yaml
 
 model:
-  num_hidden_layers: 8
-  hidden_size: 768
+  num_hidden_layers: 8 # layer reduction: 12 (teacher) -> 8 (student)
+  hidden_size: 768 # same width as teacher (no hidden-MSE projection)
   num_attention_heads: 12
   intermediate_size: 3072
   num_labels: 2
 
-  softmax: exact # exact | cgf (add cgf for the full HE stack)
+  softmax: cgf # CGF (cumulant) softmax, FHE-friendly
   softmax_kwargs: {}
   activation: quad # MPCFormer quadratic GELU (degree 2, FHE mult-depth 1)
   activation_kwargs: {domain: 32} # exposes domain -> range penalty squashes pre-acts into [-32, 32]

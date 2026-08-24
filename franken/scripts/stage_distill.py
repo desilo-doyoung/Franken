@@ -4,8 +4,8 @@ The configs may differ in ANY op. Verified on MRPC test: quad+cgf 0.845 single-s
 
 Usage:
     python -m franken.scripts.stage_distill \
-        --config-a configs/bert/quad_fhe.yaml \
-        --config-b configs/bert/quad_cgf_fhe.yaml \
+        --config-a configs/bert/depth8_quad_dom32.yaml \
+        --config-b configs/bert/depth8_quad_dom32_cgf.yaml \
         [--skip-stagea] [--stageb-lr 3e-5] [--stageb-epochs 8]
 """
 
@@ -28,8 +28,8 @@ def _save(student, out_dir):
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config-a", default="configs/bert/quad_fhe.yaml")
-    p.add_argument("--config-b", default="configs/bert/quad_cgf_fhe.yaml")
+    p.add_argument("--config-a", default="configs/bert/depth8_quad_dom32.yaml")
+    p.add_argument("--config-b", default="configs/bert/depth8_quad_dom32_cgf.yaml")
     p.add_argument(
         "--stagea-dir",
         default=None,

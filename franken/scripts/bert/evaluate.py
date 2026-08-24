@@ -2,7 +2,7 @@
 `test` split ships with public labels, so both splits score locally.
 
 Usage:
-    python -m franken.scripts.bert.evaluate --config configs/bert/default.yaml
+    python -m franken.scripts.bert.evaluate --config configs/bert/depth8_exact.yaml
     python -m franken.scripts.bert.evaluate --models student --splits validation test
     python -m franken.scripts.bert.evaluate \
         --student-ckpt outputs/bert/student/pytorch_model.bin --splits test
@@ -53,7 +53,9 @@ def build_loaders(tokenizer, task, splits, max_seq_len, batch_size):
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "--config", default="configs/bert/default.yaml", help="config (student arch + teacher_ckpt)"
+        "--config",
+        default="configs/bert/depth8_exact.yaml",
+        help="config (student arch + teacher_ckpt)",
     )
     p.add_argument(
         "--student-ckpt",

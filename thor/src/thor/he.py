@@ -1430,7 +1430,7 @@ class HE:
             gelu_input[1, index] = self.multiply_1j(self.subtract(conj, temp))
 
         # MPCFormer quadratic GELU: quad(z) = 0.125 z^2 + 0.25 z + 0.5 = 0.125*z*(z+2) + 0.5,
-        # mult-depth 1 vs the deep tanh path above (student trained with it, quad_fhe.yaml).
+        # mult-depth 1 vs the deep tanh path above (student trained with it, depth8_quad_dom32.yaml).
         # gelu_input is the pre-activation at 1/64 scale, so recover z = 64*x and return
         # true-scale quad(z) (stage_14's 1/64 weights expect it). See EXECUTION_NOTES.md §2.
         output = np.full((2, 8), None, dtype=object)
