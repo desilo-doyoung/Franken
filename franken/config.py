@@ -186,6 +186,10 @@ def _model_config_cls(backend: str) -> type[ModelConfig]:
         from franken.models.qwen3.config import Qwen3ModelConfig
 
         return Qwen3ModelConfig
+    if backend == "llama":
+        from franken.models.llama.config import LlamaModelConfig
+
+        return LlamaModelConfig
     return ModelConfig
 
 

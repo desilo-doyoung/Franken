@@ -1,6 +1,6 @@
 # Qwen3-Embedding-0.6B exact-op baseline: the reference point every FHE config is
 # measured against. Full teacher depth (28) + exact softmax + exact SiLU, so the
-# student is mathematically the teacher — used by scripts/qwen3/parity_gate.py to
+# student is mathematically the teacher — used by franken.scripts.parity_gate to
 # prove the from-scratch modules are correct before any op is approximated, and
 # then as the exact-op distillation smoke test.
 #
@@ -9,7 +9,7 @@
 # intermediate 3072, rope_theta 1e6, vocab 151669), so a wrong dim fails loudly at
 # weight-load rather than silently training a mismatched skeleton.
 #
-#   parity: uv run python scripts/qwen3/parity_gate.py --config configs/qwen3/gate_parity.yaml
+#   parity: uv run python -m franken.scripts.parity_gate --config configs/qwen3/gate_parity.yaml
 #   distill: uv run python main.py distill --config configs/qwen3/gate_parity.yaml
 
 model:

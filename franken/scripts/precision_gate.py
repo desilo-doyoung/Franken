@@ -4,7 +4,7 @@ It is safe only because the residual stream (= hidden_states, the hidden-loss in
 under autocast. That is load-bearing, so assert it, plus the two things that would break it
 silently: RoPE staying fp32, and the teacher staying out of the autocast region.
 
-    uv run python -m franken.scripts.qwen3.precision_gate --config configs/qwen3/gate_precision.yaml
+    uv run python -m franken.scripts.precision_gate --config configs/llama/gate_precision.yaml
 """
 
 import argparse
@@ -86,7 +86,9 @@ def check_teacher_exclusion(backend, teacher, task, cfg, device):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="configs/qwen3/gate_precision.yaml")
+    # Required, not defaulted: this gate is backend-agnostic, so a default would silently
+    # score whichever model the default names.
+    p.add_argument("--config", required=True, help="path to the experiment YAML")
     args = p.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)

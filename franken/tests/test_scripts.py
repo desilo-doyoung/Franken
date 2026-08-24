@@ -6,15 +6,16 @@ import pytest
 from franken.cli import _EVALUATOR
 
 SCRIPTS = [
+    # backend-agnostic, so they live at the scripts root
     "franken.scripts.stage_distill",
+    "franken.scripts.parity_gate",
+    "franken.scripts.precision_gate",
     "franken.scripts.bert.act_range",
     "franken.scripts.bert.evaluate",
     "franken.scripts.bert.seed_sweep",
     "franken.scripts.qwen3.act_range",
     "franken.scripts.qwen3.corpus",
     "franken.scripts.qwen3.eval",
-    "franken.scripts.qwen3.parity_gate",
-    "franken.scripts.qwen3.precision_gate",
     "franken.scripts.qwen3.run_experiments",
     "franken.scripts.qwen3.search",
 ]

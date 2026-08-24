@@ -9,8 +9,8 @@ evaluate under homomorphic encryption / MPC. Three customizations are first-clas
 2. **Softmax approximation** — swap exact attention softmax for an HE-friendly op (`cgf`).
 3. **Polynomial activation** — swap GELU for a low-degree polynomial (`cheb_gelu`, `quad`).
 
-Two models are implemented: BERT ← `google-bert/bert-base-uncased` on GLUE **MRPC** (the reference
-track), and **Qwen3-Embedding-0.6B** embedding self-distillation.
+Three models are implemented: BERT ← `google-bert/bert-base-uncased` on GLUE **MRPC** (the reference
+track), and **Qwen3-Embedding-0.6B** plus **Llama-3.2-1B** embedding self-distillation.
 
 ## Architecture
 
@@ -49,16 +49,18 @@ franken/
   config.py          dataclass config + YAML loader (model.backend, train.task, train.run_name)
   paths.py           RunPaths — outputs namespaced per model: outputs/<run_name or backend>/...
   ops/               swappable-op registry: softmax (exact|cgf), activation (exact|cheb_gelu|quad)
-  models/            base.py = ModelBackend ABC + build_backend registry; bert/, qwen3/
+  models/            base.py = ModelBackend ABC + build_backend registry; bert/, qwen3/, llama/
   tasks/             base.py = Task ABC + build_task registry; mrpc.py, embed.py
   distill/           layer_map, masked_mse_loss, Distiller (backend + task driven)
   data/              mrpc.py, embed_corpus/ (the embedding corpus + its eval pools; see its README)
   cli.py             train-teacher | distill | eval
   tests/             pure-unit tests; `uv run pytest`
   scripts/           run as `python -m franken.scripts.<...>`, never by file path
-    stage_distill.py op-curriculum (staged op-replacement) distillation — model-agnostic
+    stage_distill.py  op-curriculum (staged op-replacement) distillation — model-agnostic
+    parity_gate.py    from-scratch student must BE the teacher — model-agnostic
+    precision_gate.py is `precision: bf16` safe here? — model-agnostic
     bert/            MRPC-specific: evaluate.py, act_range.py, seed_sweep.py
-    qwen3/           corpus.py, eval.py, gates, orchestration (see its README)
+    qwen3/           embed track: corpus.py, eval.py, act_range.py, orchestration (see its README)
 configs/<model>/     depth<L>_<activation>[_<range>][_cgf].yaml — see "Recipe names" below
 outputs/<model>/     teacher/, student/, stage*/ (gitignored)
 ```

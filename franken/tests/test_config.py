@@ -5,6 +5,7 @@ import pytest
 
 from franken.config import Config, OptimConfig
 from franken.models.bert.config import BertModelConfig
+from franken.models.llama.config import LlamaModelConfig
 from franken.models.qwen3.config import Qwen3ModelConfig
 from franken.paths import RunPaths
 
@@ -26,7 +27,8 @@ def test_every_shipped_config_loads(path):
 
 
 @pytest.mark.parametrize(
-    ("backend", "expected"), [("bert", BertModelConfig), ("qwen3", Qwen3ModelConfig)]
+    ("backend", "expected"),
+    [("bert", BertModelConfig), ("qwen3", Qwen3ModelConfig), ("llama", LlamaModelConfig)],
 )
 def test_backend_selects_its_model_config_subclass(backend, expected):
     cfg = Config.from_dict({"model": {"backend": backend}})

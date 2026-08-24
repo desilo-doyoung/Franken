@@ -7,12 +7,14 @@ source of truth. Training itself is `main.py distill`, not here.
 |---|---|
 | `corpus.py` | is the holdout sound, is every source scoreable, what is `corpus_size` — and build the cache |
 | `eval.py` | how much did the student lose, and is it coverage or capacity? |
-| `parity_gate.py` | is the from-scratch student still bit-equal to the teacher? |
-| `precision_gate.py` | is `precision: bf16` safe for this architecture? |
 | `act_range.py` | what range do the FHE operators actually see? |
 | `search.py` | what does the student actually retrieve for this query, and where did it differ from the teacher? |
 | `run_experiments.py` | all of the above over many configs, into one markdown table |
 | `common.py` | shared: path bootstrap, flags, `load()` (teacher+student), nDCG scoring |
+
+The two correctness gates are **not** here — they are backend-agnostic and live at the scripts
+root, alongside `stage_distill.py`: `franken.scripts.parity_gate` and
+`franken.scripts.precision_gate`. Both are documented under "Correctness gates" below.
 
 ## The whole workflow
 
@@ -43,8 +45,9 @@ uv run python main.py eval    --config $CFG [--ckpt outputs/<run>/student]
 ```
 
 `--config` is **required**, never defaulted — the config decides what is measured, these scripts cost
-minutes to hours, and a wrong default is silent. (`parity_gate` and `precision_gate` are the
-exceptions: each is only meaningful for one config, so they keep theirs.)
+minutes to hours, and a wrong default is silent. The two gates used to be exceptions, on the grounds
+that each was only meaningful for one config; that stopped being true once they served more than one
+backend, so they now require `--config` like everything else.
 
 Pass only cards you own — `--devices` becomes `CUDA_VISIBLE_DEVICES` per subprocess, and a co-tenant's
 idle GPU is not free capacity. `--ddp` instead spreads one config across all devices; the default queue
@@ -61,7 +64,7 @@ DEV=2                                    # a card you own
 CFG=configs/qwen3/depth19_quad.yaml
 
 # 1. env, CUDA, model download, and the student still bit-equal to the teacher  (~2 min)
-uv run python -m franken.scripts.qwen3.parity_gate --config configs/qwen3/gate_parity.yaml
+uv run python -m franken.scripts.parity_gate --config configs/qwen3/gate_parity.yaml
 
 # 2. the real corpus gates: all 18 sources load, all are scoreable, tok/text measured (~40 min,
 #    and its HF downloads are exactly the ones the real build reuses, so this is not wasted)
@@ -154,18 +157,26 @@ unlabelled metrics.
 
 ## Correctness gates
 
-**`parity_gate.py`** — exact ops + full depth + teacher weights ⇒ the student *is* the teacher, so any
-gap is a module bug (RoPE/QK-norm order, `repeat_kv`, causal+pad mask, `hidden_states` bookkeeping),
-not float noise. Passes at pooled cosine 1.0.
+**`franken.scripts.parity_gate`** — exact ops + full depth + teacher weights ⇒ the student *is* the
+teacher, so any gap is a module bug (RoPE scaling, QK-norm order, `repeat_kv`, causal+pad mask,
+`rms_norm_eps`, `hidden_states` bookkeeping), not float noise. Passes on **two** criteria: pooled
+cosine > `COS_THRESHOLD` **and** worst hidden relative RMS <= `MAX_REL`.
 
 - ⚠️ **Fails by design on FHE configs** (`cgf`, polynomial activation) — it is an exact-op gate.
-- ⚠️ **Judge hidden deltas in ULPs.** `|Δ|max` lands on layer 3's massive-activation channel where one
-  fp32 ULP is ~5e-4, so 9.8e-4 is 2 ULP of summation-order noise.
+- ⚠️ **Cosine is not sufficient on its own**, which is why `MAX_REL` gates too. A dropped llama3 rope
+  scaling and an `rms_norm_eps` of 1e-6-instead-of-1e-5 both scored **0.99998** — inside
+  `COS_THRESHOLD` — while reading 4.1e-3 and 2.5e-2 relative RMS against a 1.5e-6 baseline.
+- The verdict is **relative RMS per hidden entry**, normalized by the teacher tensor's own scale.
+  This replaced a ULP-normalized `|Δ|max`, which divided by the magnitude of whichever element the
+  argmax happened to hit: Qwen3's 41x *larger* `|Δ|max` scored 2 ULP where a correct Llama scored
+  100. Correct ports now read 1.5e-6 (llama 16L) and 1.7e-6 (qwen3 28L) — within 14% of each other.
+- On failure the per-entry profile is printed, and its *shape* localizes the bug: the `rms_norm_eps`
+  fault spiked at entry 1 and settled, the rope fault was diffuse across every entry.
 - The comparison covers **real tokens only**, with the raw pad-inclusive max printed alongside:
   `attn_impl: sdpa_causal` leaves garbage at pad positions on purpose and nothing reads them, but a
   broken pad mask still shows up in the raw column.
 
-**`precision_gate.py`** — three assertions that bf16's safety argument holds: RoPE cos/sin stay fp32
+**`franken.scripts.precision_gate`** — three assertions that bf16's safety argument holds: RoPE cos/sin stay fp32
 inside an autocast region, all 29 `hidden_states` stay fp32, and a bf16 teacher moves the targets by
 more than the comparison band. The third **passes when the bf16 teacher DISAGREES** — that proves
 keeping the teacher out of the autocast region is load-bearing.

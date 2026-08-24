@@ -1,16 +1,18 @@
 """With exact ops, full depth and teacher weights, the from-scratch student must BE the teacher.
 Any gap is a module bug, not float noise, and every later FHE measurement assumes it is zero.
 
+Pooled cosine alone does NOT settle it -- a dropped llama3 rope scaling and a wrong rms_norm_eps
+both scored 0.99998, i.e. inside COS_THRESHOLD -- so the hidden-state relative error gates too.
+
 Fails by design on FHE configs -- it is an exact-op gate.
 
 Usage:
-    uv run python -m franken.scripts.qwen3.parity_gate --config configs/qwen3/gate_parity.yaml
+    uv run python -m franken.scripts.parity_gate --config configs/llama/gate_parity.yaml
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 
 import torch
@@ -21,7 +23,12 @@ from franken.models import build_backend
 from franken.tasks import build_task
 
 COS_THRESHOLD = 0.9999
-MAX_ULP = 16  # accumulated summation-order noise over 28 layers; a bug is orders larger
+# Per-entry relative RMS error against the teacher tensor's OWN scale, the shape
+# `distill.loss.masked_relative_mse_loss` uses. Calibrated at both ends: correct ports read
+# 1.5e-6 (llama 16L) and 1.7e-6 (qwen3 28L), while a dropped llama3 rope scaling reads 4.1e-3
+# and rms_norm_eps 1e-6-instead-of-1e-5 reads 2.5e-2. 1e-4 is ~60x above the noise, ~40x under
+# the weakest injected bug.
+MAX_REL = 1e-4
 
 # Mixed lengths on purpose: real padding exercises the pad mask and the pooling index.
 PROBE_TEXTS = [
@@ -36,7 +43,9 @@ PROBE_TEXTS = [
 @torch.no_grad()
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--config", default="configs/qwen3/gate_parity.yaml")
+    # Required, not defaulted: this gate is backend-agnostic, so a default would silently
+    # score whichever model the default names.
+    p.add_argument("--config", required=True, help="path to the experiment YAML")
     args = p.parse_args(argv)
 
     cfg = Config.from_yaml(args.config)
@@ -89,16 +98,22 @@ def main(argv: list[str] | None = None) -> int:
         f"on real tokens (raw incl. pad {raw:.3e})"
     )
 
-    # |Δ|max lands on massive-activation channels where one fp32 ULP is ~5e-4 absolute, so
-    # measure it in ULPs: a few is summation-order noise, orders more is a logic bug.
-    worst = max(range(len(th)), key=lambda i: dmaxes[i])
-    d = (sh[worst] - th[worst]).abs() * keep
-    at = th[worst].flatten()[d.argmax()].abs().item()
-    ulp = math.ldexp(1.0, math.frexp(at)[1] - 24) if at else float("inf")
+    # Relative to each entry's own scale. |Δ|max cannot separate a bug from rounding (it carries
+    # the stream's magnitude), and normalizing it by the ULP at its argmax normalizes by whatever
+    # value happens to sit there -- qwen3's 41x LARGER |Δ|max scored 2 ULP where llama scored 100.
+    rels = []
+    for a, b in zip(sh, th, strict=True):
+        den = ((b * keep) ** 2).sum().item()
+        rels.append(((((a - b) * keep) ** 2).sum().item() / den) ** 0.5 if den else 0.0)
+    worst = max(range(len(rels)), key=lambda i: rels[i])
+    rel_ok = rels[worst] <= MAX_REL
     print(
-        f"  worst: entry {worst} on |teacher|={at:.6g} -> {d.max().item() / ulp:.1f} ULP "
-        f"({'rounding' if d.max().item() / ulp <= MAX_ULP else 'CHECK THIS'})"
+        f"  worst relative RMS: {rels[worst]:.3e} at entry {worst} of {len(rels) - 1} "
+        f"({'rounding' if rel_ok else 'CHECK THIS'}, threshold {MAX_REL:g})"
     )
+    # Only on failure: a module bug concentrates in the entries after it, fp32 noise does not.
+    if not rel_ok:
+        print("  profile: " + " ".join(f"{r:.1e}" for r in rels))
 
     acts = backend.activation_ops(student)
     print(
@@ -106,8 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         f"{type(acts[0]).__name__} domain={getattr(acts[0], 'domain', None)}"
     )
 
-    ok = cos.min().item() > COS_THRESHOLD
-    print(f"PARITY GATE {'PASSED' if ok else 'FAILED'} (threshold {COS_THRESHOLD})\n")
+    ok = cos.min().item() > COS_THRESHOLD and rel_ok
+    print(
+        f"PARITY GATE {'PASSED' if ok else 'FAILED'} "
+        f"(cosine > {COS_THRESHOLD}, relative RMS <= {MAX_REL:g})\n"
+    )
     return 0 if ok else 1
 
 

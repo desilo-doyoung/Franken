@@ -11,11 +11,13 @@ from __future__ import annotations
 
 from franken.models.base import ModelBackend
 from franken.models.bert.backend import BertBackend
+from franken.models.llama.backend import LlamaBackend
 from franken.models.qwen3.backend import Qwen3Backend
 
 BACKENDS: dict[str, type[ModelBackend]] = {
     "bert": BertBackend,
     "qwen3": Qwen3Backend,
+    "llama": LlamaBackend,
 }
 
 

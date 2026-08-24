@@ -1,4 +1,4 @@
-# Default config for scripts/qwen3/precision_gate.py: asserts the residual stream stays fp32 under
+# Config for franken.scripts.precision_gate: asserts the residual stream stays fp32 under
 # bf16 autocast (all 29 hidden entries, plus RoPE cos/sin), which is what makes bf16 safe for the
 # hidden-MSE term. Full depth + exact ops, so the student is mathematically the teacher.
 #

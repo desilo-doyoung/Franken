@@ -1,0 +1,59 @@
+# Llama-3.2-1B exact-op baseline: the reference point every FHE config is measured
+# against. Full teacher depth (16) + exact softmax + exact SiLU, so the student is
+# mathematically the teacher — used by franken.scripts.parity_gate (backend-agnostic)
+# to prove the from-scratch modules are correct before any op is approximated.
+#
+# Only depth + ops live here: every architecture dim is a LlamaModelConfig default
+# matching the checkpoint (hidden 2048, 32 q / 8 kv heads, head_dim 64,
+# intermediate 8192, rope_theta 5e5 + llama3 scaling, vocab 128256), so a wrong dim
+# fails loudly at weight-load rather than silently training a mismatched skeleton.
+#
+#   parity: uv run python -m franken.scripts.parity_gate \
+#             --config configs/llama/gate_parity.yaml
+#   distill: uv run python main.py distill --config configs/llama/gate_parity.yaml
+
+model:
+  backend: llama
+  num_hidden_layers: 16 # full teacher depth — no reduction in the baseline
+
+  softmax: exact # exact | cgf (CGF softmax, FHE-friendly)
+  softmax_kwargs: {}
+  activation: silu # Llama's SwiGLU nonlinearity is SiLU, NOT GELU
+  activation_kwargs: {}
+
+distill:
+  # alpha / temperature are classification-KD knobs (logit KL) and are unused by the
+  # embedding task — it has no logits. The embed loss is embedding match + hidden MSE.
+  beta: 1.0 # weight on hidden-state MSE
+  hidden_layer_map: null # null -> auto uniform stride from teacher/student depths (identity at 16)
+  range_penalty: 0.0 # off: exact SiLU has no bounded domain to squash into
+
+train:
+  # Ungated mirror, sha256-identical to NousResearch's copy; meta-llama/Llama-3.2-1B is
+  # manually gated and 403s for this account. Also ships the pad token the base repo omits.
+  teacher_model: unsloth/Llama-3.2-1B
+  teacher_ckpt: null # pretrained checkpoint IS the teacher (no fine-tune)
+  task: embed # embedding self-distillation (no labels)
+  corpus: mixed # 20% instruct-prefixed queries / 40% MS MARCO passages / 40% wikitext-103
+  tokens_per_epoch: 140_000
+  output_dir: outputs
+  run_name: llama_gate_parity
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  # No teacher phase for self-distillation; the block stays at its defaults so the
+  # config schema is complete.
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 1.0e-5
+    epochs: 3
+    batch_size: 4 # 1.24B teacher + student both resident in fp32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
