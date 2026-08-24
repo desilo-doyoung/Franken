@@ -14,6 +14,8 @@ AGENT.md
 CLAUDE.md
 PROGRESS.md
 EXECUTION_NOTES.md
+# guards the ignored trackers above, so it has no subject in a fresh clone
+franken/tests/test_progress_docs.py
 
 light_plaintexts/
 outputs/
