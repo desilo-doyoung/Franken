@@ -5,6 +5,7 @@ import pytest
 from franken.data.embed_corpus.spec import (
     SPLIT_PCT,
     SPLITS,
+    WEB_SEARCH,
     Record,
     corpus_texts,
     eval_pair,
@@ -42,6 +43,14 @@ def test_split_pct_are_per_split_not_cumulative():
 
 def test_instruct_matches_the_checkpoint_wire_format():
     assert instruct("Given a query", "cats") == "Instruct: Given a query\nQuery:cats"
+
+
+def test_the_web_search_task_string_is_pinned():
+    # Baked into cached corpus text and into every pool's q_texts: a one-character edit
+    # invalidates the corpus cache and all 18 pool JSONs, silently.
+    assert WEB_SEARCH == (
+        "Given a web search query, retrieve relevant passages that answer the query"
+    )
 
 
 def test_instruct_leaves_a_symmetric_query_bare():
