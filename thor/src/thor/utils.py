@@ -6,6 +6,8 @@ from safetensors.torch import load_file as load_safetensors
 from torch import nn
 from transformers import BertConfig, BertForSequenceClassification
 
+from .model_config import DEPLOYMENT, NUM_LAYERS
+
 
 def load_bert_config(model_dir: Path) -> BertConfig:
     """Build an HF BertConfig from the model's config.json.
@@ -50,6 +52,14 @@ def load_model(data_type: str, model_path: str, type: str = "default"):
     """
     model_path = Path(model_path)
     config = load_bert_config(model_path.parent)
+    if config.num_hidden_layers != NUM_LAYERS:
+        # The HE side bakes NUM_LAYERS into its loop and its encoding; a mismatch reads as a
+        # missing layer_* dir mid-forward, or silently scores two different models (§6).
+        raise ValueError(
+            f"{model_path.parent} has {config.num_hidden_layers} layers but model_config."
+            f"DEPLOYMENT={DEPLOYMENT!r} expects {NUM_LAYERS}. Pick the matching build or repoint "
+            f"distilled-model."
+        )
     model = BertForSequenceClassification(config)
     model.load_state_dict(load_safetensors(str(model_path)))
     model.eval()

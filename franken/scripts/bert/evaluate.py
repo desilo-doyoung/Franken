@@ -70,6 +70,9 @@ def main(argv: list[str] | None = None) -> None:
         help="which models to evaluate",
     )
     p.add_argument("--splits", nargs="+", default=["validation", "test"])
+    p.add_argument(
+        "--max-seq-len", type=int, default=None, help="override cfg.train.max_seq_len (truncation)"
+    )
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--device", default="cuda")
     args = p.parse_args(argv)
@@ -79,7 +82,8 @@ def main(argv: list[str] | None = None) -> None:
     backend = build_backend(cfg.model.backend)
     task = build_task(cfg.train.task)
     tokenizer = task.build_tokenizer(cfg)
-    loaders = build_loaders(tokenizer, task, args.splits, cfg.train.max_seq_len, args.batch_size)
+    max_seq_len = args.max_seq_len or cfg.train.max_seq_len
+    loaders = build_loaders(tokenizer, task, args.splits, max_seq_len, args.batch_size)
 
     models = {}
     if "teacher" in args.models:
@@ -90,7 +94,8 @@ def main(argv: list[str] | None = None) -> None:
         student.load_state_dict(torch.load(sc, map_location=device))
         models["student"] = student.to(device)
 
-    print(f"\n{'model':10s}{'split':13s}{'accuracy':>10s}{'f1':>9s}")
+    print(f"\nmax_seq_len={max_seq_len}")
+    print(f"{'model':10s}{'split':13s}{'accuracy':>10s}{'f1':>9s}")
     print("-" * 42)
     for name, model in models.items():
         for split, dl in loaders.items():

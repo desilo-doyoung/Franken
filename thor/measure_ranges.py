@@ -6,7 +6,7 @@ report per encoder layer:
   - layernorm: max per-token variance of the 2nd-LayerNorm input (output_dense +
                layernorm_1_output), across the hidden dim, per valid token
 
-and suggest SOFTMAX2_LAYERS / WIDE_LAYERNORM_LAYERS for thor/src/thor/model_config.py.
+and suggest a _BUILDS entry for thor/src/thor/model_config.py.
 
 Domain references (thor/src/thor/he.py):
   he_softmax1 [-27, 22]   he_softmax2 [-70, 70]
@@ -165,10 +165,14 @@ def main() -> None:
         f"\nSOFTMAX verdict: {'PASS' if sm_ok else 'FAIL'} — every layer's score range fits its assigned exp domain"
         + ("" if sm_ok else f"; layers {over_sm2} exceed he_softmax2's [-70,70]!")
     )
-    print("\n# suggested thor/src/thor/model_config.py (move any layer that detonates at")
-    print("# runtime from SOFTMAX2_LAYERS to SOFTMAX3_LAYERS — see he_inv notes)")
-    print(f"SOFTMAX2_LAYERS       = frozenset({set(wide_softmax) if wide_softmax else set()})")
-    print(f"WIDE_LAYERNORM_LAYERS = frozenset({set(wide_ln) if wide_ln else set()})")
+    print("\n# suggested _BUILDS entry for thor/src/thor/model_config.py. softmax3 starts empty:")
+    print("# it is NOT predictable from ranges, so move any layer that detonates at runtime out of")
+    print("# softmax2 and into softmax3 (he_inv overshoot, EXECUTION_NOTES.md §5) — a single clean")
+    print("# forward is not enough to clear it, the divergences only show up across a batch.")
+    print(
+        f'    "<recipe_name>": Build({nL}, frozenset({set(wide_softmax) if wide_softmax else ""}), '
+        f"frozenset(), frozenset({set(wide_ln) if wide_ln else ''})),"
+    )
     if over_ln:
         print(f"# WARNING: layers {over_ln} exceed he_layernorm3's var<=2500 — no domain covers them.")
 
