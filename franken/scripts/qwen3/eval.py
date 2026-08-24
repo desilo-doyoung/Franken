@@ -28,12 +28,15 @@ import torch.nn.functional as F
 from scipy.stats import spearmanr
 from torch.utils.data import DataLoader
 
-from franken.data.embed_corpus import Pool, mix, pool
-from franken.data.external import EXTERNAL
+from franken.data.corpus import Pool, pool
+from franken.data.qwen3.external import EXTERNAL
+from franken.data.qwen3.registry import mix
 from franken.encode import embed_batches, embed_texts
 from franken.metrics import K, ndcg_pool, recall_at_k
-from franken.scripts.qwen3 import common, report
-from franken.scripts.qwen3.common import Models, embed_pool, load, score, teacher_cache
+from franken.scripts import common
+from franken.scripts.common import Models, load
+from franken.scripts.qwen3 import report
+from franken.scripts.qwen3.common import embed_pool, score, teacher_cache
 
 SUITES = ("fidelity", "corpus", "external")
 

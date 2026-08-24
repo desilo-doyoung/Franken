@@ -36,7 +36,8 @@ L = (1 - alpha) * CE(student, labels)              # hard-label
 
 The hidden term stays well-defined under layer reduction via a **uniform-stride layer map**
 (`distill/layer_map.py`); `masked_mse_loss` is the shared, task-agnostic helper any task reuses.
-`tasks/embed.py` swaps the CE/KL terms for `(1-cos)` on the pooled embedding.
+`tasks/embed.py` swaps the CE/KL terms for `(1-cos)` on the pooled embedding; `tasks/lm.py` keeps a
+vocabulary KL at every position and drops the CE, since self-distillation has no labels.
 
 For polynomial ops valid only on a bounded domain (`cheb_gelu`, or `quad` with a `domain` set),
 `distill.range_penalty` squashes FFN pre-activations into `[-domain, domain]` during training, so the
@@ -50,17 +51,22 @@ franken/
   paths.py           RunPaths — outputs namespaced per model: outputs/<run_name or backend>/...
   ops/               swappable-op registry: softmax (exact|cgf), activation (exact|cheb_gelu|quad)
   models/            base.py = ModelBackend ABC + build_backend registry; bert/, qwen3/, llama/
-  tasks/             base.py = Task ABC + build_task registry; mrpc.py, embed.py
-  distill/           layer_map, masked_mse_loss, Distiller (backend + task driven)
-  data/              mrpc.py, embed_corpus/ (the embedding corpus + its eval pools; see its README)
-  cli.py             train-teacher | distill | eval
+  tasks/             base.py = Task ABC + build_task registry; selfdistill.py = the label-free
+                     corpus base; mrpc.py, embed.py, lm.py
+  distill/           layer_map, masked/layerwise hidden losses, Distiller (backend + task driven)
+  data/              mrpc.py; corpus/ = shared streaming/mixing/caching + eval pools (see its
+                     README); qwen3/, llama/ = the per-model dataset declarations
+  cli.py             corpus | train-teacher | distill | eval; corpus/eval dispatch on the TASK
   tests/             pure-unit tests; `uv run pytest`
   scripts/           run as `python -m franken.scripts.<...>`, never by file path
+    common.py         required flags + teacher/student loading — backend/task-agnostic
+    corpus_report.py  the corpus tables both tracks print
     stage_distill.py  op-curriculum (staged op-replacement) distillation — model-agnostic
     parity_gate.py    from-scratch student must BE the teacher — model-agnostic
     precision_gate.py is `precision: bf16` safe here? — model-agnostic
     bert/            MRPC-specific: evaluate.py, act_range.py, seed_sweep.py
     qwen3/           embed track: corpus.py, eval.py, act_range.py, orchestration (see its README)
+    llama/           lm track: lm_corpus.py, lm_eval.py
 configs/<model>/     depth<L>_<activation>[_<range>][_cgf].yaml — see "Recipe names" below
 outputs/<model>/     teacher/, student/, stage*/ (gitignored)
 ```
@@ -146,4 +152,4 @@ uv run python -m franken.scripts.bert.act_range --config configs/bert/depth8_qua
 
 Results live in `PROGRESS.md` (BERT/MRPC), `franken/models/qwen3/PROGRESS.md` (Qwen3), and
 `thor/EXECUTION_NOTES.md` (running these students under FHE). Corpus and dataset design is documented
-in `franken/data/embed_corpus/README.md`.
+in `franken/data/corpus/README.md`.

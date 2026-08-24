@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from franken.data.embed_corpus.spec import Record
+from franken.data.corpus.spec import Record
 
 _MIN_DOC = 32  # below this a "document" is a fragment
 _MIN_PARAGRAPH = 64  # Wikipedia's short lines are section stubs and list items
@@ -85,6 +85,17 @@ def wikitext(row) -> Record | None:
     if len(text) < _MIN_DOC or text.startswith("="):
         return None
     return Record(docs=(text,))
+
+
+def whole(col: str) -> Callable[[dict], Record | None]:
+    """The row IS the training text -- no pair to mine, so a mix using this scores nothing."""
+
+    def adapt(row) -> Record | None:
+        text = _clean(row, col)
+        return Record(docs=(text,)) if len(text) >= _MIN_DOC else None
+
+    adapt.shape = f"no pair in the row -- {col} taken whole"
+    return adapt
 
 
 def marco_side(kind: str) -> Callable[[dict], Record | None]:

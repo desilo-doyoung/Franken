@@ -1,4 +1,4 @@
-"""Stream a preset's sources, mix them by weight, tokenize and cache."""
+"""Stream a mix's sources, mix them by weight, tokenize and cache."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ import numpy as np
 import pyarrow.compute as pc
 import transformers
 
-from franken.data.embed_corpus.registry import PRESETS, Source
-from franken.data.embed_corpus.spec import Record, corpus_texts, eval_pair, split_of
+from franken.data.corpus.source import Source
+from franken.data.corpus.spec import Record, corpus_texts, eval_pair, split_of
 
 _CACHE_DIR = "outputs/corpus_cache"
 # Bump when a source, weight or adapter changes: the key covers the request, not the recipe that
@@ -111,14 +111,14 @@ def train_cache_path(name: str, tokens: float, max_seq_len: int, tokenizer: Any)
     return cache_path(name, "train", _tokens_label(tokens), max_seq_len, tokenizer)
 
 
-def _calibrate(name: str, max_seq_len: int, tokenizer: Any, tokens: float) -> int:
+def _calibrate(sources: list[Source], max_seq_len: int, tokenizer: Any, tokens: float) -> int:
     """How many texts sum to `tokens`. Measured here, not declared: tok/text depends on the mix AND
     the cap (~110 at 1024, ~97 at 256). The cache is keyed on the token budget, so sampling error
     moves the text count and can never rename a corpus."""
-    rows = [r for r in profile(PRESETS[name], tokenizer, max_seq_len, n=CALIB) if not r.error]
+    rows = [r for r in profile(sources, tokenizer, max_seq_len, n=CALIB) if not r.error]
     covered = sum(r.weight for r in rows)
     if not covered:
-        raise RuntimeError(f"No source in {name!r} produced a sample; cannot size the corpus.")
+        raise RuntimeError("No source produced a sample; cannot size the corpus.")
     mean = sum(r.weight * r.mean for r in rows) / covered  # rescaled, so a dead source is not 0
     print(f"calibration: {mean:.1f} tok/text over {covered:.3f} of the mix", flush=True)
     return max(1, round(tokens / mean))
@@ -138,13 +138,10 @@ def _save_atomic(ds, path: str) -> None:
 _MEMO: dict[str, Any] = {}
 
 
-def _build_split(name, split, size_label, max_seq_len, tokenizer, resolve_n):
+def _build_split(name, sources, split, size_label, max_seq_len, tokenizer, resolve_n):
     """One tokenized split, memoized in-process and on disk: a rebuild re-pays network and parsing,
     hours at 10M texts, per rank. `resolve_n` is called only on a miss, so a cache hit never pays
     for calibration."""
-    if name not in PRESETS:
-        raise KeyError(f"Unknown corpus {name!r}; available: {sorted(PRESETS)}")
-
     cached = cache_path(name, split, size_label, max_seq_len, tokenizer)
     if cached in _MEMO:
         return _MEMO[cached]
@@ -154,7 +151,7 @@ def _build_split(name, split, size_label, max_seq_len, tokenizer, resolve_n):
     def tok(batch):
         return tokenizer(batch["text"], truncation=True, max_length=max_seq_len)
 
-    texts, source_ids = _mix(PRESETS[name], split, resolve_n())
+    texts, source_ids = _mix(sources, split, resolve_n())
     # Provenance, so the realized mix can be verified after the fact. uint8: 10M rows cost 10 MB.
     ds = datasets.Dataset.from_dict({"text": texts, "source": source_ids})
     ds = ds.cast_column("source", datasets.Value("uint8"))
@@ -163,33 +160,35 @@ def _build_split(name, split, size_label, max_seq_len, tokenizer, resolve_n):
     return _MEMO.setdefault(cached, ds)
 
 
-def load_embed_corpus(
+def load_corpus(
     tokenizer: Any,
     name: str,
+    sources: list[Source],
     tokens_per_epoch: float,
     max_seq_len: int = 128,
     val_size: int = VAL_POOL,
     splits: tuple[str, ...] = ("train", "validation"),
 ) -> dict[str, Any]:
-    """Tokenized splits plus a collator, the shape `load_mrpc` returns. `tokens_per_epoch` sizes
-    train; validation is a fixed TEXT count, since recall@10 is pool-size dependent."""
+    """Tokenized splits plus a collator, the shape `load_mrpc` returns. `name` is the cache-key
+    identity of the request and `sources` the recipe answering it; `tokens_per_epoch` sizes train,
+    while validation is a fixed TEXT count since recall@10 is pool-size dependent."""
     out: dict[str, Any] = {}
     for split in splits:
         if split == "train":
             out[split] = _build_split(
                 name,
+                sources,
                 split,
                 _tokens_label(tokens_per_epoch),
                 max_seq_len,
                 tokenizer,
-                lambda: _calibrate(name, max_seq_len, tokenizer, tokens_per_epoch),
+                lambda: _calibrate(sources, max_seq_len, tokenizer, tokens_per_epoch),
             )
         else:
             out[split] = _build_split(
-                name, split, str(val_size), max_seq_len, tokenizer, lambda: val_size
+                name, sources, split, str(val_size), max_seq_len, tokenizer, lambda: val_size
             )
     out["collator"] = transformers.DataCollatorWithPadding(tokenizer)
-    out["sources"] = [s.name for s in PRESETS[name]]
     return out
 
 

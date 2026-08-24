@@ -1,4 +1,4 @@
-from franken.data.embed_corpus.evalset import Pool, _Docs
+from franken.data.corpus.evalset import Pool, _Docs
 
 
 def test_identical_text_gets_one_id():

@@ -26,11 +26,12 @@ import unicodedata
 import datasets
 import torch
 
-from franken.data.embed_corpus import instruct, mix, pool
+from franken.data.corpus import instruct, pool
+from franken.data.qwen3.registry import mix
 from franken.encode import embed_texts
 from franken.metrics import K, gold_recall_at_k, ndcg_at_k, ndcg_pool, recall_at_k
 from franken.paths import RunPaths
-from franken.scripts.qwen3 import common
+from franken.scripts import common
 from franken.scripts.qwen3.common import embed_pool, teacher_cache
 
 SNIPPET = 58

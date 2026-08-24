@@ -1,7 +1,12 @@
-# `franken.data.embed_corpus`
+# `franken.data.corpus`
 
-The training corpus for embedding self-distillation, and the eval pools that score it — from **one
-declaration per dataset**.
+The shared corpus layer: stream a mix, tokenize it, cache it, and — for the retrieval tasks — build
+the eval pools that score it, from **one declaration per dataset**.
+
+The declarations themselves live per model, in `franken/data/<model>/registry.py`:
+`qwen3/` declares `multi_domain` (pairs, judgements, instruction prefixes) and `llama/` declares
+`llama_web` (plain documents for logit KD). `franken.data.corpus_sources(name)` resolves a
+`train.corpus` string across both — one flat namespace, because `cache_path` has one flat directory.
 
 ## Why it looks like this
 
@@ -32,22 +37,25 @@ land in both.
 | module | owns |
 |---|---|
 | `spec.py` | `Record`, the instruction format (`instruct`), the split policy (`split_of`, `SPLIT_PCT`), and `corpus_texts` / `eval_pair` |
-| `adapters.py` | one `row -> Record \| None` function per dataset *shape* (`pair`, `triplet`, `marco`, `titled`, `paragraphs`, `wikitext`) |
-| `registry.py` | `Source` / `Qrels` and the mix — **the only place a dataset is named** |
-| `build.py` | streaming, weighted mixing, tokenizing, on-disk cache, `load_embed_corpus` |
+| `adapters.py` | one `row -> Record \| None` function per dataset *shape* (`pair`, `triplet`, `marco`, `titled`, `paragraphs`, `whole`, `wikitext`) |
+| `source.py` | `Source` / `Qrels` — the declaration schema. The mixes are per model, in `franken/data/<model>/registry.py`, still **the only place a dataset is named** |
+| `build.py` | streaming, weighted mixing, tokenizing, on-disk cache, `load_corpus` |
 | `evalset.py` | `Pool` (documents, queries, judgements) from a source's held-out rows |
 
 ## Using it
 
 ```python
-from franken.data.embed_corpus import load_embed_corpus, mix, pool
+from franken.data import corpus_sources
+from franken.data.corpus import load_corpus, pool
+from franken.data.qwen3 import mix
 
-data = load_embed_corpus(tokenizer, "multi_domain", size=9_000_000, max_seq_len=1024)
-data["train"]        # input_ids, attention_mask, source (uint8 index into data["sources"])
+name = "multi_domain"
+data = load_corpus(tokenizer, name, corpus_sources(name), tokens_per_epoch=2e9, max_seq_len=1024)
+data["train"]        # input_ids, attention_mask, source (uint8 index into the source list)
 data["collator"]     # DataCollatorWithPadding
 
-for src in mix("multi_domain"):
-    p = pool(src, "validation", "multi_domain")   # cached to outputs/corpus_pool_cache
+for src in mix(name):
+    p = pool(src, "validation", name)   # cached to outputs/corpus_pool_cache
 ```
 
 `source` keeps provenance on the artifact: it is what lets the realized mix be verified after a
@@ -55,12 +63,13 @@ build rather than trusted from the build log.
 
 ## Adding a dataset
 
-One `Source` in `registry.py`. Pick the adapter matching its row shape (or add one if the shape is
+One `Source` in your model's `registry.py`. Pick the adapter matching its row shape (or add one if the shape is
 new), set `key` to the column the split hashes on — or leave it `None` if the dataset ships its own
 splits — and give it a relative `weight`; weights are normalised at import, so no rebalancing.
 
-**Every source must be scoreable.** It yields `(query, positive)` records, or it declares `Qrels`.
-There is no escape hatch, and `franken/scripts/qwen3/corpus.py` fails the gate before a build is paid for.
+**Every source in a *retrieval* mix must be scoreable.** It yields `(query, positive)` records, or it
+declares `Qrels`; `franken/scripts/qwen3/corpus.py` fails the gate before a build is paid for. An LM
+mix is exempt — `adapters.whole` yields documents only, and logit KD scores perplexity, not ranking.
 An unscoreable slice is a permanent blind spot — that is how `code_apps` −53.9% turned out to be
 measuring corpus coverage rather than the depth cut.
 

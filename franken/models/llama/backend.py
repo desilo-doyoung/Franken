@@ -48,6 +48,9 @@ class LlamaBackend(ModelBackend):
         return {
             "output": F.normalize(pooled, p=2, dim=-1),
             "hidden_states": hidden_states,
+            # Tied embeddings, so this IS the LM head, and `hidden_states[-1]` is already
+            # post-norm -- exactly what LlamaForCausalLM projects.
+            "lm_head_weight": model.embed_tokens.weight,
         }
 
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:

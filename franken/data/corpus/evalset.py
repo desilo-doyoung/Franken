@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 
 import datasets
 
-from franken.data.embed_corpus.build import records
-from franken.data.embed_corpus.registry import Source
-from franken.data.embed_corpus.spec import eval_pair, instruct, split_of
+from franken.data.corpus.build import records
+from franken.data.corpus.source import Source
+from franken.data.corpus.spec import eval_pair, instruct, split_of
 
 QUERIES, DOCS = 500, 5_000
 

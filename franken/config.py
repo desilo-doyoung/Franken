@@ -38,7 +38,13 @@ class ModelConfig:
 
 @dataclass
 class DistillConfig:
-    """Loss = (1-alpha)*CE + alpha*T^2*KL(student/T, teacher/T) + beta*masked_MSE(hidden)."""
+    """Loss = (1-alpha)*CE + alpha*T^2*KL(student/T, teacher/T) + beta*masked_MSE(hidden).
+
+    That shape is `mrpc`'s. The label-free tasks drop the CE, so `alpha` stops trading against
+    anything and becomes a plain weight: `embed` ignores alpha/temperature entirely, and `lm`
+    weights its vocabulary KL with them. Set alpha explicitly on those -- the 0.5 default silently
+    halves the only term that has a target.
+    """
 
     alpha: float = 0.5
     beta: float = 1.0

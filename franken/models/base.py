@@ -43,7 +43,14 @@ class ModelBackend(ABC):
 
     @abstractmethod
     def forward(self, model: nn.Module, inputs: dict) -> dict:
-        """-> ``{"output", "hidden_states"}``, with ``hidden_states[0]`` the embedding output."""
+        """-> ``{"output", "hidden_states"}``, with ``hidden_states[0]`` the embedding output.
+
+        ``output`` is the backend's canonical representation -- logits for a classifier, the pooled
+        vector for a decoder -- and is what `parity_gate` compares. A decoder may also supply
+        ``lm_head_weight``: the output projection, for a task that needs vocabulary logits. It is a
+        reference so the task can project in chunks; materializing 128k-vocab logits on every
+        forward would cost GBs the embed path never reads.
+        """
 
     @abstractmethod
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:

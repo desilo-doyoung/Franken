@@ -3,7 +3,7 @@ import inspect
 
 import pytest
 
-from franken.cli import _EVALUATOR
+from franken.cli import _CORPUS, _EVALUATOR, _TASK_EVALUATOR
 
 SCRIPTS = [
     # backend-agnostic, so they live at the scripts root
@@ -18,12 +18,13 @@ SCRIPTS = [
     "franken.scripts.qwen3.eval",
     "franken.scripts.qwen3.run_experiments",
     "franken.scripts.qwen3.search",
+    "franken.scripts.llama.lm_corpus",
+    "franken.scripts.llama.lm_eval",
 ]
 
-# Reached through `cli._delegate`, which calls `main(argv)`.
-DELEGATED = ["franken.scripts.qwen3.corpus"] + [
-    f"franken.scripts.{b}.{s}" for b, s in _EVALUATOR.items()
-]
+# Reached through `cli._delegate`, which calls `main(argv)`. The tables hold fully-qualified
+# module paths, so a scorer needs no `franken/scripts/<backend>/` shim to be reachable.
+DELEGATED = sorted({*_CORPUS.values(), *_EVALUATOR.values(), *_TASK_EVALUATOR.values()})
 
 
 @pytest.mark.parametrize("name", SCRIPTS)

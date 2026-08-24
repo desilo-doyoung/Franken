@@ -25,7 +25,7 @@ import time
 
 from franken.config import Config
 from franken.paths import RunPaths
-from franken.scripts.qwen3 import common
+from franken.scripts import common
 
 _ROOT = common.ROOT
 
@@ -280,7 +280,7 @@ _PREBUILD_TOKENS = 1e7
 
 def _cache_missing(cfg) -> bool:
     # Runs go one per device concurrently, so with no cache each tokenizes the whole corpus.
-    from franken.data.embed_corpus import (
+    from franken.data.corpus import (
         train_cache_path,  # noqa: PLC0415  (heavy import, rare path)
     )
     from franken.tasks import build_task  # noqa: PLC0415

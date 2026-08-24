@@ -1,4 +1,4 @@
-"""External retrieval benchmarks. Not `embed_corpus.Source`: that is a training slice carrying a
+"""External retrieval benchmarks. Not `corpus.Source`: that is a training slice carrying a
 weight, a split hash and an adapter, while these are pure eval."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from functools import partial
 
 import datasets
 
-from franken.data.embed_corpus import WEB_SEARCH, Pool, instruct
+from franken.data.corpus import WEB_SEARCH, Pool, instruct
 
 
 @dataclass(frozen=True)

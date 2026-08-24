@@ -2,7 +2,7 @@ import math
 
 import torch
 
-from franken.data.embed_corpus import Pool
+from franken.data.corpus import Pool
 from franken.metrics import gold_recall_at_k, ndcg_at_k, ndcg_pool, recall_at_k
 
 

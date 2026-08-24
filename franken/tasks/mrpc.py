@@ -24,8 +24,7 @@ from transformers import (
 
 from franken.config import Config, DistillConfig
 from franken.data.mrpc import compute_metrics, load_mrpc
-from franken.distill.layer_map import resolve_layer_map
-from franken.distill.loss import masked_mse_loss
+from franken.distill.loss import layerwise_hidden_loss, masked_mse_loss
 from franken.models.base import ModelBackend
 from franken.paths import RunPaths
 from franken.tasks.base import Task
@@ -43,7 +42,7 @@ class ClassificationDistillLoss(nn.Module):
 
     CE and the logit-KL are classification-specific (softmax over classes), so this
     lives with the classification task rather than the generic distill package. The
-    hidden-state term reuses the shared ``masked_mse_loss`` + ``resolve_layer_map``.
+    hidden-state term reuses the shared ``layerwise_hidden_loss``.
     """
 
     def __init__(self, cfg: DistillConfig):
@@ -62,16 +61,13 @@ class ClassificationDistillLoss(nn.Module):
             reduction="batchmean",
         ) * (T**2)
 
-        # hidden_states[0] is the embedding output, so drop it for the layer count.
-        layer_map = resolve_layer_map(
-            len(teacher_hidden) - 1, len(student_hidden) - 1, self.cfg.hidden_layer_map
+        hidden = layerwise_hidden_loss(
+            student_hidden,
+            teacher_hidden,
+            attention_mask,
+            masked_mse_loss,
+            self.cfg.hidden_layer_map,
         )
-        hidden = 0.0
-        for s_block, t_block in enumerate(layer_map):
-            hidden += masked_mse_loss(
-                student_hidden[s_block + 1], teacher_hidden[t_block + 1], attention_mask
-            )
-        hidden = hidden / len(layer_map)
 
         total = (1 - self.cfg.alpha) * ce + self.cfg.alpha * kl + self.cfg.beta * hidden
         return total, ce, kl, hidden

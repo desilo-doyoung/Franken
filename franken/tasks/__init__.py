@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from franken.tasks.base import Task
 from franken.tasks.embed import EmbedSelfDistillTask
+from franken.tasks.lm import LMDistillTask
 from franken.tasks.mrpc import MrpcTask
 
 TASKS: dict[str, type[Task]] = {
     "mrpc": MrpcTask,
     "embed": EmbedSelfDistillTask,
+    "lm": LMDistillTask,
 }
 
 

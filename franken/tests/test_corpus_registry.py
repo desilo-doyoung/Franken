@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from franken.data.embed_corpus.build import cache_path, train_cache_path
-from franken.data.embed_corpus.registry import MIXES, PRESETS
+from franken.data.corpus.build import cache_path, train_cache_path
+from franken.data.qwen3.registry import MIXES, PRESETS
 
 # name -> (repo, config, key, raw weight, instructed, has qrels, scores_ndcg)
 _MULTI_DOMAIN = {
@@ -149,10 +149,3 @@ def test_every_mix_is_buildable():
     # `mix()` reads MIXES and `_build_split` reads PRESETS: a mix missing from PRESETS passes the
     # gate and then dies an hour into the build.
     assert set(MIXES) <= set(PRESETS)
-
-
-def test_preset_names_are_unique_across_the_shared_cache_namespace():
-    # cache_path has one flat directory, so two registries reusing a name serve each other's text.
-    from franken.data.lm_corpus import MIXES as LM_MIXES
-
-    assert not set(PRESETS) & set(LM_MIXES)

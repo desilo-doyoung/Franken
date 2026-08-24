@@ -98,7 +98,7 @@ line plus the printed `corpus_size` (it must match the config), the distill run'
 
 ## `corpus.py` — three stages, each gating the next
 
-Datasets are declared **once**, as a `Source` in `franken/data/embed_corpus/registry.py`; the training
+Datasets are declared **once**, as a `Source` in `franken/data/qwen3/registry.py`; the training
 corpus and the eval pools both derive from that entry, and a source must be scoreable to exist. See
 that package's README for the design.
 

@@ -57,41 +57,51 @@ def cmd_distill(args: argparse.Namespace, extra: list[str]) -> None:
     shutdown(d.dist)
 
 
-# Per backend: MRPC scores accuracy/F1, qwen3 scores agreement + nDCG over three suites.
-_EVALUATOR = {"bert": "evaluate", "qwen3": "eval"}
+# Fully-qualified, so a scorer is reachable wherever it lives.
+_EVALUATOR = {"bert": "franken.scripts.bert.evaluate", "qwen3": "franken.scripts.qwen3.eval"}
+
+# Keyed on the TASK and consulted first: what a corpus must satisfy, and what scores a student,
+# follow from the objective rather than the architecture.
+_CORPUS = {"embed": "franken.scripts.qwen3.corpus", "lm": "franken.scripts.llama.lm_corpus"}
+_TASK_EVALUATOR = {"lm": "franken.scripts.llama.lm_eval"}
 
 
-def _delegate(backend: str, script: str, argv: list[str]) -> None:
-    """Run franken.scripts.<backend>.<script>.main in-process."""
+def _delegate(module: str, argv: list[str]) -> None:
     import importlib
 
     try:
-        mod = importlib.import_module(f"franken.scripts.{backend}.{script}")
+        mod = importlib.import_module(module)
     except ModuleNotFoundError as e:
-        raise SystemExit(f"No {script} for backend {backend!r}: {e}") from e
+        raise SystemExit(f"Cannot load {module}: {e}") from e
     return mod.main(argv)
 
 
 def cmd_corpus(args: argparse.Namespace, extra: list[str]) -> None:
     cfg = _load_config(args)
-    if _delegate(cfg.model.backend, "corpus", ["--config", args.config] + extra) is False:
+    module = _CORPUS.get(cfg.train.task)
+    if not module:
+        raise SystemExit(f"Task {cfg.train.task!r} brings its own data; nothing to build.")
+    if _delegate(module, ["--config", args.config] + extra) is False:
         raise SystemExit("corpus gates failed — do not train")
 
 
 def cmd_eval(args: argparse.Namespace, extra: list[str]) -> None:
     import os
 
-    cfg = _load_config(args)  # backend name selects which model's evaluator to run
-    script = _EVALUATOR.get(cfg.model.backend)
-    if not script:
-        raise SystemExit(f"No evaluator registered for backend {cfg.model.backend!r}.")
+    cfg = _load_config(args)
+    # Task first: fall back to the backend only where the scorer is genuinely model-specific.
+    module = _TASK_EVALUATOR.get(cfg.train.task) or _EVALUATOR.get(cfg.model.backend)
+    if not module:
+        raise SystemExit(
+            f"No evaluator for task {cfg.train.task!r} / backend {cfg.model.backend!r}."
+        )
     argv = ["--config", args.config]
     if args.ckpt:  # a directory holding pytorch_model.bin, or the file itself
         ckpt = (
             os.path.join(args.ckpt, "pytorch_model.bin") if os.path.isdir(args.ckpt) else args.ckpt
         )
         argv += ["--student-ckpt", ckpt]
-    _delegate(cfg.model.backend, script, argv + extra)
+    _delegate(module, argv + extra)
 
 
 def build_parser() -> argparse.ArgumentParser:

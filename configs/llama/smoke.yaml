@@ -1,0 +1,55 @@
+# Llama logit-distillation pipeline proof, and the identity self-test.
+#
+# Full teacher depth (16) + exact ops, so the student IS the teacher after seeding: `eval` with no
+# --student-ckpt must read agreement 1.0000, kl ~0 and ppl == teacher_ppl. A check with a known
+# right answer, which is what makes it worth running on a fresh machine.
+#
+#   uv run python main.py {corpus,distill,eval} --config configs/llama/smoke.yaml
+#
+# A pipeline proof, never a result.
+
+model:
+  backend: llama
+  num_hidden_layers: 16 # full teacher depth, so every delta must read ~0
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+
+distill:
+  alpha: 1.0 # see DistillConfig: `lm` has no CE, so the 0.5 default just halves the KL
+  temperature: 1.0 # matches the teacher's actual distribution; the loss is then KL in nats
+  # Provisional -- re-derive from the step-0 kl/hidden split on a depth-reduced student. Carried
+  # for RANGE safety, not accuracy: the KL constrains only the last layer, act_range reads inside.
+  beta: 1.0
+  hidden_layer_map: null
+  range_penalty: 0.0 # off: exact SiLU has no bounded domain to squash into
+
+train:
+  # Ungated mirror, sha256-identical to NousResearch's; meta-llama/* is manually gated.
+  teacher_model: unsloth/Llama-3.2-1B
+  teacher_ckpt: null
+  task: lm
+  corpus: llama_web
+  tokens_per_epoch: 2_000_000 # smoke-sized; the real budget comes from `corpus` measure
+  output_dir: outputs
+  run_name: llama_smoke
+  max_seq_len: 1024
+  seed: 42
+  device: cuda
+
+  teacher: # unused by self-distillation; present so the schema is complete
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 1.0e-5
+    epochs: 1
+    tokens_per_step: 4096 # low: logits dominate memory here, raise against nvidia-smi
+    batch_size: 4 # only used if tokens_per_step is unset
+    warmup_ratio: 0.1
+    weight_decay: 0.01

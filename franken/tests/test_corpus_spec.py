@@ -2,7 +2,8 @@ from collections import Counter
 
 import pytest
 
-from franken.data.embed_corpus.spec import (
+from franken.data.corpus import adapters
+from franken.data.corpus.spec import (
     SPLIT_PCT,
     SPLITS,
     WEB_SEARCH,
@@ -76,3 +77,17 @@ def test_eval_pair_returns_query_golds_and_distractors():
 )
 def test_eval_pair_needs_both_sides(rec):
     assert eval_pair(rec) is None
+
+
+def test_whole_yields_the_row_text_with_no_pair():
+    # An LM row IS the supervision: no query side, so nothing to score and no prefix to apply.
+    rec = adapters.whole("text")({"text": "x" * 40})
+    assert rec.query == "" and rec.positives == () and rec.docs == ("x" * 40,)
+    assert corpus_texts(rec, None) == ["x" * 40]
+    assert eval_pair(rec) is None
+
+
+@pytest.mark.parametrize("row", [{"text": ""}, {"text": None}, {"text": "too short"}])
+def test_whole_drops_a_row_with_no_usable_text(row):
+    # `source_texts` does `out += corpus_texts(...)`, so a fragment costs a training slot.
+    assert adapters.whole("text")(row) is None

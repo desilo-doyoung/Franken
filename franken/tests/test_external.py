@@ -1,5 +1,5 @@
-from franken.data.embed_corpus import WEB_SEARCH, Pool
-from franken.data.external import EXTERNAL, Benchmark
+from franken.data.corpus import WEB_SEARCH, Pool
+from franken.data.qwen3.external import EXTERNAL, Benchmark
 
 
 def test_the_five_scored_benchmarks_are_declared():

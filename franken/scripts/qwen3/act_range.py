@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 from torch.utils.data import DataLoader
 
-from franken.scripts.qwen3 import common
+from franken.scripts import common
 
 SAMPLE = 20_000  # values kept per layer per batch, for quantiles only
 
