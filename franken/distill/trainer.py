@@ -48,11 +48,18 @@ def _maybe_compile(model, cfg: Config):
     return torch.compile(model) if cfg.train.compile else model
 
 
-def resolve_lr(opt, global_batch: float, log) -> float:
+def resolve_lr(opt, global_batch: float, log, packed: bool = False) -> float:
     """`lr: null` derives the rate by sqrt-batch scaling. The token-budgeted batch is only known
     once the plan exists, so a hardcoded `lr` goes stale when the corpus or rank count moves."""
     if opt.lr is not None:
         return opt.lr
+    if packed:
+        raise ValueError(
+            "train.pack with distill.lr: null. sqrt-batch scaling reads SEQUENCES, but a packed "
+            "block is an arbitrary container: halving max_seq_len doubles the count at identical "
+            f"tokens/step and would move the rate by sqrt(2). BASE_BATCH ({BASE_BATCH}) is a "
+            "sequence count calibrated on unpacked embed runs besides. Set distill.lr explicitly."
+        )
     lr = BASE_LR * math.sqrt(global_batch / BASE_BATCH)
     log(
         f"lr {lr:.4e} = {BASE_LR:g} * sqrt({global_batch:.0f} / {BASE_BATCH})"
@@ -359,7 +366,7 @@ class Distiller:
 
         batches = BatchLoader(self.cfg, self.dist, train_data, data["collator"], self.log)
         total_steps = batches.optimizer_steps * opt.epochs  # LR schedule counts OPTIMIZER steps
-        lr = resolve_lr(opt, batches.global_batch, self.log)
+        lr = resolve_lr(opt, batches.global_batch, self.log, self.cfg.train.pack)
         optimizer = AdamW(
             self.student.parameters(), lr=lr, weight_decay=opt.weight_decay, fused=True
         )

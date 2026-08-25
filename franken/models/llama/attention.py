@@ -62,10 +62,18 @@ class LlamaAttention(nn.Module):
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
         if self.attn_impl == "sdpa_causal":
-            # No attn_mask: a float mask is what disqualifies the flash backend, and under right
-            # padding causal masking already hides pads from every real row. Pad rows compute
-            # garbage that nothing reads (masked in the loss, excluded by last-token pooling).
-            context = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+            if attention_mask is None:
+                # No attn_mask: a float mask is what disqualifies the flash backend, and under
+                # right padding causal masking already hides pads from every real row. Pad rows
+                # compute garbage that nothing reads (masked in the loss, excluded by pooling).
+                context = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+            else:
+                # Packed blocks. Document isolation cannot be said with is_causal, and flash takes
+                # no mask in any dtype, so this drops to the mem-efficient backend. The mask is
+                # already causal, hence no is_causal here.
+                context = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=attention_mask, enable_gqa=True
+                )
         else:
             k = repeat_kv(k, self.num_heads // self.num_kv_heads)
             v = repeat_kv(v, self.num_heads // self.num_kv_heads)

@@ -17,12 +17,18 @@ from franken.data import corpus_sources
 from franken.data.corpus import load_corpus
 from franken.distill.batching import plan_batches
 from franken.distill.dist import max_tokens_per_rank
+from franken.distill.packing import doc_positions
 from franken.tasks.base import Task
 
 _COLUMNS = ["input_ids", "attention_mask"]
 
 
 class SelfDistillTask(Task):
+    # Set by `datasets`. Paths that never build a corpus (the embed scorer, act_range) keep the
+    # defaults and so keep pre-packing behaviour.
+    _pack = False
+    _eos_id: int | None = None
+
     def build_tokenizer(self, cfg: Config) -> Any:
         tok = AutoTokenizer.from_pretrained(cfg.train.teacher_model)
         # RoPE is relative, so padding side normally cancels -- EXCEPT under attn_impl
@@ -31,6 +37,8 @@ class SelfDistillTask(Task):
         return tok
 
     def datasets(self, tokenizer: Any, cfg: Config, splits=("train", "validation")) -> dict:
+        self._pack = cfg.train.pack
+        self._eos_id = tokenizer.eos_token_id
         return load_corpus(
             tokenizer,
             cfg.train.corpus,
@@ -45,7 +53,21 @@ class SelfDistillTask(Task):
         return list(_COLUMNS)
 
     def model_inputs(self, batch: dict) -> dict:
-        return {"input_ids": batch["input_ids"], "attention_mask": batch["attention_mask"]}
+        if not self._pack:
+            # A tokenizer whose pad token IS its eos would read right-padding as document starts,
+            # so the ragged embed path must not derive positions at all.
+            return {"input_ids": batch["input_ids"], "attention_mask": batch["attention_mask"]}
+        # No attention_mask: packing drops the trailing partial so every block is exactly full and
+        # the mask is all ones (`corpus.build._rows`) -- it carries nothing. Passing it anyway is
+        # not merely redundant, it is load-bearing in reverse: HF derives the teacher's
+        # document-isolation mask from position_ids ONLY when attention_mask is None
+        # (`masking_utils._preprocess_mask_arguments`). Send it and the teacher silently keeps
+        # cross-document attention while the student isolates. The loss still reads
+        # batch["attention_mask"]; only the forward drops it.
+        return {
+            "input_ids": batch["input_ids"],
+            "position_ids": doc_positions(batch["input_ids"], self._eos_id),
+        }
 
     def eval_loader(self, tokenizer: Any, cfg: Config, split: str, teacher) -> tuple:
         """The scored split only -- rebuilding the training corpus per epoch costs minutes.

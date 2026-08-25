@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+from franken.distill.packing import doc_ids
 from franken.models.llama.config import LlamaModelConfig
 from franken.models.llama.layer import LlamaDecoderLayer
 from franken.models.llama.rope import LlamaRotaryEmbedding
@@ -24,12 +25,16 @@ class LlamaModel(nn.Module):
         )
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def forward(self, input_ids, attention_mask=None) -> dict:
+    def forward(self, input_ids, attention_mask=None, position_ids=None) -> dict:
         hidden_states = self.embed_tokens(input_ids)
         B, S, _ = hidden_states.shape
-        position_ids = torch.arange(S, device=hidden_states.device).unsqueeze(0).expand(B, S)
+        # Only a caller-supplied position_ids can carry document boundaries; the arange
+        # fallback has none, so it must not pay for the segment comparison.
+        packed = position_ids
+        if position_ids is None:
+            position_ids = torch.arange(S, device=hidden_states.device).unsqueeze(0).expand(B, S)
         cos, sin = self.rotary_emb(hidden_states, position_ids)
-        mask = self._causal_mask(attention_mask, S, hidden_states)
+        mask = self._causal_mask(attention_mask, S, hidden_states, packed)
 
         all_hidden_states = []
         for layer in self.layers:
@@ -44,7 +49,12 @@ class LlamaModel(nn.Module):
         )
 
     # additive mask where 0 is visible and -inf is masked
-    def _causal_mask(self, attention_mask, S, hidden_states):
+    def _causal_mask(self, attention_mask, S, hidden_states, position_ids=None):
+        if position_ids is None and self.config.attn_impl == "sdpa_causal":
+            # Nothing the kernel's is_causal does not already express: under right padding, causal
+            # masking hides pads from every real row. Building the mask would only waste it.
+            return None
+
         dtype = hidden_states.dtype
         device = hidden_states.device
         min_val = torch.finfo(dtype).min
@@ -53,4 +63,10 @@ class LlamaModel(nn.Module):
         if attention_mask is not None:
             pad = (1 - attention_mask[:, None, None, :].to(dtype=dtype)) * min_val
             mask = mask + pad
+        if position_ids is not None:
+            # Packed blocks: a query never sees a neighbouring document. Same segment rule the HF
+            # teacher applies to the identical position_ids, so the two masks agree by construction.
+            doc = doc_ids(position_ids)
+            cross = (doc[:, :, None] != doc[:, None, :])[:, None].to(dtype=dtype)
+            mask = mask + cross * min_val
         return mask
