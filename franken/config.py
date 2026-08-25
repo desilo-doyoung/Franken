@@ -88,6 +88,9 @@ class TrainConfig:
     tokens_per_epoch: float | None = None
     run_name: str | None = None  # output namespace; None = the backend name
     max_seq_len: int = 128
+    # Concatenate documents into whole max_seq_len blocks instead of truncating. Opt-in: it is
+    # a different corpus under a different cache key, never a reinterpretation of an old build.
+    pack: bool = False
     seed: int = 42
     device: str = "cuda"
     # Distillation loop only; eval is forced back to fp32 and the teacher never enters autocast.

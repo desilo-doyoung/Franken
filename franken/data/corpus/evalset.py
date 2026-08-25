@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import datasets
 
-from franken.data.corpus.build import records
+from franken.data.corpus.read import records
 from franken.data.corpus.source import Source
 from franken.data.corpus.spec import eval_pair, instruct, split_of
 
@@ -134,12 +134,6 @@ def _from_qrels(src: Source, split: str, n_queries: int, n_docs: int) -> Pool:
     return pool
 
 
-def _cache_path(corpus: str, name: str, split: str) -> str:
-    return os.path.join(
-        _CACHE_DIR, f"v{_CACHE_VERSION}-{corpus}-{name}-{split}-{QUERIES}x{DOCS}.json"
-    )
-
-
 def pool(
     src: Source,
     split: str,
@@ -149,7 +143,9 @@ def pool(
     cache: bool = True,
 ) -> Pool:
     """Empty only if a source ran out of held-out rows -- a finding, not a configuration."""
-    path = _cache_path(corpus, src.name, split)
+    path = os.path.join(
+        _CACHE_DIR, f"v{_CACHE_VERSION}-{corpus}-{src.name}-{split}-{QUERIES}x{DOCS}.json"
+    )
     if cache and n_queries == QUERIES and n_docs == DOCS and os.path.exists(path):
         with open(path) as f:
             return Pool(**json.load(f))

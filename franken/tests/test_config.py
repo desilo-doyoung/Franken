@@ -195,3 +195,12 @@ def test_yaml_unsigned_exponent_is_rejected_with_the_fix():
     # `1.0e9` is a str under YAML 1.1; otherwise a TypeError an hour after the gate.
     with pytest.raises(ValueError, match="1_000_000_000"):
         Config.from_dict({"train": {"task": "embed", "tokens_per_epoch": "1.0e9"}})
+
+
+def test_only_the_lm_smoke_config_packs():
+    # A packed embed corpus would be a different artifact under a name every qwen3 result is
+    # keyed on, and the flag is the only thing standing between those.
+    packed = sorted(p for p in CONFIGS if Config.from_yaml(p).train.pack)
+    assert [os.path.basename(os.path.dirname(p)) + "/" + os.path.basename(p) for p in packed] == [
+        "llama/smoke.yaml"
+    ]

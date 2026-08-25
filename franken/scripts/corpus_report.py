@@ -79,8 +79,8 @@ def lengths(cfg, sources, tokenizer, extra_col: str = "") -> tuple[bool, list]:
 def build(cfg, task, tokenizer, sources) -> int:
     """Build and cache if needed, then report what the artifact holds. Prints on cache hits too,
     the only place the realized token count shows up. Returns unique train tokens."""
-    cap, tokens = cfg.train.max_seq_len, cfg.train.tokens_per_epoch
-    cached = os.path.isdir(train_cache_path(cfg.train.corpus, tokens, cap, tokenizer))
+    cap, tokens, pack = cfg.train.max_seq_len, cfg.train.tokens_per_epoch, cfg.train.pack
+    cached = os.path.isdir(train_cache_path(cfg.train.corpus, tokens, cap, tokenizer, pack))
     print(
         f"\n{'loading' if cached else 'BUILDING (hours)'} {cfg.train.corpus} "
         f"tokens={tokens:,.0f} max_seq_len={cap}\n"
@@ -90,19 +90,22 @@ def build(cfg, task, tokenizer, sources) -> int:
     print(f"\nready in {(time.time() - start) / 60:.1f} min\n")
 
     stats = {s: describe(data[s], cap) for s in ("train", "validation")}
+    # Packing makes every block exactly `cap`, so `truncated` reads 100% and means the opposite.
+    label = "full" if pack else "truncated"
     for split, st in stats.items():
         print(
             f"{split:11s} n={st.n:>10,}  tokens={st.tokens:>14,}  mean={st.mean:5.1f}  "
-            f"median={st.median:3.0f}  truncated@{cap}={100 * st.truncated:4.1f}%"
+            f"median={st.median:3.0f}  {label}@{cap}={100 * st.truncated:5.1f}%"
         )
 
     if counts := realized_mix(data["train"], len(sources)):
-        print("\nrealized mix (train):")
-        for src, n in zip(sources, counts, strict=True):
-            print(
-                f"  {src.name:<18} {n:>10,}  {n / max(sum(counts), 1):>6.1%}  "
-                f"(declared {src.weight:>6.1%})"
-            )
+        # `weight` is a token share, so realized-vs-declared is the direct check on the declaration.
+        # Under packing every block is `cap` tokens, so block counts ARE token counts.
+        share = counts if pack else None
+        print("\nrealized mix (train), by token share:")
+        for i, (src, n) in enumerate(zip(sources, counts, strict=True)):
+            got = (share[i] / sum(share)) if share else (n / max(sum(counts), 1))
+            print(f"  {src.name:<18} {n:>10,}  {got:>6.1%}  (declared {src.weight:>6.1%})")
 
     unique = stats["train"].tokens
     print(

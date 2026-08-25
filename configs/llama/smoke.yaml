@@ -36,6 +36,7 @@ train:
   output_dir: outputs
   run_name: llama_smoke
   max_seq_len: 1024
+  pack: true # whole blocks, no padding; 20-40% of docs truncate at this cap
   seed: 42
   device: cuda
 

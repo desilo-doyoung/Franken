@@ -1,46 +1,59 @@
 # `franken.data.corpus`
 
-The shared corpus layer: stream a mix, tokenize it, cache it, and — for the retrieval tasks — build
-the eval pools that score it, from **one declaration per dataset**.
+The shared corpus layer: read a source's rows, measure them, and build a tokenized artifact from a
+declared mix — from **one declaration per dataset**.
 
-The declarations themselves live per model, in `franken/data/<model>/registry.py`:
-`qwen3/` declares `multi_domain` (pairs, judgements, instruction prefixes) and `llama/` declares
-`llama_web` (plain documents for logit KD). `franken.data.corpus_sources(name)` resolves a
-`train.corpus` string across both — one flat namespace, because `cache_path` has one flat directory.
+Declarations live per model, in `franken/data/<model>/registry.py`. `qwen3/` declares
+`multi_domain` (pairs, judgements, instruction prefixes, for `task: embed`); `llama/` declares
+`llama_web` (plain documents, for `task: lm`). `franken.data.corpus_sources(name)` resolves a
+`train.corpus` string across both — one flat namespace, because the cache is one flat directory.
 
-## Why it looks like this
+## How data reaches a student
 
-The distillation loss is pointwise teacher-matching (`1 - cos` on the pooled embedding + masked
-hidden MSE, see `franken/tasks/embed.py`). No labels, no logits, no in-batch negatives. So
-**training needs only text plus one bit of role**: a query gets the instruction prefix, a document
-gets none. Whether a dataset is query→answer, symmetric-pairwise or a triplet is irrelevant to the
-gradient.
+```
+configs/<model>/x.yaml      corpus, tokens_per_epoch, max_seq_len, pack
+  ↓
+Task.datasets()             franken/tasks/selfdistill.py
+  ↓
+load_corpus(tokenizer, name, corpus_sources(name), ...)
+  ↓  cache hit?  ->  load_from_disk, done. Nothing below runs.
+  ↓
+_rows()   per source: records() -> corpus_texts() -> tokenize -> accumulate to the TOKEN quota
+          pack:   concatenate, emit exact max_seq_len blocks, drop the trailing partial
+          plain:  emit each document, truncated to max_seq_len
+  ↓
+Dataset.from_generator -> shuffle(seed=0) -> save_to_disk (tmp + rename)
+outputs/corpus_cache/v<N>-<mix>-<split>-<size>-<cap>-<tokenizer>[-packed]
+  ↓
+Distiller: with_format("torch") -> plan_batches(token budget) -> DataCollatorWithPadding
+```
 
-Pair structure earns its place for exactly two reasons:
+Two things are worth knowing about that path.
 
-1. both sides of a pair must land on the same side of the train/val/test split, or an eval task
-   built from held-out rows has its answer in the training set;
-2. the eval pools are built from it.
+**The build draws to a quota; it does not plan.** Each source is streamed until it has contributed
+`budget × weight` tokens. It used to estimate tokens/doc from a sample, plan a document count, then
+stream again — which tokenized everything twice and left realized shares ±3pp off declared. Drawing
+to a quota removes the estimate, so **`measure.py` cannot influence an artifact**: it is reporting
+only. That is why `build.py` does not import it.
 
-That is why the shared dataclass is `Record` at the **row** level, not a per-dataset config. One
-adapter per dataset shape feeds both the corpus and the eval, through two functions that are the
-whole sync point: `corpus_texts()` and `eval_pair()`. Before this, every dataset was declared twice
-— once as a mix entry, once as a retrieval task in the eval script — and each column rename had to
-land in both.
-
-> Qwen3-Embedding itself is trained with contrastive InfoNCE over weakly-supervised then supervised
-> pairs with hard negatives. That recipe governs *which pairs are worth collecting*, not this
-> objective. Adding a contrastive term would need a different loss and large negative batches.
+**`Source.weight` is a TOKEN share.** Documents differ in length by more than 10× within a mix
+(arxiv abstracts ~180 tokens against codeparrot files ~2,500), so a text-count share silently
+produced a different mix than the one declared. The build converts share → document count itself,
+from what it actually reads.
 
 ## Modules
 
 | module | owns |
 |---|---|
-| `spec.py` | `Record`, the instruction format (`instruct`), the split policy (`split_of`, `SPLIT_PCT`), and `corpus_texts` / `eval_pair` |
-| `adapters.py` | one `row -> Record \| None` function per dataset *shape* (`pair`, `triplet`, `marco`, `titled`, `paragraphs`, `whole`, `wikitext`) |
-| `source.py` | `Source` / `Qrels` — the declaration schema. The mixes are per model, in `franken/data/<model>/registry.py`, still **the only place a dataset is named** |
-| `build.py` | streaming, weighted mixing, tokenizing, on-disk cache, `load_corpus` |
+| `source.py` | `Source` / `Qrels` — the declaration schema, plus `normalized()` |
+| `spec.py` | `Record`, the instruction wire format (`instruct`), the split policy (`split_of`, `SPLIT_PCT`), and `corpus_texts` / `eval_pair` |
+| `adapters.py` | one `row -> Record \| None` per dataset *shape*: `pair`, `triplet`, `marco`, `titled`, `paragraphs`, `whole`, `wikitext` |
+| `read.py` | `records()` — a source's rows for one split, hash-split and qrels-holdout applied — and `source_texts()` |
+| `measure.py` | `profile()` per source, `describe()` / `realized_mix()` on a built artifact. **Reporting only** |
+| `build.py` | `_rows` (the draw), the cache key, `load_corpus` |
 | `evalset.py` | `Pool` (documents, queries, judgements) from a source's held-out rows |
+
+Imports run one way: `build → read` and `measure → read`, never between `build` and `measure`.
 
 ## Using it
 
@@ -59,50 +72,70 @@ for src in mix(name):
 ```
 
 `source` keeps provenance on the artifact: it is what lets the realized mix be verified after a
-build rather than trusted from the build log.
+build rather than trusted from the build log. Packing is **per source** so that column stays exact —
+a block spanning sources could only record a majority.
 
 ## Adding a dataset
 
-One `Source` in your model's `registry.py`. Pick the adapter matching its row shape (or add one if the shape is
-new), set `key` to the column the split hashes on — or leave it `None` if the dataset ships its own
-splits — and give it a relative `weight`; weights are normalised at import, so no rebalancing.
+One `Source` in your model's `registry.py`. Pick the adapter matching its row shape (or add one if
+the shape is new), set `key` to the column the split hashes on — or leave it `None` if the dataset
+ships its own splits — and give it a relative token `weight`; weights are normalised at import.
 
-**Every source in a *retrieval* mix must be scoreable.** It yields `(query, positive)` records, or it
-declares `Qrels`; `franken/scripts/qwen3/corpus.py` fails the gate before a build is paid for. An LM
-mix is exempt — `adapters.whole` yields documents only, and logit KD scores perplexity, not ranking.
-An unscoreable slice is a permanent blind spot — that is how `code_apps` −53.9% turned out to be
-measuring corpus coverage rather than the depth cut.
+⚠️ **Prefer a hash `key` over the dataset's own splits.** With `whole` there is no short side to
+average against, so an upstream length skew shows through: CodeSearchNet's train/val/test means read
+985 / 1354 / 1210 characters and tripped the holdout gate. A hash key makes the splits both disjoint
+and identically distributed.
 
-`titled` and `wikitext` yield documents only, so any source using them needs `Qrels`.
+⚠️ **Test that a source still loads before declaring it.** `datasets` 5.0 removed script loaders, so
+`codeparrot/github-code-clean` and several `bigcode/*` repos fail or are gated.
 
-## Two contracts worth knowing
+**Every source in a *retrieval* mix must be scoreable** — it yields `(query, positive)` records, or
+it declares `Qrels`. `franken/scripts/qwen3/corpus.py` fails the gate before a build is paid for. An
+LM mix is exempt: `adapters.whole` yields documents only, and logit KD scores perplexity, not
+ranking. An unscoreable slice is a permanent blind spot — that is how `code_apps` −53.9% turned out
+to be measuring corpus coverage rather than the depth cut.
+
+`titled` and `wikitext` yield documents only, so any source using them in a retrieval mix needs
+`Qrels`.
+
+## Contracts worth knowing
 
 **Splits.** `split_of(key)` is a pure function of a stable key (blake2b — never `hash()`, which
 Python salts per process), so the three splits are disjoint however a stream is read and identical
-text cannot straddle them. A row's whole yield goes to one split, which is what keeps a paragraph
-from being separated from its article or an anchor from its positive. `key` is declared explicitly
-because `evalset` re-derives membership from it: the two must hash the same string, or the eval
-silently scores trained rows.
+text cannot straddle them. A row's whole yield goes to one split, which keeps a paragraph with its
+article and an anchor with its positive. `key` is declared explicitly because `evalset` re-derives
+membership from it: the two must hash the same string, or the eval silently scores trained rows.
 
-`SPLIT_PCT` is **1% validation / 4% test**, sized to what each split is *for* rather than split
-evenly. **Validation selects, test reports.** Validation only ever draws `build.VAL_POOL` = 500
-texts, the pool `Distiller.train` scores `recall@10` on to pick the checkpoint — 1% is ~50× that.
-Test fills a 500×5,000 retrieval pool *per source*, and at 2% three sources could not reach it
-(`codefeedback` 2,900, `glaive_code` 2,726, `stackexchange` 4,365 documents), which biased
+`SPLIT_PCT` is **1% validation / 4% test**, sized to what each split is *for*. **Validation selects,
+test reports.** Validation draws `VAL_POOL` = 500 documents — the pool `Distiller.train` scores
+`recall@10` on — at the same token composition as train, by over-drawing and trimming after the
+shuffle. Test fills a 500×5,000 retrieval pool *per source*, and at 2% three sources could not reach
+it (`codefeedback` 2,900, `glaive_code` 2,726, `stackexchange` 4,365 documents), which biased
 `MACRO-pair` by averaging tasks of unequal difficulty. `eval.py --split` therefore defaults to
 `test`, so the reported in-distribution number does not share rows with the pool that selected the
 model.
 
 **Instructions.** `Source.instruct` is a *task description*; `spec.instruct()` wraps it in the wire
-format verified against this checkpoint's `config_sentence_transformers.json` (no space after
-`Query:`). `None` leaves the query bare, which is correct for a symmetric task — there is no
-query/document asymmetry to instruct. Documents never take one. The prefix is baked into the cached
-corpus text, so changing a source's instruction needs a `build._CACHE_VERSION` bump.
+format verified against Qwen3-Embedding's `config_sentence_transformers.json` (no space after
+`Query:`). `None` leaves the query bare, correct for a symmetric task. Documents never take one.
+The prefix is baked into the cached text, so changing it needs a `_CACHE_VERSION` bump. Llama's mix
+sets it nowhere — a base LM has no such protocol.
+
+**Packing** (`train.pack`) concatenates documents into whole `max_seq_len` blocks instead of
+truncating, so there is no padding at all. Opt-in, and it gets its own cache-key suffix, so an
+existing build is never reinterpreted. Under packing `describe`'s `truncated` reads **100%** — every
+block is exactly the cap — which is why the report relabels it `full@cap`.
 
 **Cache invalidation is manual.** `build._CACHE_VERSION` must be bumped when a source, a weight or
-an adapter changes — the cache key covers the *request* (preset, split, size, cap, tokenizer), not
-the recipe that answered it. Deliberate: a content digest over the adapters would throw away an
-hours-long build on a cosmetic edit. The cost is that forgetting to bump serves stale text silently.
+an adapter changes — the key covers the *request* (mix, split, size, cap, tokenizer, packing), not
+the recipe that answered it. Deliberate: a content digest would throw away an hours-long build on a
+cosmetic edit. The cost is that forgetting to bump serves stale text silently.
+
+🚨 **`Dataset.from_generator` fingerprints its `gen_kwargs`, not the generator's code.** A logic
+change to `_rows` does not invalidate HF's own cache, so it will happily republish a stale draw —
+once observed reporting `CORPUS OK` in 0.0 min with the draw lines missing from the log. `build.py`
+therefore points it at a scratch dir deleted in a `finally`, leaving `_CACHE_VERSION` as the single
+invalidation story. Do not remove that.
 
 ## Which source supports which metric
 
@@ -123,18 +156,17 @@ damage it reads 1.000 at n=11, 0.110 at 500, 0.039 at 5,000).
 Tier 3 is not weak for lacking grades; `1/log2(rank+2)` is sensitive (1.000 / 0.631 / 0.500 at ranks
 0–2). It is weak where the gold is **one arbitrary member of an equally valid set**, because the
 alternatives sit in the same pool as unjudged false negatives and the metric then scores a
-tie-break. `Source.scores_ndcg = False` marks those: the six `wiki_*` (`paragraphs` promotes one
+tie-break. `Source.scores_ndcg = False` marks those: the `wiki_*` slices (`paragraphs` promotes one
 sibling and sends the rest to `docs`) and `specter` (title → *a* related title). They still yield
-pairs, so `corpus.py`'s scoreability gate is untouched and their `recall@10` is reported; only the
-nDCG cells are blank, and they leave `MACRO-pair`.
+pairs, so the scoreability gate is untouched and their `recall@10` is reported; only the nDCG cells
+are blank, and they leave `MACRO-pair`.
 
 The criterion is the adapter **shape**, not the teacher's score. Teacher scores merely agree with it
-(`specter` 0.2921, `wiki_ja` 0.4864 vs `glaive_code` 0.9970, `pubmed` 0.9877) — picking it from a
-score threshold is how `magicoder` was once retired on a single datum with no student delta ever
-measured.
+(`specter` 0.2921, `wiki_ja` 0.4864 vs `glaive_code` 0.9970) — picking it from a score threshold is
+how `magicoder` was once retired on a single datum with no student delta ever measured.
 
-⚠️ Those seven are ~24% of the corpus by weight, which now carries **fidelity only**. That is a
-pre-existing blind spot made visible, not a new one: four of the five non-English wiki languages
+⚠️ In `multi_domain` those slices are ~24% of the corpus by weight, which carries **fidelity only**.
+A pre-existing blind spot made visible, not a new one: four of the five non-English wiki languages
 have no external twin either.
 
 ## Caveats
@@ -142,9 +174,15 @@ have no external twin either.
 - **Qrels-derived pools are weaker than pair-derived ones.** The judgements pick the gold documents,
   so each lands in `train` with ~96% probability: the document side is *seen*, and only the
   distractors are held out. `eval.py` keeps them in a separate macro (`MACRO-qrels`) for this reason.
-- **A source that runs dry does not take effect at its declared weight.** `build` prints
-  requested-vs-delivered per source; anything flagged `EXHAUSTED` is a weight that did not apply.
-  An earlier mix asked for 20% queries and delivered 5.2%, unnoticed, through a whole tracker.
+- **A source that runs dry does not take effect at its declared weight.** The build prints
+  requested-vs-delivered tokens per source; anything flagged `EXHAUSTED` is a weight that did not
+  apply. An earlier mix asked for 20% queries and delivered 5.2%, unnoticed, through a whole tracker.
+- **A source that fails mid-draw raises.** `profile()` tolerates a dead loader because the gate must
+  name every one; the build makes the opposite choice, because a silently short corpus trains a
+  different experiment than the one declared.
 - **Adapters keep the gold count small on purpose.** Every positive becomes gold, and many golds per
   query makes nDCG@10 trivially satisfiable — which is why `paragraphs` promotes one sibling
   paragraph and sends the rest to `docs`.
+- **A green test suite is not a usable artifact.** `_rows` once dropped the `attention_mask` column:
+  every test passed, the gate passed, the realized-mix table was exact, and `torch_columns()` could
+  not load the result. Load the artifact through the real task path.

@@ -4,13 +4,15 @@ from franken.data import corpus_sources
 from franken.data.llama.registry import PRESETS
 from franken.data.qwen3.registry import PRESETS as QWEN3_PRESETS
 
-# name -> (repo, config, column, raw weight)
+# name -> (repo, config, column, TOKEN share)
 _LLAMA_WEB = {
-    "fineweb_edu": ("HuggingFaceFW/fineweb-edu", "sample-100BT", "text", 0.50),
-    "finewiki_en": ("HuggingFaceFW/finewiki", "en", "text", 0.12),
-    "code": ("code-search-net/code_search_net", "python", "whole_func_string", 0.12),
+    "fineweb_edu": ("HuggingFaceFW/fineweb-edu", "sample-100BT", "text", 0.37),
+    "finewiki_en": ("HuggingFaceFW/finewiki", "en", "text", 0.10),
+    "open_web_math": ("open-web-math/open-web-math", None, "text", 0.12),
+    "arxiv": ("gfissore/arxiv-abstracts-2021", None, "abstract", 0.06),
+    "codeparrot": ("codeparrot/codeparrot-clean", None, "content", 0.13),
     **{
-        f"finewiki_{lang}": ("HuggingFaceFW/finewiki", lang, "text", 0.03)
+        f"finewiki_{lang}": ("HuggingFaceFW/finewiki", lang, "text", 0.0314)
         for lang in ("de", "fr", "es", "it", "pt", "hi", "th")
     },
 }
@@ -40,6 +42,12 @@ def test_the_source_order_is_stable():
 def test_no_name_collides_with_the_qwen3_registry():
     # cache_path has ONE flat directory, so a reused name would serve the other model's text.
     assert not set(PRESETS) & set(QWEN3_PRESETS)
+
+
+def test_every_source_hash_splits():
+    # A `whole` source has no short side to average against, so an upstream split's length skew
+    # shows through -- CodeSearchNet's tripped the holdout gate at 985/1354/1210.
+    assert [s.name for s in PRESETS["llama_web"] if s.key is None] == []
 
 
 def test_the_resolver_finds_both_registries():

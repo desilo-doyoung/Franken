@@ -11,9 +11,13 @@ from franken.data.corpus import adapters
 from franken.data.corpus.source import Qrels, Source, normalized
 from franken.data.corpus.spec import WEB_SEARCH
 
-_WIKI_LANGS = ("zh", "ja", "ar", "ru", "es")  # scripts that move the teacher activation range
+# (lang, token share). Per-language rather than one figure: they tokenize differently enough
+# that a shared weight would move the composition this conversion exists to preserve.
+_WIKI_LANGS = (("zh", 0.0322), ("ja", 0.0298), ("ar", 0.0342), ("ru", 0.0292), ("es", 0.026))
 
-# Relative weights, normalised below. Coverage is the motivation, not volume.
+# TOKEN shares (v10), normalised below. `_plan_draw` converts each to a document count with a
+# live tok/doc measurement. These are multi_domain's REALIZED shares under the old text-share
+# draw, so the composition every result above was measured on is preserved.
 _MULTI_DOMAIN = [
     Source(
         "msmarco",
@@ -21,7 +25,7 @@ _MULTI_DOMAIN = [
         "microsoft/ms_marco",
         "v2.1",
         adapters.marco,
-        0.209,
+        0.1544,
         instruct=WEB_SEARCH,
     ),
     # `titled`, not a pair: keyed on `_id` the title straddles splits 60.7% of the time and leaks
@@ -32,7 +36,7 @@ _MULTI_DOMAIN = [
         "BeIR/nq",
         "corpus",
         adapters.titled,
-        0.06,
+        0.0785,
         key="_id",
         hf_split="corpus",
         qrels=Qrels("BeIR/nq-qrels"),
@@ -43,7 +47,7 @@ _MULTI_DOMAIN = [
         "BeIR/hotpotqa",
         "corpus",
         adapters.titled,
-        0.05,
+        0.0517,
         key="_id",
         hf_split="corpus",
         qrels=Qrels("BeIR/hotpotqa-qrels"),
@@ -55,7 +59,7 @@ _MULTI_DOMAIN = [
         "wikimedia/wikipedia",
         "20231101.en",
         adapters.paragraphs,
-        0.06,
+        0.0419,
         key="id",
         scores_ndcg=False,
     ),
@@ -68,7 +72,7 @@ _MULTI_DOMAIN = [
         "sentence-transformers/gooaq",
         None,
         adapters.pair("question", "answer"),
-        0.1,
+        0.0451,
         key="question",
         instruct=WEB_SEARCH,
     ),
@@ -78,7 +82,7 @@ _MULTI_DOMAIN = [
         "sentence-transformers/eli5",
         None,
         adapters.pair("question", "answer"),
-        0.03,
+        0.02,
         key="question",
         instruct=WEB_SEARCH,  # a forum-question string measured -0.0067
     ),
@@ -88,7 +92,7 @@ _MULTI_DOMAIN = [
         "sentence-transformers/stackexchange-duplicates",
         "post-post-pair",
         adapters.pair("post1", "post2"),
-        0.03,
+        0.0531,
         key="post1",
     ),
     # Chosen over a PubMed corpus because nfcorpus IS PubMed; overlap here is 3 rows in 400,000.
@@ -98,7 +102,7 @@ _MULTI_DOMAIN = [
         "gfissore/arxiv-abstracts-2021",
         None,
         adapters.pair("title", "abstract"),
-        0.06,
+        0.0649,
         key="id",
         instruct=WEB_SEARCH,
     ),
@@ -110,7 +114,7 @@ _MULTI_DOMAIN = [
         "sentence-transformers/s2orc",
         "abstract-citation-pair",
         adapters.pair("abstract", "citation"),
-        0.08,
+        0.1965,
         key="abstract",
     ),
     # Title -> *a* related title: many are equally related, so the promoted one is arbitrary.
@@ -120,7 +124,7 @@ _MULTI_DOMAIN = [
         "sentence-transformers/specter",
         "triplet",
         adapters.triplet,
-        0.03,
+        0.0043,
         key="anchor",
         scores_ndcg=False,
     ),
@@ -131,7 +135,7 @@ _MULTI_DOMAIN = [
         "code-search-net/code_search_net",
         "python",
         adapters.pair("func_documentation_string", "whole_func_string"),
-        0.04,
+        0.0612,
         instruct=WEB_SEARCH,
     ),
     Source(
@@ -140,7 +144,7 @@ _MULTI_DOMAIN = [
         "m-a-p/CodeFeedback-Filtered-Instruction",
         None,
         adapters.pair("query", "answer"),
-        0.015,
+        0.0438,
         key="query",
         instruct=WEB_SEARCH,
     ),
@@ -150,7 +154,7 @@ _MULTI_DOMAIN = [
         "glaiveai/glaive-code-assistant",
         None,
         adapters.pair("question", "answer"),
-        0.013,
+        0.0332,
         key="question",
         instruct=WEB_SEARCH,
     ),
@@ -162,11 +166,11 @@ _MULTI_DOMAIN = [
         "wikimedia/wikipedia",
         f"20231101.{lang}",
         adapters.paragraphs,
-        0.026,
+        share,
         key="id",
         scores_ndcg=False,  # same arbitrary-sibling gold as wiki_en
     )
-    for lang in _WIKI_LANGS
+    for lang, share in _WIKI_LANGS
 ]
 
 

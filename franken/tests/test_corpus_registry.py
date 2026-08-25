@@ -5,56 +5,54 @@ import pytest
 from franken.data.corpus.build import cache_path, train_cache_path
 from franken.data.qwen3.registry import MIXES, PRESETS
 
-# name -> (repo, config, key, raw weight, instructed, has qrels, scores_ndcg)
+# name -> (repo, config, key, TOKEN share, instructed, has qrels, scores_ndcg)
 _MULTI_DOMAIN = {
-    "msmarco": ("microsoft/ms_marco", "v2.1", None, 0.209, True, False, True),
-    "nq_passage": ("BeIR/nq", "corpus", "_id", 0.06, False, True, True),
-    "hotpotqa_passage": ("BeIR/hotpotqa", "corpus", "_id", 0.05, False, True, True),
-    "wiki_en": ("wikimedia/wikipedia", "20231101.en", "id", 0.06, False, False, False),
-    "gooaq": ("sentence-transformers/gooaq", None, "question", 0.1, True, False, True),
-    "eli5": ("sentence-transformers/eli5", None, "question", 0.03, True, False, True),
+    "msmarco": ("microsoft/ms_marco", "v2.1", None, 0.1544, True, False, True),
+    "nq_passage": ("BeIR/nq", "corpus", "_id", 0.0785, False, True, True),
+    "hotpotqa_passage": ("BeIR/hotpotqa", "corpus", "_id", 0.0517, False, True, True),
+    "wiki_en": ("wikimedia/wikipedia", "20231101.en", "id", 0.0419, False, False, False),
+    "gooaq": ("sentence-transformers/gooaq", None, "question", 0.0451, True, False, True),
+    "eli5": ("sentence-transformers/eli5", None, "question", 0.02, True, False, True),
     "stackexchange": (
         "sentence-transformers/stackexchange-duplicates",
         "post-post-pair",
         "post1",
-        0.03,
+        0.0531,
         False,
         False,
         True,
     ),
-    "arxiv": ("gfissore/arxiv-abstracts-2021", None, "id", 0.06, True, False, True),
+    "arxiv": ("gfissore/arxiv-abstracts-2021", None, "id", 0.0649, True, False, True),
     "s2orc": (
         "sentence-transformers/s2orc",
         "abstract-citation-pair",
         "abstract",
-        0.08,
+        0.1965,
         False,
         False,
         True,
     ),
-    "specter": ("sentence-transformers/specter", "triplet", "anchor", 0.03, False, False, False),
-    "code": ("code-search-net/code_search_net", "python", None, 0.04, True, False, True),
+    "specter": ("sentence-transformers/specter", "triplet", "anchor", 0.0043, False, False, False),
+    "code": ("code-search-net/code_search_net", "python", None, 0.0612, True, False, True),
     "codefeedback": (
         "m-a-p/CodeFeedback-Filtered-Instruction",
         None,
         "query",
-        0.015,
+        0.0438,
         True,
         False,
         True,
     ),
-    "glaive_code": ("glaiveai/glaive-code-assistant", None, "question", 0.013, True, False, True),
+    "glaive_code": ("glaiveai/glaive-code-assistant", None, "question", 0.0332, True, False, True),
     **{
-        f"wiki_{lang}": (
-            "wikimedia/wikipedia",
-            f"20231101.{lang}",
-            "id",
-            0.026,
-            False,
-            False,
-            False,
+        f"wiki_{lang}": ("wikimedia/wikipedia", f"20231101.{lang}", "id", w, False, False, False)
+        for lang, w in (
+            ("zh", 0.0322),
+            ("ja", 0.0298),
+            ("ar", 0.0342),
+            ("ru", 0.0292),
+            ("es", 0.0260),
         )
-        for lang in ("zh", "ja", "ar", "ru", "es")
     },
 }
 
@@ -87,7 +85,7 @@ def _declared(src):
             "1930000tok",
             256,
             "Qwen/Qwen3-Embedding-0.6B",
-            "outputs/corpus_cache/v9-multi_domain-train-1930000tok-256-Qwen_Qwen3-Embedding-0.6B",
+            "outputs/corpus_cache/v11-multi_domain-train-1930000tok-256-Qwen_Qwen3-Embedding-0.6B",
         ),
         (
             "multi_domain",
@@ -95,7 +93,7 @@ def _declared(src):
             "500",
             256,
             "Qwen/Qwen3-Embedding-0.6B",
-            "outputs/corpus_cache/v9-multi_domain-validation-500-256-Qwen_Qwen3-Embedding-0.6B",
+            "outputs/corpus_cache/v11-multi_domain-validation-500-256-Qwen_Qwen3-Embedding-0.6B",
         ),
         (
             "mixed",
@@ -103,7 +101,7 @@ def _declared(src):
             "140000tok",
             128,
             "unsloth/Llama-3.2-1B",
-            "outputs/corpus_cache/v9-mixed-train-140000tok-128-unsloth_Llama-3.2-1B",
+            "outputs/corpus_cache/v11-mixed-train-140000tok-128-unsloth_Llama-3.2-1B",
         ),
         (
             "mixed",
@@ -111,14 +109,24 @@ def _declared(src):
             "500",
             128,
             "unsloth/Llama-3.2-1B",
-            "outputs/corpus_cache/v9-mixed-validation-500-128-unsloth_Llama-3.2-1B",
+            "outputs/corpus_cache/v11-mixed-validation-500-128-unsloth_Llama-3.2-1B",
         ),
     ],
 )
 def test_cache_path_still_names_the_builds_already_on_disk(name, split, label, cap, tok, expected):
-    # These four directories exist. A moved _CACHE_VERSION, _CACHE_DIR, size label or tokenizer
-    # sanitizer renames the key and silently re-pays a multi-hour build.
+    # v10 deliberately orphans the v9 dirs: `Source.weight` became a token share, so every mix
+    # recomposes. Pinned so the NEXT change cannot move the key by accident.
     assert cache_path(name, split, label, cap, _tok(tok)) == expected
+
+
+def test_packing_is_a_different_artifact_not_a_reinterpreted_one():
+    # An unpacked key must render exactly as before the flag existed, or turning packing on
+    # elsewhere would silently reinterpret an existing build.
+    bare = cache_path("multi_domain", "train", "1930000tok", 256, _tok("t"))
+    assert cache_path("multi_domain", "train", "1930000tok", 256, _tok("t"), pack=False) == bare
+    assert cache_path("multi_domain", "train", "1930000tok", 256, _tok("t"), pack=True) == (
+        bare + "-packed"
+    )
 
 
 def test_train_cache_path_renders_the_budget_as_an_integer():
@@ -149,3 +157,71 @@ def test_every_mix_is_buildable():
     # `mix()` reads MIXES and `_build_split` reads PRESETS: a mix missing from PRESETS passes the
     # gate and then dies an hour into the build.
     assert set(MIXES) <= set(PRESETS)
+
+
+def test_declared_token_shares_are_realized(monkeypatch):
+    # The point of drawing to a quota instead of a planned document count: no tok/doc estimate
+    # stands between the declaration and the artifact, so uneven lengths cannot skew the mix.
+    from collections import Counter
+
+    from franken.data.corpus import build
+    from franken.data.llama.registry import PRESETS as LLAMA
+
+    sources = LLAMA["llama_web"]
+    lens = {s.name: 5 + 40 * i for i, s in enumerate(sources)}  # 5..445 tokens, an 89x spread
+
+    def endless(src, split, size=1000):
+        # Never runs dry, so the quota is the only thing that stops the draw.
+        while True:
+            yield ["w " * lens[src.name]] * size
+
+    monkeypatch.setattr(build, "_batches", endless)
+
+    req = build._Build(
+        name="t",
+        sources=sources,
+        split="train",
+        tokenizer=_FakeTok(),
+        max_seq_len=1024,
+        tokens=2_000_000,
+    )
+    tokens = Counter()
+    for row in build._rows(req):
+        tokens[row["source"]] += len(row["input_ids"])
+
+    total = sum(tokens.values())
+    for i, src in enumerate(sources):
+        assert tokens[i] / total == pytest.approx(src.weight, rel=0.01)
+
+
+def test_a_source_that_fails_mid_draw_is_not_silently_dropped(monkeypatch):
+    # `profile` tolerates a dead loader because the GATE must report every source. The build must
+    # not: a silently short corpus trains a different experiment than the one declared.
+    from franken.data.corpus import build
+    from franken.data.llama.registry import PRESETS as LLAMA
+
+    def boom(src, split, size=1000):
+        raise RuntimeError("loader died")
+
+    monkeypatch.setattr(build, "_batches", boom)
+    req = build._Build(
+        name="t",
+        sources=LLAMA["llama_web"],
+        split="train",
+        tokenizer=_FakeTok(),
+        max_seq_len=1024,
+        tokens=1000,
+    )
+    with pytest.raises(RuntimeError, match="loader died"):
+        list(build._rows(req))
+
+
+class _FakeTok:
+    """One token per whitespace-separated word, so a document's length is written in its text."""
+
+    eos_token_id = 0
+    name_or_path = "fake"
+
+    def __call__(self, batch, truncation=False, max_length=None):
+        cap = max_length if truncation and max_length else 10**9
+        return {"input_ids": [[1] * min(len(t.split()), cap) for t in batch]}

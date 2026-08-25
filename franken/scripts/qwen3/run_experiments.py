@@ -289,7 +289,11 @@ def _cache_missing(cfg) -> bool:
     cached = os.path.join(
         _ROOT,
         train_cache_path(
-            cfg.train.corpus, cfg.train.tokens_per_epoch, cfg.train.max_seq_len, tokenizer
+            cfg.train.corpus,
+            cfg.train.tokens_per_epoch,
+            cfg.train.max_seq_len,
+            tokenizer,
+            cfg.train.pack,
         ),
     )
     return not os.path.isdir(cached)

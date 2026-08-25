@@ -38,6 +38,7 @@ class SelfDistillTask(Task):
             cfg.train.tokens_per_epoch,
             cfg.train.max_seq_len,
             splits=splits,
+            pack=cfg.train.pack,
         )
 
     def torch_columns(self) -> list[str]:

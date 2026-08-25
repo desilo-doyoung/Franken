@@ -1,163 +1,174 @@
-"""Stream a mix's sources, mix them by weight, tokenize and cache."""
+"""Build a corpus artifact: draw each source to its token quota, tokenize, cache.
+
+Reading rows is `read`; measuring them is `measure`, which nothing here calls -- drawing to a quota
+needs no estimate, so a measurement cannot skew an artifact.
+"""
 
 from __future__ import annotations
 
 import os
-import random
 import re
 import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import cache
 from typing import Any
 
 import datasets
-import numpy as np
-import pyarrow.compute as pc
 import transformers
 
+from franken.data.corpus.read import records
 from franken.data.corpus.source import Source
-from franken.data.corpus.spec import Record, corpus_texts, eval_pair, split_of
+from franken.data.corpus.spec import corpus_texts
 
 _CACHE_DIR = "outputs/corpus_cache"
 # Bump when a source, weight or adapter changes: the key covers the request, not the recipe that
 # answered it. Manual, not a digest, which would discard an hours-long build on a typo.
-_CACHE_VERSION = 9  # v9: keyed on a token budget, not a text count
-
-# Shard-order shuffling does the global mixing, so the buffer stays small.
-_SHUFFLE = 10_000
+_CACHE_VERSION = 11  # v11: drawn to a token quota, not to a planned document count
 
 # Deliberately NOT a config knob: recall@10 is strongly pool-size dependent, so a per-run value
 # would silently void every comparison.
 VAL_POOL = 500
-
-CALIB = 2000  # texts/source for the tokens->texts calibration; +-0.9% on the mix mean
-
-
-def _stream(repo: str, config: str | None, hf_split: str):
-    ds = datasets.load_dataset(repo, config, split=hf_split, streaming=True)
-    # Every split, not just train: several streams are grouped, so a prefix `take` is single-mode.
-    return ds.shuffle(seed=0, buffer_size=_SHUFFLE)
-
-
-@cache
-def _judged(spec) -> frozenset[str]:
-    """Documents a `Qrels` source judges, held out of training wholesale: `evalset._from_qrels`
-    force-adds every gold to its pool, so `split_of` alone would leave them in the draw."""
-    _qid, pid, score = spec.cols
-    rows = datasets.load_dataset(spec.repo, split=spec.split)
-    return frozenset(str(r[pid]) for r in rows if float(r[score]) > 0)
-
-
-def records(src: Source, split: str) -> Iterator[Record]:
-    """Rows of one source belonging to `split`. The corpus and the eval both read this, so they
-    cannot disagree about membership."""
-    hf_split = src.hf_split if src.key else src.split_map.get(split, split)
-    judged = _judged(src.qrels) if src.qrels and split == "train" else frozenset()
-    for row in _stream(src.repo, src.config, hf_split):
-        if src.key and split_of(str(row[src.key])) != split:
-            continue
-        if judged and str(row[src.key]) in judged:
-            continue
-        rec = src.adapt(row)
-        if rec is not None:
-            yield rec
-
-
-def source_texts(src: Source, split: str, n: int) -> list[str]:
-    out: list[str] = []
-    for rec in records(src, split):
-        out += corpus_texts(rec, src.instruct)
-        if len(out) >= n:
-            break
-    return out[:n]
-
-
-def _mix(sources: list[Source], split: str, n: int) -> tuple[list[str], list[int]]:
-    """Draw each source in proportion, then interleave. A source that runs dry silently misses its
-    declared weight, so report per source as it lands -- also the only progress signal."""
-    drawn: list[tuple[int, list[str]]] = []
-    for i, src in enumerate(sources):
-        want = max(1, round(n * src.weight))
-        texts = source_texts(src, split, want)
-        short = "  EXHAUSTED" if len(texts) < want else ""
-        print(f"  {src.name:24s} want {want:>9,}  got {len(texts):>9,}{short}", flush=True)
-        drawn.append((i, texts))
-
-    total = sum(len(t) for _i, t in drawn)
-    realized = "  ".join(f"{sources[i].name} {len(t) / max(total, 1):.1%}" for i, t in drawn)
-    print(f"corpus mix [{split}]: {total:,} texts for a request of {n:,}\n  {realized}", flush=True)
-
-    rows = [(text, i) for i, texts in drawn for text in texts]
-    random.Random(0).shuffle(rows)
-    rows = rows[:n]
-    return [t for t, _i in rows], [i for _t, i in rows]
 
 
 def _tokens_label(tokens: float) -> str:
     return f"{int(tokens)}tok"
 
 
-def cache_path(name: str, split: str, size_label: str, max_seq_len: int, tokenizer: Any) -> str:
-    """`size_label` is a token budget for train (`…-2000000000tok-…`) and a text count for the
+def cache_path(
+    name: str,
+    split: str,
+    size_label: str,
+    max_seq_len: int,
+    tokenizer: Any,
+    pack: bool = False,
+) -> str:
+    """`size_label` is a token budget for train (`…-2000000000tok-…`) and a document count for the
     fixed validation pool. Public: `run_experiments` checks the cache before launching a batch."""
     tok_id = re.sub(r"[^\w.-]", "_", str(getattr(tokenizer, "name_or_path", "tokenizer")))
     return os.path.join(
-        _CACHE_DIR, f"v{_CACHE_VERSION}-{name}-{split}-{size_label}-{max_seq_len}-{tok_id}"
+        _CACHE_DIR,
+        f"v{_CACHE_VERSION}-{name}-{split}-{size_label}-{max_seq_len}-{tok_id}"
+        + ("-packed" if pack else ""),
     )
 
 
-def train_cache_path(name: str, tokens: float, max_seq_len: int, tokenizer: Any) -> str:
-    return cache_path(name, "train", _tokens_label(tokens), max_seq_len, tokenizer)
+def train_cache_path(
+    name: str, tokens: float, max_seq_len: int, tokenizer: Any, pack: bool = False
+) -> str:
+    return cache_path(name, "train", _tokens_label(tokens), max_seq_len, tokenizer, pack)
 
 
-def _calibrate(sources: list[Source], max_seq_len: int, tokenizer: Any, tokens: float) -> int:
-    """How many texts sum to `tokens`. Measured here, not declared: tok/text depends on the mix AND
-    the cap (~110 at 1024, ~97 at 256). The cache is keyed on the token budget, so sampling error
-    moves the text count and can never rename a corpus."""
-    rows = [r for r in profile(sources, tokenizer, max_seq_len, n=CALIB) if not r.error]
-    covered = sum(r.weight for r in rows)
-    if not covered:
-        raise RuntimeError("No source produced a sample; cannot size the corpus.")
-    mean = sum(r.weight * r.mean for r in rows) / covered  # rescaled, so a dead source is not 0
-    print(f"calibration: {mean:.1f} tok/text over {covered:.3f} of the mix", flush=True)
-    return max(1, round(tokens / mean))
+@dataclass
+class _Build:
+    """One split's build request: what names the artifact, and what fills it.
+
+    Exactly one of `tokens` / `docs` is set. `docs` over-draws `docs * max_seq_len` tokens -- a
+    document cannot exceed the cap -- and the excess is dropped after the shuffle, so the pool is an
+    exact size with the same token composition as train.
+    """
+
+    name: str
+    sources: list[Source]
+    split: str
+    tokenizer: Any
+    max_seq_len: int
+    pack: bool = False
+    tokens: float | None = None
+    docs: int | None = None
+
+    @property
+    def budget(self) -> float:
+        return self.tokens if self.tokens is not None else self.docs * self.max_seq_len
+
+    @property
+    def path(self) -> str:
+        label = _tokens_label(self.tokens) if self.tokens is not None else str(self.docs)
+        return cache_path(self.name, self.split, label, self.max_seq_len, self.tokenizer, self.pack)
 
 
-def _save_atomic(ds, path: str) -> None:
-    # Every rank builds concurrently, so publish by rename; losers discard.
-    tmp = f"{path}.tmp{os.getpid()}"
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    ds.save_to_disk(tmp)
-    try:
-        os.rename(tmp, path)
-    except OSError:
-        shutil.rmtree(tmp, ignore_errors=True)
+def _batches(src: Source, split: str, size: int = 1000) -> Iterator[list[str]]:
+    buf: list[str] = []
+    for rec in records(src, split):
+        buf += corpus_texts(rec, src.instruct)
+        if len(buf) >= size:
+            yield buf
+            buf = []
+    if buf:
+        yield buf
+
+
+def _rows(req: _Build) -> Iterator[dict]:
+    """Every source drawn to its declared TOKEN share, tokenized once.
+
+    Drawing to a quota rather than to a planned document count is what makes the realized shares
+    exact: no tok/doc estimate stands between the declaration and the artifact.
+
+    The quota counts tokens EMITTED, not read, so the overshoot is one block. Counting reads let a
+    single 36k-token article blow a 63k quota by 57% on `finewiki_hi`.
+    """
+    for i, src in enumerate(req.sources):
+        quota = req.budget * src.weight
+        got, carry = 0, []
+        for batch in _batches(src, req.split):
+            encoded = req.tokenizer(batch, truncation=not req.pack, max_length=req.max_seq_len)
+            for ids in encoded["input_ids"]:
+                if req.pack:
+                    # EOS marks the boundary the blocks blur. The trailing partial is dropped,
+                    # never padded, so every block is exactly the cap and the mask is all ones.
+                    carry += ids + [req.tokenizer.eos_token_id]
+                    while len(carry) >= req.max_seq_len and got < quota:
+                        block = carry[: req.max_seq_len]
+                        yield {"input_ids": block, "attention_mask": [1] * len(block), "source": i}
+                        carry = carry[req.max_seq_len :]
+                        got += req.max_seq_len
+                else:
+                    yield {"input_ids": ids, "attention_mask": [1] * len(ids), "source": i}
+                    got += len(ids)
+                if got >= quota:
+                    break
+            if got >= quota:
+                break
+        short = "  EXHAUSTED" if got < quota else ""
+        print(f"  {src.name:24s} want {quota:>12,.0f}  got {got:>12,} tok{short}", flush=True)
+
+
+# -------------------------------------------------------------------- materialize
 
 
 _MEMO: dict[str, Any] = {}
 
 
-def _build_split(name, sources, split, size_label, max_seq_len, tokenizer, resolve_n):
+def _build_split(req: _Build):
     """One tokenized split, memoized in-process and on disk: a rebuild re-pays network and parsing,
-    hours at 10M texts, per rank. `resolve_n` is called only on a miss, so a cache hit never pays
-    for calibration."""
-    cached = cache_path(name, split, size_label, max_seq_len, tokenizer)
+    hours at 10M texts, per rank. Nothing streams until past both cache checks."""
+    cached = req.path
     if cached in _MEMO:
         return _MEMO[cached]
     if os.path.isdir(cached):
         return _MEMO.setdefault(cached, datasets.load_from_disk(cached))
 
-    def tok(batch):
-        return tokenizer(batch["text"], truncation=True, max_length=max_seq_len)
-
-    texts, source_ids = _mix(sources, split, resolve_n())
-    # Provenance, so the realized mix can be verified after the fact. uint8: 10M rows cost 10 MB.
-    ds = datasets.Dataset.from_dict({"text": texts, "source": source_ids})
-    ds = ds.cast_column("source", datasets.Value("uint8"))
-    ds = ds.map(tok, batched=True, remove_columns=["text"])
-    _save_atomic(ds, cached)
-    return _MEMO.setdefault(cached, ds)
+    print(f"corpus [{req.split}]: drawing {req.budget:,.0f} tokens", flush=True)
+    # 🚨 from_generator fingerprints gen_kwargs, NOT `_rows`, so its cache survives a logic change
+    # and would silently republish a stale draw. Scratch dir, deleted after: ours is the only cache.
+    scratch = f"{cached}.gen{os.getpid()}"
+    try:
+        # Writes Arrow incrementally, so memory does not scale with the corpus.
+        ds = datasets.Dataset.from_generator(_rows, gen_kwargs={"req": req}, cache_dir=scratch)
+        # Provenance, so the realized mix is verifiable after the fact. uint8: 10M rows cost 10 MB.
+        ds = ds.cast_column("source", datasets.Value("uint8")).shuffle(seed=0)
+        if req.docs is not None:
+            ds = ds.select(range(min(req.docs, len(ds))))  # shuffled, so the trim is unbiased
+        # Every rank builds concurrently, so publish by rename; losers discard.
+        staged = f"{cached}.tmp{os.getpid()}"
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        ds.flatten_indices().save_to_disk(staged)
+        try:
+            os.rename(staged, cached)
+        except OSError:
+            shutil.rmtree(staged, ignore_errors=True)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return _MEMO.setdefault(cached, datasets.load_from_disk(cached))
 
 
 def load_corpus(
@@ -168,118 +179,27 @@ def load_corpus(
     max_seq_len: int = 128,
     val_size: int = VAL_POOL,
     splits: tuple[str, ...] = ("train", "validation"),
+    pack: bool = False,
 ) -> dict[str, Any]:
     """Tokenized splits plus a collator, the shape `load_mrpc` returns. `name` is the cache-key
-    identity of the request and `sources` the recipe answering it; `tokens_per_epoch` sizes train,
-    while validation is a fixed TEXT count since recall@10 is pool-size dependent."""
+    identity of the request and `sources` the recipe answering it."""
+    if pack and tokenizer.eos_token_id is None:
+        raise ValueError("train.pack needs an eos_token_id to mark document boundaries.")
+
     out: dict[str, Any] = {}
     for split in splits:
-        if split == "train":
-            out[split] = _build_split(
-                name,
-                sources,
-                split,
-                _tokens_label(tokens_per_epoch),
-                max_seq_len,
-                tokenizer,
-                lambda: _calibrate(sources, max_seq_len, tokenizer, tokens_per_epoch),
-            )
-        else:
-            out[split] = _build_split(
-                name, sources, split, str(val_size), max_seq_len, tokenizer, lambda: val_size
-            )
-    out["collator"] = transformers.DataCollatorWithPadding(tokenizer)
-    return out
-
-
-@dataclass(frozen=True)
-class SourceProfile:
-    """One source measured: text length, and whether it can be scored."""
-
-    name: str
-    domain: str
-    weight: float
-    mean: float  # post-cap mean tokens/text -- what the token budget is spent on
-    median: int
-    truncated: float  # fraction over the cap, on an UNtruncated basis
-    longest: int  # max untruncated; the FHE polynomial domain is set by the max, not a percentile
-    scoreable: str  # "pair" | "qrels" | "none"
-    error: str = ""  # set instead of the measurements when the source failed to load
-
-
-def profile(
-    sources: list[Source], tokenizer: Any, max_seq_len: int, n: int = 300, split: str = "train"
-) -> list[SourceProfile]:
-    """Stream `n` texts per source and measure them: `tok/text` is not predictable from the source
-    list, and a bad estimate only surfaces after a multi-hour build.
-
-    A source that raises is reported, not fatal -- one dead loader must not hide the rest.
-    """
-    out = []
-    for src in sources:
-        try:
-            texts, pairs = [], 0
-            for rec in records(src, split):
-                texts += corpus_texts(rec, src.instruct)
-                pairs += eval_pair(rec) is not None
-                if len(texts) >= n:
-                    break
-            raw = sorted(len(x) for x in tokenizer(texts[:n])["input_ids"])
-        except Exception as e:
-            out.append(
-                SourceProfile(
-                    src.name,
-                    src.domain,
-                    src.weight,
-                    0.0,
-                    0,
-                    0.0,
-                    0,
-                    "none",
-                    f"{type(e).__name__}: {e}",
-                )
-            )
-            continue
-        capped = [min(x, max_seq_len) for x in raw]
-        out.append(
-            SourceProfile(
-                name=src.name,
-                domain=src.domain,
-                weight=src.weight,
-                mean=sum(capped) / max(len(capped), 1),
-                median=capped[len(capped) // 2],
-                truncated=sum(1 for x in raw if x > max_seq_len) / max(len(raw), 1),
-                longest=raw[-1],
-                scoreable="qrels" if src.qrels else ("pair" if pairs else "none"),
+        train = split == "train"
+        out[split] = _build_split(
+            _Build(
+                name=name,
+                sources=sources,
+                split=split,
+                tokenizer=tokenizer,
+                max_seq_len=max_seq_len,
+                pack=pack,
+                tokens=tokens_per_epoch if train else None,
+                docs=None if train else val_size,
             )
         )
+    out["collator"] = transformers.DataCollatorWithPadding(tokenizer)
     return out
-
-
-@dataclass(frozen=True)
-class SplitStats:
-    n: int
-    tokens: int
-    mean: float
-    median: float
-    truncated: float
-
-
-def describe(ds, max_seq_len: int) -> SplitStats:
-    # Off the Arrow column: materializing 9M token lists as Python objects costs GBs.
-    lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(zero_copy_only=False)
-    return SplitStats(
-        n=len(lengths),
-        tokens=int(lengths.sum()),
-        mean=float(lengths.mean()),
-        median=float(np.median(lengths)),
-        truncated=float((lengths >= max_seq_len).mean()),
-    )
-
-
-def realized_mix(ds, n_sources: int) -> list[int]:
-    """Texts per source on the BUILT artifact -- where a source that ran dry becomes visible."""
-    if "source" not in ds.column_names:
-        return []
-    col = ds.data.column("source").to_numpy(zero_copy_only=False)
-    return np.bincount(col, minlength=n_sources).tolist()
