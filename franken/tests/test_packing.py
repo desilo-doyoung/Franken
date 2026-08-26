@@ -286,3 +286,42 @@ def test_each_eos_pad_is_its_own_segment():
     assert pos.tolist() == [[0, 1, 2, 0, 0, 0]]
     # distinct segment ids for every pad, so no pad can be attended to by the real document
     assert doc_ids(pos).tolist() == [[0, 0, 0, 1, 2, 3]]
+
+
+def test_checkpointing_changes_neither_loss_nor_gradients():
+    """Checkpointing is exact recomputation, not an approximation. If gradients move at all then
+    use_reentrant=False is misused, and the student trains against a subtly wrong signal."""
+    ids = torch.tensor([[11, 12, 13, EOS, 21, 22, 23, EOS]])
+    pos = doc_positions(ids, EOS)
+    runs = {}
+    for flag in (False, True):
+        model = _tiny_llama("manual").train()  # same seed, so identical weights
+        model.grad_checkpoint = flag
+        loss = model(ids, position_ids=pos)["last_hidden_state"].pow(2).mean()
+        loss.backward()
+        runs[flag] = (loss.detach().item(), [p.grad.clone() for p in model.parameters()])
+
+    assert runs[False][0] == pytest.approx(runs[True][0], rel=1e-12)
+    for plain, ckpt in zip(runs[False][1], runs[True][1], strict=True):
+        assert torch.allclose(plain, ckpt, atol=1e-12), (plain - ckpt).abs().max()
+
+
+def test_eval_never_pays_for_recompute(monkeypatch):
+    from franken.models.llama import model as llama_model
+
+    calls = []
+    real = llama_model.checkpoint
+    monkeypatch.setattr(
+        llama_model, "checkpoint", lambda fn, *a, **kw: (calls.append(1), real(fn, *a, **kw))[1]
+    )
+    model = _tiny_llama("manual")  # already in eval mode
+    model.grad_checkpoint = True
+    probe = torch.tensor([[11, 12, EOS]])
+
+    with torch.no_grad():
+        model(probe)
+    assert calls == [], "eval recomputed activations for gradients it never takes"
+
+    model.train()
+    model(probe)
+    assert len(calls) == len(model.layers)

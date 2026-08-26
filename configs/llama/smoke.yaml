@@ -38,7 +38,10 @@ train:
   output_dir: outputs
   run_name: llama_smoke
   max_seq_len: 4096
-  pack: true # whole blocks, no padding, document-isolated attention
+  pack: true # best-fit blocks, document-isolated attention
+  # Recompute activations in backward: 7x less memory per token for ~16% wall clock, which is
+  # what lets tokens_per_step hold 8 blocks instead of 1.
+  grad_checkpoint: true
   seed: 42
   device: cuda
 
@@ -52,7 +55,9 @@ train:
   distill:
     lr: 1.0e-5
     epochs: 1
-    tokens_per_step: 4096 # low: logits dominate memory here, raise against nvidia-smi
+    # 8 blocks per optimizer step (micro 16,384 = 4 blocks x 2 accum). Blocks are single-source,
+    # so this is what puts several sources in one step.
+    tokens_per_step: 32768
     batch_size: 4 # only used if tokens_per_step is unset
     warmup_ratio: 0.1
     weight_decay: 0.01

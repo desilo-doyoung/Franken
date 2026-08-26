@@ -106,6 +106,15 @@ class BatchLoader:
             self.micro_tokens, self.accum_steps = _split_step(
                 self.opt.tokens_per_step, dist.world_size
             )
+            # plan_batches cannot honour a budget narrower than one row: it emits the row anyway,
+            # so the step silently overshoots rather than failing.
+            if cfg.train.pack and self.micro_tokens < cfg.train.max_seq_len:
+                raise ValueError(
+                    f"micro-batch is {self.micro_tokens:,} tokens but a packed row is "
+                    f"{cfg.train.max_seq_len:,}, so every step would exceed the budget. Raise "
+                    f"FRANKEN_MAX_TOKENS_PER_RANK (now {max_tokens_per_rank():,}) to at least "
+                    "max_seq_len, or lower max_seq_len."
+                )
             lengths = pc.list_value_length(dataset.data.column("input_ids")).to_numpy(
                 zero_copy_only=False
             )
@@ -384,6 +393,8 @@ class Distiller:
         barrier(self.dist)
 
         self.student.train()
+        # Before wrapping, so DDP and compile see an already-configured module.
+        self.student.grad_checkpoint = self.cfg.train.grad_checkpoint
         _apply_precision(self.cfg.train.precision)
         student, teacher = self._wrap_for_training()
         progress = ProgressLogger(

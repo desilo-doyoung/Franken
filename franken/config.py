@@ -96,6 +96,9 @@ class TrainConfig:
     # Distillation loop only; eval is forced back to fp32 and the teacher never enters autocast.
     precision: str = "fp32"
     compile: bool = False  # training only; eval stays eager
+    # Recompute each layer's activations in backward instead of storing them: 7x less memory per
+    # token for ~16% wall clock, which is what lets tokens_per_step hold several blocks.
+    grad_checkpoint: bool = False
 
     teacher: OptimConfig = field(default_factory=OptimConfig)
     distill: OptimConfig = field(default_factory=OptimConfig)

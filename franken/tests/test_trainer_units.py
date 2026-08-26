@@ -225,3 +225,21 @@ def test_an_indivisible_step_is_rejected(monkeypatch):
     monkeypatch.setenv("FRANKEN_MAX_TOKENS_PER_RANK", "30")
     with pytest.raises(ValueError, match="not divisible"):
         loader_for({"tokens_per_step": 64}, LENGTHS)
+
+
+def test_a_packed_row_wider_than_the_micro_batch_is_refused():
+    # plan_batches emits a row that exceeds its budget rather than splitting it, so without this
+    # guard every step silently overshoots -- and the bigger the row, the bigger the overshoot.
+    cfg = Config.from_dict(
+        {
+            "train": {
+                "task": "lm",
+                "tokens_per_epoch": 1e6,
+                "pack": True,
+                "max_seq_len": 512,
+                "distill": {"tokens_per_step": 256},
+            }
+        }
+    )
+    with pytest.raises(ValueError, match="every step would exceed the budget"):
+        BatchLoader(cfg, DistEnv(), dataset([512] * 4), lambda x: x, lambda *a: None)

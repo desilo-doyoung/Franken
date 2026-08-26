@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from franken.distill.packing import doc_ids
 from franken.models.qwen3.config import Qwen3ModelConfig
@@ -8,6 +9,10 @@ from franken.models.qwen3.rope import Qwen3RotaryEmbedding
 
 
 class Qwen3Model(nn.Module):
+    # Set by Distiller.train from train.grad_checkpoint, the way HF does it: build_student sees only
+    # cfg.model, so a train-side flag cannot arrive through the constructor.
+    grad_checkpoint = False
+
     def __init__(self, config: Qwen3ModelConfig):
         super().__init__()
         self.config = config
@@ -32,7 +37,12 @@ class Qwen3Model(nn.Module):
         all_hidden_states = []
         for layer in self.layers:
             all_hidden_states.append(hidden_states)
-            hidden_states = layer(hidden_states, (cos, sin), mask)
+            if self.grad_checkpoint and self.training and torch.is_grad_enabled():
+                hidden_states = checkpoint(
+                    layer, hidden_states, (cos, sin), mask, use_reentrant=False
+                )
+            else:
+                hidden_states = layer(hidden_states, (cos, sin), mask)
         hidden_states = self.norm(hidden_states)
         all_hidden_states.append(hidden_states)
 
