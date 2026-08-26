@@ -90,21 +90,34 @@ class SplitStats:
     truncated: float
 
 
+def real_tokens(ds) -> np.ndarray:
+    """Unpadded tokens per row. Best-fit packing pads bins to the cap, so a row's LENGTH overstates
+    its payload; every count that means "tokens" has to read the mask instead."""
+    lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(zero_copy_only=False)
+    if "attention_mask" not in ds.column_names or not len(lengths):
+        return lengths
+    flat = np.asarray(pc.list_flatten(ds.data.column("attention_mask")))
+    return np.add.reduceat(flat, np.r_[0, np.cumsum(lengths)[:-1]])
+
+
 def describe(ds, max_seq_len: int) -> SplitStats:
     # Off the Arrow column: materializing 9M token lists as Python objects costs GBs.
-    lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(zero_copy_only=False)
+    real = real_tokens(ds)
     return SplitStats(
-        n=len(lengths),
-        tokens=int(lengths.sum()),
-        mean=float(lengths.mean()),
-        median=float(np.median(lengths)),
-        truncated=float((lengths >= max_seq_len).mean()),
+        n=len(real),
+        tokens=int(real.sum()),
+        mean=float(real.mean()),
+        median=float(np.median(real)),
+        # Unpacked this is "hit the cap"; packed it is "bin needed no padding". Same predicate,
+        # because an unpacked row's mask is all ones.
+        truncated=float((real >= max_seq_len).mean()),
     )
 
 
 def realized_mix(ds, n_sources: int) -> list[int]:
-    """Rows per source on the BUILT artifact -- where a source that ran dry becomes visible."""
+    """Real tokens per source on the BUILT artifact -- where a source that ran dry becomes visible.
+    Tokens, not rows: `Source.weight` is a token share, and a padded row is not a full one."""
     if "source" not in ds.column_names:
         return []
     col = ds.data.column("source").to_numpy(zero_copy_only=False)
-    return np.bincount(col, minlength=n_sources).tolist()
+    return np.bincount(col, weights=real_tokens(ds), minlength=n_sources).astype(int).tolist()

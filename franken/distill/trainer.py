@@ -280,6 +280,7 @@ class Distiller:
             self.device = torch.device(f"cuda:{self.dist.local_rank}")
         else:
             self.device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+        self._cuda = self.device.type == "cuda"
         self.backend = build_backend(cfg.model.backend)
         self.task = build_task(cfg.train.task)
         self.teacher = None
@@ -388,6 +389,10 @@ class Distiller:
         progress = ProgressLogger(
             total_steps, self.dist.world_size, self.device, self.log, self.dist.is_main
         )
+        # Reset after the baseline eval, so the reported peak is the training step's alone --
+        # that is the number `tokens_per_step` has to be sized against.
+        if self._cuda:
+            torch.cuda.reset_peak_memory_stats(self.device)
 
         with RangePenalty(self.backend, self.student, self.cfg, self.log) as penalty:
             for epoch in range(opt.epochs):
@@ -411,6 +416,12 @@ class Distiller:
                     self.log(f"epoch {epoch}: {metrics} | {comp_str}")
                 barrier(self.dist)
                 self.student.train()
+
+        if self._cuda:
+            self.log(
+                f"peak GPU: {torch.cuda.max_memory_allocated(self.device) / 2**30:.2f} GiB "
+                f"allocated, {torch.cuda.max_memory_reserved(self.device) / 2**30:.2f} reserved"
+            )
 
         # Should stay ~2; climbing per epoch means Dynamo will silently revert to eager mid-run.
         if self.cfg.train.compile:

@@ -262,3 +262,27 @@ def test_flex_requires_pack_and_exact_softmax():
     cfg.model.softmax = "cgf"
     with pytest.raises(ValueError, match="fuses the softmax"):
         cfg.validate()
+
+
+@pytest.mark.parametrize("attn_impl", ["manual", "sdpa_causal"])
+def test_eos_padding_is_invisible_to_real_tokens(attn_impl):
+    """A padded bin must give its real tokens exactly the states they would have had unpadded.
+    Right padding plus causal masking is what guarantees it, so this holds for any pad token; EOS
+    is chosen so the pads also segment, keeping that region cheap under flex."""
+    model = _tiny_llama(attn_impl)
+    docs = [11, 12, 13, EOS, 21, 22, EOS]
+    padded = torch.tensor([docs + [EOS] * 5])
+    bare = torch.tensor([docs])
+
+    with torch.no_grad():
+        got = model(padded, position_ids=doc_positions(padded, EOS))["last_hidden_state"][0]
+        want = model(bare, position_ids=doc_positions(bare, EOS))["last_hidden_state"][0]
+    assert torch.allclose(got[: len(docs)], want, atol=1e-9), (got[: len(docs)] - want).abs().max()
+
+
+def test_each_eos_pad_is_its_own_segment():
+    ids = torch.tensor([[1, 2, EOS, EOS, EOS, EOS]])
+    pos = doc_positions(ids, EOS)
+    assert pos.tolist() == [[0, 1, 2, 0, 0, 0]]
+    # distinct segment ids for every pad, so no pad can be attended to by the real document
+    assert doc_ids(pos).tolist() == [[0, 0, 0, 1, 2, 3]]

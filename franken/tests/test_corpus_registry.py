@@ -85,7 +85,7 @@ def _declared(src):
             "1930000tok",
             256,
             "Qwen/Qwen3-Embedding-0.6B",
-            "outputs/corpus_cache/v11-multi_domain-train-1930000tok-256-Qwen_Qwen3-Embedding-0.6B",
+            "outputs/corpus_cache/v12-multi_domain-train-1930000tok-256-Qwen_Qwen3-Embedding-0.6B",
         ),
         (
             "multi_domain",
@@ -93,7 +93,7 @@ def _declared(src):
             "500",
             256,
             "Qwen/Qwen3-Embedding-0.6B",
-            "outputs/corpus_cache/v11-multi_domain-validation-500-256-Qwen_Qwen3-Embedding-0.6B",
+            "outputs/corpus_cache/v12-multi_domain-validation-500-256-Qwen_Qwen3-Embedding-0.6B",
         ),
         (
             "mixed",
@@ -101,7 +101,7 @@ def _declared(src):
             "140000tok",
             128,
             "unsloth/Llama-3.2-1B",
-            "outputs/corpus_cache/v11-mixed-train-140000tok-128-unsloth_Llama-3.2-1B",
+            "outputs/corpus_cache/v12-mixed-train-140000tok-128-unsloth_Llama-3.2-1B",
         ),
         (
             "mixed",
@@ -109,13 +109,13 @@ def _declared(src):
             "500",
             128,
             "unsloth/Llama-3.2-1B",
-            "outputs/corpus_cache/v11-mixed-validation-500-128-unsloth_Llama-3.2-1B",
+            "outputs/corpus_cache/v12-mixed-validation-500-128-unsloth_Llama-3.2-1B",
         ),
     ],
 )
 def test_cache_path_still_names_the_builds_already_on_disk(name, split, label, cap, tok, expected):
-    # v10 deliberately orphans the v9 dirs: `Source.weight` became a token share, so every mix
-    # recomposes. Pinned so the NEXT change cannot move the key by accident.
+    # v12 deliberately orphans the v11 dirs: best-fit packing regroups documents into different
+    # blocks and pads them. Pinned so the NEXT change cannot move the key by accident.
     assert cache_path(name, split, label, cap, _tok(tok)) == expected
 
 

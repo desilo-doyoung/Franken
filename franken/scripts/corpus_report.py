@@ -90,22 +90,27 @@ def build(cfg, task, tokenizer, sources) -> int:
     print(f"\nready in {(time.time() - start) / 60:.1f} min\n")
 
     stats = {s: describe(data[s], cap) for s in ("train", "validation")}
-    # Packing makes every block exactly `cap`, so `truncated` reads 100% and means the opposite.
+    # Packed, the same predicate counts blocks that needed no padding rather than documents cut.
     label = "full" if pack else "truncated"
     for split, st in stats.items():
-        print(
+        line = (
             f"{split:11s} n={st.n:>10,}  tokens={st.tokens:>14,}  mean={st.mean:5.1f}  "
             f"median={st.median:3.0f}  {label}@{cap}={100 * st.truncated:5.1f}%"
         )
+        if pack and st.n:
+            # What best-fit costs. Above a few percent the bin heuristic is leaving room on the
+            # table, and every pad token is compute the loss then throws away.
+            line += f"  pad={100 * (1 - st.tokens / (st.n * cap)):4.1f}%"
+        print(line)
 
     if counts := realized_mix(data["train"], len(sources)):
         # `weight` is a token share, so realized-vs-declared is the direct check on the declaration.
-        # Under packing every block is `cap` tokens, so block counts ARE token counts.
-        share = counts if pack else None
         print("\nrealized mix (train), by token share:")
-        for i, (src, n) in enumerate(zip(sources, counts, strict=True)):
-            got = (share[i] / sum(share)) if share else (n / max(sum(counts), 1))
-            print(f"  {src.name:<18} {n:>10,}  {got:>6.1%}  (declared {src.weight:>6.1%})")
+        for src, n in zip(sources, counts, strict=True):
+            print(
+                f"  {src.name:<18} {n:>12,}  {n / max(sum(counts), 1):>6.1%}  "
+                f"(declared {src.weight:>6.1%})"
+            )
 
     unique = stats["train"].tokens
     print(

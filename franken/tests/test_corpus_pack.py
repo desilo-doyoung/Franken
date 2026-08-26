@@ -10,6 +10,7 @@ class _Tok:
     """One token per whitespace-separated word; EOS is a value no document produces."""
 
     eos_token_id = 99
+    pad_token_id = 98
     name_or_path = "fake"
 
     def __call__(self, batch, truncation=False, max_length=None):
@@ -55,12 +56,15 @@ def test_every_block_is_exactly_the_cap(monkeypatch):
     assert {len(r["input_ids"]) for r in rows} == {CAP}
 
 
-def test_every_row_carries_an_all_ones_mask(monkeypatch):
-    # `torch_columns()` requires the column and packing pads nothing; omitting it broke the
-    # artifact while the build still printed CORPUS OK.
+def test_the_mask_marks_exactly_the_padding(monkeypatch):
+    # `torch_columns()` requires the column; omitting it broke the artifact while the build still
+    # printed CORPUS OK. Under best fit a bin can end short, so ones-then-zeros, never ragged.
     for pack in (True, False):
         for r in _rows(monkeypatch, [[20, 13], [31]], pack=pack):
-            assert r["attention_mask"] == [1] * len(r["input_ids"])
+            mask = r["attention_mask"]
+            assert len(mask) == len(r["input_ids"])
+            assert mask == sorted(mask, reverse=True)
+            assert set(r["input_ids"][mask.count(1) :]) <= {_Tok.pad_token_id}
 
 
 def test_every_block_comes_from_one_source(monkeypatch):
@@ -68,21 +72,35 @@ def test_every_block_comes_from_one_source(monkeypatch):
     # sources could only record a majority. Drawing per source is what keeps it honest.
     rows = _rows(monkeypatch, [[20, 13], [31], [17]])
     for r in rows:
-        assert set(r["input_ids"]) - {_Tok.eos_token_id} == {r["source"]}
+        assert set(r["input_ids"]) - {_Tok.eos_token_id, _Tok.pad_token_id} == {r["source"]}
 
 
-def test_short_documents_concatenate_rather_than_pad(monkeypatch):
-    # Two 7-token docs at cap 8 make one block (+EOS each), not two padded ones -- the point of
-    # packing.
-    rows = _rows(monkeypatch, [[CAP - 1, CAP - 1]])
-    assert len(rows) == 2
+def test_short_documents_share_a_block(monkeypatch):
+    # Two 3-token docs (+EOS each) exactly fill one cap-8 bin: packing, not one block apiece.
+    rows = _rows(monkeypatch, [[3, 3]])
+    assert len(rows) == 1
+    assert rows[0]["attention_mask"] == [1] * CAP
 
 
-def test_a_source_totalling_under_one_block_contributes_nothing(monkeypatch):
-    # The trailing partial is dropped, never padded, so a tiny source vanishes rather than
-    # smuggling pad tokens into the mix.
+def test_a_document_that_fits_is_never_split(monkeypatch):
+    # The whole point of best fit over concatenate-and-chop: a boundary must not fall inside a
+    # document that would have fit a bin. Every row here starts a document, so none is a
+    # continuation.
+    rows = _rows(monkeypatch, [[5, 5, 5, 5]])
+    for r in rows:
+        real = r["input_ids"][: r["attention_mask"].count(1)]
+        # each document contributes 5 payload tokens then its EOS, so runs are 5 long
+        runs = "".join("x" if t == _Tok.eos_token_id else "." for t in real).split("x")
+        assert all(len(run) == 5 for run in runs if run)
+
+
+def test_a_source_totalling_under_one_block_is_padded_not_dropped(monkeypatch):
+    # Best fit pads rather than discards, so a tiny source still reaches the artifact; dropping it
+    # would silently bias the mix toward whatever packs tightly.
     rows = _rows(monkeypatch, [[3], [CAP * 3]])
-    assert {r["source"] for r in rows} == {1}
+    assert {r["source"] for r in rows} == {0, 1}
+    tiny = next(r for r in rows if r["source"] == 0)
+    assert tiny["attention_mask"] == [1, 1, 1, 1] + [0] * (CAP - 4)
 
 
 def test_unpacked_yields_documents_truncated_to_the_cap(monkeypatch):
