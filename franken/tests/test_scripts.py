@@ -20,6 +20,7 @@ SCRIPTS = [
     "franken.scripts.qwen3.search",
     "franken.scripts.llama.lm_corpus",
     "franken.scripts.llama.lm_eval",
+    "franken.scripts.llama.run_experiments",
 ]
 
 # Reached through `cli._delegate`, which calls `main(argv)`. The tables hold fully-qualified

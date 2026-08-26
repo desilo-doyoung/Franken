@@ -137,3 +137,26 @@ def test_render_is_pure():
     before = repr(results)
     render(results)
     assert repr(results) == before
+
+
+def test_lm_table_reports_a_failed_run_without_losing_the_others():
+    from franken.scripts.llama.run_experiments import render
+
+    rows = render(
+        [
+            {
+                "name": "depth16_exact",
+                "layers": 16,
+                "seq": 16384,
+                "agreement": 0.9722,
+                "kl": 0.0059,
+                "ppl": 6.8424,
+                "teacher_ppl": 6.8233,
+            },
+            {"name": "depth12_exact", "layers": 12, "seq": 16384, "error": "distill exit 1"},
+        ]
+    )
+    assert "0.9722" in rows[2] and "+0.28%" in rows[2]
+    # A crash must degrade to one row, not take the table down with it.
+    assert "FAILED" in rows[3] and "depth12_exact" in rows[3]
+    assert len(rows) == 4
