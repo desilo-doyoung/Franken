@@ -1,0 +1,91 @@
+# Llama lm ladder, rung 0: full depth + exact ops on the real corpus, at 16k context.
+#
+# The control every depth cut is measured against. The student keeps the teacher's depth and ops, so
+# this does not measure an approximation -- it measures what the corpus, the objective and the
+# schedule cost on their own. A depth cut is then one line (`num_hidden_layers`) and an ops arm one
+# more, the way configs/qwen3/depth{28,19}_* pair up.
+#
+#     uv run python main.py corpus  --config configs/llama/depth16_exact.yaml   # hours; do first
+#     torchrun --nproc_per_node=4 main.py distill --config configs/llama/depth16_exact.yaml
+#
+# Sized for 4x80 GiB, bf16, WITHOUT checkpointing. `tokens_per_step` 131,072 over 4 ranks resolves to
+# micro 16,384 (B=1, accum=2) -- which is the default FRANKEN_MAX_TOKENS_PER_RANK, so nothing needs
+# exporting. Do NOT raise that ceiling here: micro 32,768 without checkpointing is ~92 GiB and will
+# not fit.
+#
+# Memory ~= 26.52 GiB + 2.005 MiB per micro-batch token => ~59 GiB/rank. That bf16 fit rests on two
+# points, and a real bf16 run came in 14% over its prediction (37.21 measured vs 32.65), so read it
+# as 59-68 GiB. If it OOMs, set `grad_checkpoint: true` and it drops to ~37 GiB for ~16% wall clock.
+#
+# ⚠️ Time is an extrapolation, and the H100 factor is the soft part. Measured 862 tok/s on one A6000
+#    (bf16 + checkpointing, micro 16,384); x1.16 for dropping checkpointing, x~3 for H100 (the
+#    teacher stays fp32 where H100 is only ~1.7x, the student is bf16 where it is ~6x), x3.9 for four
+#    ranks => ~11,700 tok/s, so 1 Gtok is ~1 day (range 20-29 h). The trainer prints tok/s: check the
+#    first 50 steps and re-extrapolate rather than trusting this.
+#
+# ⚠️ DDP + flex + checkpointing is the untested combination in this stack. Do a short 2-rank run
+#    before committing.
+
+model:
+  backend: llama
+  num_hidden_layers: 16 # full teacher depth; the cut arms drop this
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+  # Block-sparse document isolation, and what makes 16k affordable: cost tracks the sum of
+  # per-document S², not L². A cgf arm CANNOT use it -- approximate softmaxes need `manual`, which
+  # materializes (B,H,S,S), so re-measure memory before running one.
+  attn_impl: flex
+
+distill:
+  alpha: 1.0 # `lm` has no CE, so alpha is a plain weight on the KL; the 0.5 default halves it
+  temperature: 1.0 # the loss then reads as KL in nats
+  # ⚠️ Provisional, carried from smoke. Re-derive from the step-0 kl/hidden split on the first
+  # depth-REDUCED student: at full depth both terms start near 0, so this run cannot calibrate it.
+  beta: 1.0
+  hidden_layer_map: null # identity at full depth
+  range_penalty: 0.0 # exact SiLU has no bounded domain to squash into
+
+train:
+  teacher_model: unsloth/Llama-3.2-1B # ungated mirror, sha256-identical to NousResearch's
+  teacher_ckpt: null
+  task: lm
+  corpus: llama_web
+  # UNIQUE tokens, seen once at epochs: 1 -- not a per-epoch slice of a larger budget.
+  tokens_per_epoch: 1_000_000_000
+  output_dir: outputs
+  run_name: llama_depth16_exact
+  # Only the extreme tail is still split: the longest document exceeds this in codeparrot (348k),
+  # finewiki_hi (36k), open_web_math (35.8k), finewiki_fr (29.8k), fineweb_edu (17.2k) and
+  # finewiki_it (17.1k) -- against 3.4% of ALL documents cut at 4096.
+  max_seq_len: 16384
+  pack: true # best-fit blocks, document-isolated attention
+  grad_checkpoint: false # 16k in bf16 fits 80 GiB without it; flip to true if it OOMs
+  # Student-only autocast. The teacher stays fp32, which `precision_gate` confirms is load-bearing:
+  # a bf16 teacher drifts 0.0142 against a 0.004 band.
+  precision: bf16
+  compile: false # untested together with flex + checkpointing
+  seed: 42
+  device: cuda
+
+  teacher: # unused by self-distillation; present so the schema is complete
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    # ⚠️ Explicit because packing REFUSES to derive it: sqrt-batch scaling reads sequence count, and
+    # a packed block is an arbitrary container. Inherited from smoke and never swept -- the number
+    # here most worth a short sweep before committing days of compute.
+    lr: 1.0e-5
+    epochs: 1
+    # 8 blocks per optimizer step; blocks are single-source, so this is what puts several sources
+    # in one step. Over 4 ranks: micro 16,384 x 4 ranks x 2 accum.
+    tokens_per_step: 131072
+    batch_size: 4 # unused while tokens_per_step is set
+    warmup_ratio: 0.1
+    weight_decay: 0.01

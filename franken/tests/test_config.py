@@ -197,10 +197,10 @@ def test_yaml_unsigned_exponent_is_rejected_with_the_fix():
         Config.from_dict({"train": {"task": "embed", "tokens_per_epoch": "1.0e9"}})
 
 
-def test_only_the_lm_smoke_config_packs():
-    # A packed embed corpus would be a different artifact under a name every qwen3 result is
-    # keyed on, and the flag is the only thing standing between those.
-    packed = sorted(p for p in CONFIGS if Config.from_yaml(p).train.pack)
-    assert [os.path.basename(os.path.dirname(p)) + "/" + os.path.basename(p) for p in packed] == [
-        "llama/smoke.yaml"
-    ]
+def test_only_lm_configs_pack():
+    # A packed embed corpus would be a different artifact under a name every qwen3 result is keyed
+    # on, and this flag is the only thing standing between those. lm configs may pack freely.
+    for path in CONFIGS:
+        cfg = Config.from_yaml(path)
+        if cfg.train.pack:
+            assert cfg.train.task == "lm", f"{path} packs but is task {cfg.train.task!r}"
