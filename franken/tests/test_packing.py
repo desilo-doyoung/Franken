@@ -48,7 +48,12 @@ def test_batch_rows_are_independent():
     assert doc_positions(ids, EOS).tolist() == [[0, 1, 0, 1], [0, 1, 2, 3]]
 
 
-def _tiny_llama(attn_impl):
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="flex compiles a Triton kernel"
+)
+
+
+def _tiny_llama(attn_impl, dtype=torch.float64, device="cpu"):
     import torch as _t
 
     from franken.models.llama.config import LlamaModelConfig
@@ -66,14 +71,12 @@ def _tiny_llama(attn_impl):
     )
     cfg.validate()
     _t.manual_seed(0)
-    return LlamaModel(cfg).double().eval()
+    return LlamaModel(cfg).to(device=device, dtype=dtype).eval()
 
 
 @pytest.mark.parametrize("attn_impl", ["manual", "sdpa_causal"])
 def test_isolated_block_equals_separate_forwards(attn_impl):
-    """The property the whole design rests on: with document isolation a packed block is the same
-    computation as running each document on its own. No op in the stack normalizes across tokens,
-    so this must hold exactly, not approximately."""
+    """A packed block must equal running each document alone: no op normalizes across tokens."""
     model = _tiny_llama(attn_impl)
     doc_a = [11, 12, 13, EOS]
     doc_b = [21, 22, 23, 24, EOS]
@@ -90,8 +93,7 @@ def test_isolated_block_equals_separate_forwards(attn_impl):
 
 
 def test_without_isolation_the_block_leaks_across_documents():
-    """Calibrates the test above: it passes because of isolation, not because the model ignores
-    context. Same block with plain arange positions must NOT match separate forwards."""
+    """Calibrates the test above: it passes because of isolation, not because context is ignored."""
     model = _tiny_llama("manual")
     doc_a, doc_b = [11, 12, 13, EOS], [21, 22, 23, 24, EOS]
     block = torch.tensor([doc_a + doc_b])
@@ -104,8 +106,7 @@ def test_without_isolation_the_block_leaks_across_documents():
 
 
 def test_packed_run_refuses_to_derive_the_lr():
-    """max_seq_len must not become an lr knob by accident: under packing the sequence count moves
-    with the block size at identical tokens/step."""
+    """max_seq_len must not become an lr knob: the sequence count moves with the block size."""
     from franken.config import OptimConfig
     from franken.distill.trainer import resolve_lr
 
@@ -138,10 +139,8 @@ def _hf_llama():
 
 
 def test_hf_teacher_isolates_only_with_no_cache_and_no_2d_mask():
-    """Both conditions are load-bearing and both fail SILENTLY -- the teacher just keeps
-    cross-document attention while the student isolates, and only the identity self-test notices.
-    `_preprocess_mask_arguments` derives the packed mask only when `attention_mask is None and
-    past_key_values is None`, and `forward` builds a DynamicCache whenever use_cache is on."""
+    """Both conditions are load-bearing and both fail SILENTLY: the teacher keeps cross-document
+    attention while the student isolates, and only the identity self-test notices."""
     hf = _hf_llama()
     a, b = [11, 12, 13, EOS], [21, 22, 23, 24, EOS]
     block = torch.tensor([a + b])
@@ -166,8 +165,7 @@ def test_hf_teacher_isolates_only_with_no_cache_and_no_2d_mask():
 
 
 def test_load_teacher_disables_the_cache():
-    """The backend must apply the condition above; a config default flip upstream would
-    otherwise re-break packed distillation in silence."""
+    """A config default flip upstream would otherwise re-break packed distillation in silence."""
     import inspect
 
     from franken.models.llama import backend as llama_backend
@@ -193,3 +191,74 @@ def test_packed_model_inputs_omit_the_attention_mask():
 
     task._pack = False
     assert set(task.model_inputs(batch)) == {"input_ids", "attention_mask"}
+
+
+@requires_cuda
+def test_flex_matches_manual_on_the_same_packed_block():
+    """Same documents both ways, so a difference is flex itself. fp32: Triton has no f64."""
+    a, b, c = [11, 12, 13, EOS], [21, 22, 23, 24, EOS], [31, 32, EOS]
+    block = torch.tensor([a + b + c], device="cuda")
+    pos = doc_positions(block, EOS)
+    out = {}
+    for impl in ("manual", "flex"):
+        model = _tiny_llama(impl, dtype=torch.float32, device="cuda")
+        with torch.no_grad():
+            out[impl] = model(block, position_ids=pos)["last_hidden_state"]
+    assert torch.allclose(out["manual"], out["flex"], atol=1e-5), (
+        (out["manual"] - out["flex"]).abs().max()
+    )
+
+
+@requires_cuda
+def test_flex_isolated_block_equals_separate_forwards():
+    model = _tiny_llama("flex", dtype=torch.float32, device="cuda")
+    doc_a, doc_b = [11, 12, 13, EOS], [21, 22, 23, 24, EOS]
+    block = torch.tensor([doc_a + doc_b], device="cuda")
+    with torch.no_grad():
+        packed = model(block, position_ids=doc_positions(block, EOS))["last_hidden_state"][0]
+        alone = torch.cat(
+            [
+                model(
+                    torch.tensor([d], device="cuda"),
+                    position_ids=doc_positions(torch.tensor([d], device="cuda"), EOS),
+                )["last_hidden_state"][0]
+                for d in (doc_a, doc_b)
+            ]
+        )
+    assert torch.allclose(packed, alone, atol=1e-5), (packed - alone).abs().max()
+
+
+def test_mask_mod_composition_equals_the_additive_construction():
+    """The packed mask comes from a mask_mod, the padded one stays additive; pin them together."""
+    from torch.nn.attention.flex_attention import and_masks, create_mask
+
+    from franken.models.llama.model import _causal_mod, _same_document_mod
+
+    ids = torch.tensor([[11, 12, EOS, 21, 22, 23, EOS], [1, EOS, 2, 3, 4, EOS, 5]])
+    pos = doc_positions(ids, EOS)
+    d = doc_ids(pos)
+    B, S = ids.shape
+
+    minv = torch.finfo(torch.float32).min
+    additive = torch.full((S, S), minv).triu(1)[None, None]
+    additive = additive + (d[:, :, None] != d[:, None, :])[:, None].float() * minv
+
+    keep = create_mask(and_masks(_causal_mod, _same_document_mod(d)), B, None, S, S, device="cpu")
+    assert torch.equal(keep, additive == 0)
+
+
+def test_flex_requires_pack_and_exact_softmax():
+    from franken.config import Config
+
+    cfg = Config.from_yaml("configs/llama/smoke.yaml")
+    cfg.validate()
+    assert cfg.model.attn_impl == "flex" and cfg.train.pack
+
+    cfg.train.pack = False
+    with pytest.raises(ValueError, match="needs train.pack"):
+        cfg.validate()
+
+    cfg = Config.from_yaml("configs/llama/smoke.yaml")
+    cfg.model.softmax = "cgf"
+    with pytest.raises(ValueError, match="fuses the softmax"):
+        cfg.validate()

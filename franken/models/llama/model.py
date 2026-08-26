@@ -1,10 +1,26 @@
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import and_masks, create_block_mask, create_mask
 
 from franken.distill.packing import doc_ids
 from franken.models.llama.config import LlamaModelConfig
 from franken.models.llama.layer import LlamaDecoderLayer
 from franken.models.llama.rope import LlamaRotaryEmbedding
+
+
+def _causal_mod(b, h, q_idx, kv_idx):
+    return q_idx >= kv_idx
+
+
+def _same_document_mod(doc):
+    def mod(b, h, q_idx, kv_idx):
+        return doc[b, q_idx] == doc[b, kv_idx]
+
+    return mod
+
+
+# Eager create_block_mask costs 5.5 ms/batch against 0.2 ms compiled.
+_block_mask = torch.compile(create_block_mask, dynamic=False)
 
 
 class LlamaModel(nn.Module):
@@ -48,25 +64,38 @@ class LlamaModel(nn.Module):
             hidden_states=all_hidden_states,
         )
 
-    # additive mask where 0 is visible and -inf is masked
+    # A BlockMask under flex, else additive where 0 is visible and -inf is masked.
     def _causal_mask(self, attention_mask, S, hidden_states, position_ids=None):
-        if position_ids is None and self.config.attn_impl == "sdpa_causal":
-            # Nothing the kernel's is_causal does not already express: under right padding, causal
-            # masking hides pads from every real row. Building the mask would only waste it.
+        if position_ids is not None:
+            return self._packed_mask(S, hidden_states, position_ids)
+
+        if self.config.attn_impl == "sdpa_causal":
+            # Under right padding, is_causal already hides pads from every real row.
             return None
 
         dtype = hidden_states.dtype
-        device = hidden_states.device
         min_val = torch.finfo(dtype).min
-
-        mask = torch.full((S, S), min_val, device=device, dtype=dtype).triu(diagonal=1)[None, None]
+        mask = torch.full((S, S), min_val, device=hidden_states.device, dtype=dtype)
+        mask = mask.triu(diagonal=1)[None, None]
         if attention_mask is not None:
             pad = (1 - attention_mask[:, None, None, :].to(dtype=dtype)) * min_val
             mask = mask + pad
-        if position_ids is not None:
-            # Packed blocks: a query never sees a neighbouring document. Same segment rule the HF
-            # teacher applies to the identical position_ids, so the two masks agree by construction.
-            doc = doc_ids(position_ids)
-            cross = (doc[:, :, None] != doc[:, None, :])[:, None].to(dtype=dtype)
-            mask = mask + cross * min_val
         return mask
+
+    # Causal AND same-document, from the segment rule the HF teacher applies to the same
+    # position_ids -- so the two agree by construction rather than by coincidence.
+    def _packed_mask(self, S, hidden_states, position_ids):
+        doc = doc_ids(position_ids)
+        B = doc.shape[0]
+        mod = and_masks(_causal_mod, _same_document_mod(doc))
+        device = hidden_states.device
+
+        if self.config.attn_impl == "flex":
+            return _block_mask(mod, B, None, S, S, device=device)
+
+        keep = create_mask(mod, B, None, S, S, device=device)
+        dtype = hidden_states.dtype
+        # Filled in the model's dtype, not accumulated: summed min_vals saturate to -inf, and a
+        # float32 default cannot hold finfo(float64).min.
+        mask = torch.zeros(keep.shape, dtype=dtype, device=device)
+        return mask.masked_fill_(~keep, torch.finfo(dtype).min)

@@ -32,16 +32,16 @@ class LlamaBackend(ModelBackend):
         # fp32 is pinned: transformers 5.x defaults to the checkpoint dtype (bf16), which would
         # put the parity gate and the distillation targets at bf16.
         ckpt = cfg.train.teacher_ckpt or cfg.train.teacher_model
-        model = AutoModel.from_pretrained(ckpt, dtype=torch.float32, output_hidden_states=True)
+        # attn_impl is a STUDENT setting; without this the teacher keeps a dense mask, which in
+        # fp32 + GQA reaches only the MATH backend and materializes (B,H,S,S).
+        extra = {"attn_implementation": "flex_attention"} if cfg.model.attn_impl == "flex" else {}
+        model = AutoModel.from_pretrained(
+            ckpt, dtype=torch.float32, output_hidden_states=True, **extra
+        )
         model.eval()
         model.requires_grad_(False)
-        # Student and teacher reach document isolation by DIFFERENT code paths, and only one of
-        # them is unconditional: our model masks from position_ids directly, while HF derives it
-        # in `masking_utils._preprocess_mask_arguments`, which gives up unless BOTH
-        # `attention_mask is None` and `past_key_values is None`. `forward` builds a DynamicCache
-        # whenever use_cache is on (config default True), so the teacher would quietly fall back
-        # to cross-document attention while the student isolated -- no error, just a wrong target.
-        # Nothing here generates, so the cache is pure cost anyway.
+        # HF only isolates documents when past_key_values AND attention_mask are both None
+        # (masking_utils). A cache here would silently cost the teacher its isolation.
         model.config.use_cache = False
         return model
 

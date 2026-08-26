@@ -35,13 +35,8 @@ class Qwen3Backend(ModelBackend):
         model = AutoModel.from_pretrained(ckpt, dtype=torch.float32, output_hidden_states=True)
         model.eval()
         model.requires_grad_(False)
-        # Student and teacher reach document isolation by DIFFERENT code paths, and only one of
-        # them is unconditional: our model masks from position_ids directly, while HF derives it
-        # in `masking_utils._preprocess_mask_arguments`, which gives up unless BOTH
-        # `attention_mask is None` and `past_key_values is None`. `forward` builds a DynamicCache
-        # whenever use_cache is on (config default True), so the teacher would quietly fall back
-        # to cross-document attention while the student isolated -- no error, just a wrong target.
-        # Nothing here generates, so the cache is pure cost anyway.
+        # HF only isolates documents when past_key_values AND attention_mask are both None
+        # (masking_utils). A cache here would silently cost the teacher its isolation.
         model.config.use_cache = False
         return model
 

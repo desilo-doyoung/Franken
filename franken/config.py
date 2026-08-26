@@ -145,6 +145,11 @@ class Config:
                 f"Unknown distill.hidden_loss {self.distill.hidden_loss!r}; "
                 f"use {' | '.join(HIDDEN_LOSSES)}"
             )
+        if getattr(self.model, "attn_impl", None) == "flex" and not self.train.pack:
+            raise ValueError(
+                "attn_impl 'flex' needs train.pack: its block mask is causal + same-document, "
+                "and the padding an unpacked corpus needs is deliberately not implemented."
+            )
 
         # Otherwise silent: the trainer skips the penalty when there is no domain, and the run
         # trains unpenalized while looking healthy.

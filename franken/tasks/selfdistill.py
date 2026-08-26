@@ -54,16 +54,10 @@ class SelfDistillTask(Task):
 
     def model_inputs(self, batch: dict) -> dict:
         if not self._pack:
-            # A tokenizer whose pad token IS its eos would read right-padding as document starts,
-            # so the ragged embed path must not derive positions at all.
+            # A pad token equal to eos would read right-padding as document starts.
             return {"input_ids": batch["input_ids"], "attention_mask": batch["attention_mask"]}
-        # No attention_mask: packing drops the trailing partial so every block is exactly full and
-        # the mask is all ones (`corpus.build._rows`) -- it carries nothing. Passing it anyway is
-        # not merely redundant, it is load-bearing in reverse: HF derives the teacher's
-        # document-isolation mask from position_ids ONLY when attention_mask is None
-        # (`masking_utils._preprocess_mask_arguments`). Send it and the teacher silently keeps
-        # cross-document attention while the student isolates. The loss still reads
-        # batch["attention_mask"]; only the forward drops it.
+        # The mask is all ones under packing, and sending it would cost the HF teacher its
+        # document isolation (masking_utils). The loss still reads it off `batch`.
         return {
             "input_ids": batch["input_ids"],
             "position_ids": doc_positions(batch["input_ids"], self._eos_id),

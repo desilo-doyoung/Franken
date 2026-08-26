@@ -14,6 +14,8 @@ model:
 
   softmax: exact
   softmax_kwargs: {}
+  # Block-sparse isolated attention; a dense 4D mask in fp32 + GQA materializes (B,H,S,S).
+  attn_impl: flex
   activation: silu
   activation_kwargs: {}
 
@@ -35,8 +37,8 @@ train:
   tokens_per_epoch: 2_000_000 # smoke-sized; the real budget comes from `corpus` measure
   output_dir: outputs
   run_name: llama_smoke
-  max_seq_len: 1024
-  pack: true # whole blocks, no padding; 20-40% of docs truncate at this cap
+  max_seq_len: 4096
+  pack: true # whole blocks, no padding, document-isolated attention
   seed: 42
   device: cuda
 
