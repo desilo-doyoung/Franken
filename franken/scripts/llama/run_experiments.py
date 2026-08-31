@@ -70,18 +70,10 @@ def _cmd(action: str, config: str, nproc: int = 1, *extra: str) -> list[str]:
 
 def _cache_missing(cfg) -> bool:
     # Without this every concurrent run re-streams and re-tokenizes the whole corpus.
-    from franken.data.corpus import train_cache_path  # noqa: PLC0415  (heavy import, rare path)
+    from franken.data.corpus import cache_missing  # noqa: PLC0415  (heavy import, rare path)
     from franken.tasks import build_task  # noqa: PLC0415
 
-    tokenizer = build_task(cfg.train.task).build_tokenizer(cfg)
-    cached = train_cache_path(
-        cfg.train.corpus,
-        cfg.train.tokens_per_epoch,
-        cfg.train.max_seq_len,
-        tokenizer,
-        cfg.train.pack,
-    )
-    return not os.path.isdir(os.path.join(_ROOT, cached))
+    return cache_missing(cfg, build_task(cfg.train.task).build_tokenizer(cfg))
 
 
 def build_corpus(config: str, out_dir: str) -> None:

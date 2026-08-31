@@ -61,7 +61,7 @@ train:
   # finewiki_hi (36k), open_web_math (35.8k), finewiki_fr (29.8k), fineweb_edu (17.2k) and
   # finewiki_it (17.1k) -- against 3.4% of ALL documents cut at 4096.
   max_seq_len: 16384
-  pack: true # best-fit blocks, document-isolated attention
+  pack: true # concatenate + chop into whole blocks, document-isolated attention
   grad_checkpoint: false # 16k in bf16 fits 80 GiB without it; flip to true if it OOMs
   # Student-only autocast. The teacher stays fp32, which `precision_gate` confirms is load-bearing:
   # a bf16 teacher drifts 0.0142 against a 0.004 band.

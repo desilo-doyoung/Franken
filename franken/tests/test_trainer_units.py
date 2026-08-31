@@ -227,9 +227,15 @@ def test_an_indivisible_step_is_rejected(monkeypatch):
         loader_for({"tokens_per_step": 64}, LENGTHS)
 
 
+def _packed_cfg(**train):
+    return Config.from_dict(
+        {"train": {"task": "lm", "tokens_per_epoch": 1e6, "pack": True, **train}}
+    )
+
+
 def test_a_packed_row_wider_than_the_micro_batch_is_refused():
-    # plan_batches emits a row that exceeds its budget rather than splitting it, so without this
-    # guard every step silently overshoots -- and the bigger the row, the bigger the overshoot.
+    # A budget narrower than one row cannot make a batch at all; without the guard plan_batches
+    # emitted the row anyway and every step silently overshot.
     cfg = Config.from_dict(
         {
             "train": {
@@ -241,5 +247,23 @@ def test_a_packed_row_wider_than_the_micro_batch_is_refused():
             }
         }
     )
-    with pytest.raises(ValueError, match="every step would exceed the budget"):
+    with pytest.raises(ValueError, match="packed row is"):
         BatchLoader(cfg, DistEnv(), dataset([512] * 4), lambda x: x, lambda *a: None)
+
+
+def test_a_budget_that_is_not_whole_rows_is_refused():
+    # 768 tokens over 512-token rows is one row and 256 tokens quietly discarded every step.
+    cfg = _packed_cfg(max_seq_len=512, distill={"tokens_per_step": 768})
+    with pytest.raises(ValueError, match="not a whole number"):
+        BatchLoader(cfg, DistEnv(), dataset([512] * 8), lambda x: x, lambda *a: None)
+
+
+def test_packed_batching_is_a_fixed_row_count():
+    # The point of the packed path: no bucketing, no padding, every batch identical.
+    cfg = _packed_cfg(max_seq_len=512, distill={"tokens_per_step": 2048})
+    b = BatchLoader(cfg, DistEnv(), dataset([512] * 10), lambda x: x, lambda *a: None)
+    assert {len(batch) for batch in b.plan} == {4}  # 2048 / 512
+    assert len(b.plan) == 2  # the trailing 2 rows are dropped, so every step is the same shape
+    drawn = [i for batch in b.plan for i in batch]
+    # Shuffled before chunking, so the dropped pair is arbitrary rather than the last two rows.
+    assert len(set(drawn)) == 8 and max(drawn) < 10

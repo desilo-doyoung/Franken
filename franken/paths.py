@@ -6,6 +6,9 @@ import os
 
 from franken.config import Config
 
+# Repo root, so a cache identity does not move with the process CWD.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 class RunPaths:
     def __init__(self, cfg: Config):

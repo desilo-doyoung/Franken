@@ -2,7 +2,6 @@ import math
 import random
 from contextlib import nullcontext
 
-import pyarrow.compute as pc
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
@@ -11,7 +10,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from transformers import get_linear_schedule_with_warmup, set_seed
 
 from franken.config import PRECISIONS, Config
-from franken.distill.batching import plan_batches, shard
+from franken.distill.batching import row_plan, shard
 from franken.distill.dist import (
     barrier,
     init_distributed,
@@ -99,6 +98,7 @@ class BatchLoader:
         self.opt = cfg.train.distill
         self.dist, self.dataset, self.collator = dist, dataset, collator
         self.seed = cfg.train.seed
+        self._block = cfg.train.max_seq_len if cfg.train.pack else None
         self.sampler = self.plan = None
         self.accum_steps = 1
 
@@ -106,20 +106,8 @@ class BatchLoader:
             self.micro_tokens, self.accum_steps = _split_step(
                 self.opt.tokens_per_step, dist.world_size
             )
-            # plan_batches cannot honour a budget narrower than one row: it emits the row anyway,
-            # so the step silently overshoots rather than failing.
-            if cfg.train.pack and self.micro_tokens < cfg.train.max_seq_len:
-                raise ValueError(
-                    f"micro-batch is {self.micro_tokens:,} tokens but a packed row is "
-                    f"{cfg.train.max_seq_len:,}, so every step would exceed the budget. Raise "
-                    f"FRANKEN_MAX_TOKENS_PER_RANK (now {max_tokens_per_rank():,}) to at least "
-                    "max_seq_len, or lower max_seq_len."
-                )
-            lengths = pc.list_value_length(dataset.data.column("input_ids")).to_numpy(
-                zero_copy_only=False
-            )
             self.plan = shard(
-                plan_batches(lengths, self.micro_tokens, self.seed),
+                row_plan(dataset, self.micro_tokens, self.seed, self._block),
                 dist.rank,
                 dist.world_size,
             )

@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import AutoModel
+from transformers.modeling_utils import unwrap_model
 
 from franken.config import Config
 from franken.models.base import ModelBackend
@@ -46,6 +47,8 @@ class LlamaBackend(ModelBackend):
         return model
 
     def forward(self, model: nn.Module, inputs: dict) -> dict:
+        # Called through the wrapper, on purpose: DDP's allreduce hooks live in its forward, so
+        # calling the unwrapped module would leave every rank training its own replica.
         out = model(**inputs)
         # Student returns a dict; the HF teacher returns a ModelOutput.
         if isinstance(out, dict):
@@ -57,8 +60,9 @@ class LlamaBackend(ModelBackend):
             "output": F.normalize(pooled, p=2, dim=-1),
             "hidden_states": hidden_states,
             # Tied embeddings, so this IS the LM head, and `hidden_states[-1]` is already
-            # post-norm -- exactly what LlamaForCausalLM projects.
-            "lm_head_weight": model.embed_tokens.weight,
+            # post-norm -- exactly what LlamaForCausalLM projects. Unwrapped because DDP has no
+            # attribute passthrough, and compile forwards to `_orig_mod`, which IS the DDP wrapper.
+            "lm_head_weight": unwrap_model(model).embed_tokens.weight,
         }
 
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:

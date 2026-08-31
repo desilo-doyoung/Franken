@@ -3,7 +3,7 @@
 The mixes are declared per model, in `franken/data/<model>/registry.py`.
 """
 
-from franken.data.corpus.build import load_corpus, train_cache_path
+from franken.data.corpus.build import cache_missing, load_corpus, train_cache_path
 from franken.data.corpus.evalset import Pool, pool
 from franken.data.corpus.measure import describe, profile, realized_mix
 from franken.data.corpus.read import source_texts
@@ -13,6 +13,7 @@ __all__ = [
     "SPLITS",
     "WEB_SEARCH",
     "Pool",
+    "cache_missing",
     "describe",
     "instruct",
     "load_corpus",

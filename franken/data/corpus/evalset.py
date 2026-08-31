@@ -12,13 +12,14 @@ import datasets
 from franken.data.corpus.read import records
 from franken.data.corpus.source import Source
 from franken.data.corpus.spec import eval_pair, instruct, split_of
+from franken.paths import ROOT
 
 QUERIES, DOCS = 500, 5_000
 
 # Bump alongside an adapter OR an instruction change: `q_texts` carries the instruction.
 # v2: SPLIT_PCT 2/2 -> 1/4 moves pool membership; per-source `instruct`.
 # v3: instructions adopted on 6 asymmetric sources -> their `q_texts` changed.
-_CACHE_DIR = "outputs/corpus_pool_cache"
+_CACHE_DIR = os.path.join(ROOT, "outputs", "corpus_pool_cache")
 _CACHE_VERSION = 3
 
 

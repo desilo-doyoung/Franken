@@ -91,8 +91,9 @@ class SplitStats:
 
 
 def real_tokens(ds) -> np.ndarray:
-    """Unpadded tokens per row. Best-fit packing pads bins to the cap, so a row's LENGTH overstates
-    its payload; every count that means "tokens" has to read the mask instead."""
+    """Unpadded tokens per row. A packed artifact has no padding and stores no `attention_mask`, so
+    its row lengths ARE its real tokens; unpacked rows are ragged and all-real too. The mask branch
+    survives for artifacts built before v13, whose bins were padded to the cap."""
     lengths = pc.list_value_length(ds.data.column("input_ids")).to_numpy(zero_copy_only=False)
     if "attention_mask" not in ds.column_names or not len(lengths):
         return lengths
@@ -121,3 +122,19 @@ def realized_mix(ds, n_sources: int) -> list[int]:
         return []
     col = ds.data.column("source").to_numpy(zero_copy_only=False)
     return np.bincount(col, weights=real_tokens(ds), minlength=n_sources).astype(int).tolist()
+
+
+def split_doc_share(ds, bos_id: int | None, eos_id: int | None) -> float:
+    """Share of documents the chop split -- directly comparable to the 16.6% that best-fit packing
+    avoided, and the number that decides whether chopping is costing anything.
+
+    A row opening on something other than BOS is one split event; EOS counts documents. Reporting
+    the ROW share instead would read ~98% at any realistic block size, since a row holds several
+    documents and almost never ends on a boundary -- alarming, and about nothing.
+    """
+    if bos_id is None or eos_id is None or not len(ds):
+        return 0.0
+    col = ds.data.column("input_ids")
+    splits = int((pc.list_element(col, 0).to_numpy(zero_copy_only=False) != bos_id).sum())
+    docs = int((np.asarray(pc.list_flatten(col)) == eos_id).sum())
+    return splits / max(docs, 1)

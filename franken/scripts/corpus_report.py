@@ -6,11 +6,11 @@ its objective needs (the embed track gates on scoreability; `lm` has nothing to 
 
 from __future__ import annotations
 
-import os
 import time
 
 from franken.data.corpus import SPLITS, describe, profile, realized_mix, source_texts
-from franken.data.corpus.build import train_cache_path
+from franken.data.corpus.build import cache_missing
+from franken.data.corpus.measure import split_doc_share
 
 SAMPLE = 300  # texts per source for the length profile
 HOLDOUT_SAMPLE = 100  # texts per split per source, for the overlap check
@@ -80,7 +80,7 @@ def build(cfg, task, tokenizer, sources) -> int:
     """Build and cache if needed, then report what the artifact holds. Prints on cache hits too,
     the only place the realized token count shows up. Returns unique train tokens."""
     cap, tokens, pack = cfg.train.max_seq_len, cfg.train.tokens_per_epoch, cfg.train.pack
-    cached = os.path.isdir(train_cache_path(cfg.train.corpus, tokens, cap, tokenizer, pack))
+    cached = not cache_missing(cfg, tokenizer)
     print(
         f"\n{'loading' if cached else 'BUILDING (hours)'} {cfg.train.corpus} "
         f"tokens={tokens:,.0f} max_seq_len={cap}\n"
@@ -90,17 +90,19 @@ def build(cfg, task, tokenizer, sources) -> int:
     print(f"\nready in {(time.time() - start) / 60:.1f} min\n")
 
     stats = {s: describe(data[s], cap) for s in ("train", "validation")}
-    # Packed, the same predicate counts blocks that needed no padding rather than documents cut.
-    label = "full" if pack else "truncated"
     for split, st in stats.items():
         line = (
             f"{split:11s} n={st.n:>10,}  tokens={st.tokens:>14,}  mean={st.mean:5.1f}  "
-            f"median={st.median:3.0f}  {label}@{cap}={100 * st.truncated:5.1f}%"
+            f"median={st.median:3.0f}"
         )
-        if pack and st.n:
-            # What best-fit costs. Above a few percent the bin heuristic is leaving room on the
-            # table, and every pad token is compute the loss then throws away.
-            line += f"  pad={100 * (1 - st.tokens / (st.n * cap)):4.1f}%"
+        if pack:
+            # `truncated` is 100% by construction here and carries no news. What chopping costs
+            # does: documents cut at a block boundary, whose tail the teacher then predicts with
+            # its context removed.
+            cut = split_doc_share(data[split], tokenizer.bos_token_id, tokenizer.eos_token_id)
+            line += f"  docs split={100 * cut:5.1f}%"
+        else:
+            line += f"  truncated@{cap}={100 * st.truncated:5.1f}%"
         print(line)
 
     if counts := realized_mix(data["train"], len(sources)):

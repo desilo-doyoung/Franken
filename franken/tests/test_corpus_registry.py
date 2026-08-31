@@ -1,9 +1,11 @@
+import os
 from types import SimpleNamespace
 
 import pytest
 
 from franken.data.corpus.build import cache_path, train_cache_path
 from franken.data.qwen3.registry import MIXES, PRESETS
+from franken.paths import ROOT
 
 # name -> (repo, config, key, TOKEN share, instructed, has qrels, scores_ndcg)
 _MULTI_DOMAIN = {
@@ -85,7 +87,7 @@ def _declared(src):
             "1930000tok",
             256,
             "Qwen/Qwen3-Embedding-0.6B",
-            "outputs/corpus_cache/v12-multi_domain-train-1930000tok-256-Qwen_Qwen3-Embedding-0.6B",
+            "v13-multi_domain-train-1930000tok-256-Qwen_Qwen3-Embedding-0.6B",
         ),
         (
             "multi_domain",
@@ -93,7 +95,7 @@ def _declared(src):
             "500",
             256,
             "Qwen/Qwen3-Embedding-0.6B",
-            "outputs/corpus_cache/v12-multi_domain-validation-500-256-Qwen_Qwen3-Embedding-0.6B",
+            "v13-multi_domain-validation-500-256-Qwen_Qwen3-Embedding-0.6B",
         ),
         (
             "mixed",
@@ -101,7 +103,7 @@ def _declared(src):
             "140000tok",
             128,
             "unsloth/Llama-3.2-1B",
-            "outputs/corpus_cache/v12-mixed-train-140000tok-128-unsloth_Llama-3.2-1B",
+            "v13-mixed-train-140000tok-128-unsloth_Llama-3.2-1B",
         ),
         (
             "mixed",
@@ -109,14 +111,23 @@ def _declared(src):
             "500",
             128,
             "unsloth/Llama-3.2-1B",
-            "outputs/corpus_cache/v12-mixed-validation-500-128-unsloth_Llama-3.2-1B",
+            "v13-mixed-validation-500-128-unsloth_Llama-3.2-1B",
         ),
     ],
 )
 def test_cache_path_still_names_the_builds_already_on_disk(name, split, label, cap, tok, expected):
-    # v12 deliberately orphans the v11 dirs: best-fit packing regroups documents into different
-    # blocks and pads them. Pinned so the NEXT change cannot move the key by accident.
-    assert cache_path(name, split, label, cap, _tok(tok)) == expected
+    # v13 deliberately orphans the v12 dirs: chopping regroups documents into different blocks and
+    # drops the stored mask. Pinned on the BASENAME so the NEXT change cannot move the key by
+    # accident, while the directory itself is free to be anchored anywhere.
+    got = cache_path(name, split, label, cap, _tok(tok))
+    assert os.path.basename(got) == expected
+
+
+def test_the_cache_lives_at_a_fixed_place_not_wherever_python_was_started():
+    # A relative dir made two runs of the same config disagree about the cache from different CWDs.
+    got = cache_path("mixed", "train", "140000tok", 128, _tok("t"))
+    assert os.path.isabs(got)
+    assert got.startswith(ROOT + os.sep)
 
 
 def test_packing_is_a_different_artifact_not_a_reinterpreted_one():

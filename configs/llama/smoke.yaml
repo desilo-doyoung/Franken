@@ -38,7 +38,7 @@ train:
   output_dir: outputs
   run_name: llama_smoke
   max_seq_len: 4096
-  pack: true # best-fit blocks, document-isolated attention
+  pack: true # concatenate + chop into whole blocks, document-isolated attention
   # Recompute activations in backward: 7x less memory per token for ~16% wall clock, which is
   # what lets tokens_per_step hold 8 blocks instead of 1.
   grad_checkpoint: true

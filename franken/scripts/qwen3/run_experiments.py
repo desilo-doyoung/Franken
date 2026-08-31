@@ -280,23 +280,10 @@ _PREBUILD_TOKENS = 1e7
 
 def _cache_missing(cfg) -> bool:
     # Runs go one per device concurrently, so with no cache each tokenizes the whole corpus.
-    from franken.data.corpus import (
-        train_cache_path,  # noqa: PLC0415  (heavy import, rare path)
-    )
+    from franken.data.corpus import cache_missing  # noqa: PLC0415  (heavy import, rare path)
     from franken.tasks import build_task  # noqa: PLC0415
 
-    tokenizer = build_task(cfg.train.task).build_tokenizer(cfg)
-    cached = os.path.join(
-        _ROOT,
-        train_cache_path(
-            cfg.train.corpus,
-            cfg.train.tokens_per_epoch,
-            cfg.train.max_seq_len,
-            tokenizer,
-            cfg.train.pack,
-        ),
-    )
-    return not os.path.isdir(cached)
+    return cache_missing(cfg, build_task(cfg.train.task).build_tokenizer(cfg))
 
 
 def _corpus(cfg, config_path: str, out_dir: str, build: bool) -> None:

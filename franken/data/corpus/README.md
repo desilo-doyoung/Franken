@@ -19,13 +19,14 @@ load_corpus(tokenizer, name, corpus_sources(name), ...)
   ↓  cache hit?  ->  load_from_disk, done. Nothing below runs.
   ↓
 _rows()   per source: records() -> corpus_texts() -> tokenize -> draw to the TOKEN quota
-          pack:   best-fit blocks of exactly max_seq_len, padded (see "Anatomy" below)
+          pack:   concatenate + chop into blocks of exactly max_seq_len (see "Anatomy" below)
           plain:  one row per document, truncated to max_seq_len
   ↓
 Dataset.from_generator -> shuffle(seed=0) -> save_to_disk (tmp + rename)
-outputs/corpus_cache/v<N>-<mix>-<split>-<size>-<cap>-<tokenizer>[-packed]
+<repo>/outputs/corpus_cache/v<N>-<mix>-<split>-<size>-<cap>-<tokenizer>[-packed]
+  + franken_manifest.json (the recipe the key omits)
   ↓
-Distiller: with_format("torch") -> plan_batches(token budget) -> DataCollatorWithPadding
+Distiller: with_format("torch") -> row_plan(token budget) -> DataCollatorWithPadding
   ↓
 Task.model_inputs()  packed: derives position_ids and drops attention_mask from the forward
 ```
@@ -45,10 +46,21 @@ only. That is why `build.py` does not import it.
 (arxiv abstracts ~180 tokens against codeparrot files ~2,500), so a text-count share silently
 produced a different mix than the one declared.
 
-**Rows are stored ragged; batches are built by token budget.** Nothing is padded to `max_seq_len` on
-the unpacked path. `DataCollatorWithPadding` pads each batch to *its own* longest row, and
-`plan_batches` (`franken/distill/batching.py`) length-buckets within a 12,800-row window before
-filling to `distill.tokens_per_step`, which keeps occupancy around 98.5%.
+**Batching depends on which artifact you have** (`franken/distill/batching.py::row_plan`, the one
+planner the trainer and the eval loader share):
+
+| | unpacked (embed) | packed (lm) |
+|---|---|---|
+| rows | ragged | all exactly `max_seq_len`, by construction |
+| columns | `input_ids`, `attention_mask`, `source` | `input_ids`, `source` |
+| planner | `plan_batches` — shuffle, length-bucket in 12,800-row windows, greedy fill to the budget | `plan_fixed_batches` — shuffle, chunk into `micro_tokens // max_seq_len` rows |
+| collator | pads each batch to its own longest row | stacks; synthesizes the all-ones mask |
+| occupancy | ~98.5% | 100% |
+
+The packed planner is trivial because the packing already happened at build time; it only chunks.
+It still **checks** the width rather than assuming it — that is what catches a pre-v13 artifact,
+whose bins were padded and could end short. `torch_columns()` follows the artifact for the same
+reason: asking for a column a packed build does not hold makes `with_format` raise.
 
 ## Anatomy of a packed block (`train.pack: true`)
 
@@ -59,28 +71,44 @@ Packing exists so that no token is thrown away: unpacked, a document longer than
 
 1. **Tokenize whole.** `add_special_tokens=True`, so each document already begins with **BOS**.
 2. **Terminate it.** `_rows` appends **EOS**: `document = ids + [eos]`. EOS means exactly one thing —
-   *this document ended*. It is not used for padding, so counting EOS counts documents.
-3. **Fragment only if forced.** A document longer than `max_seq_len` cannot fit any block, so it is
-   cut into `max_seq_len`-sized pieces. Anything that fits stays whole.
-4. **Best-fit-decreasing into blocks.** Fragments accumulate into a buffer of `_PACK_BUFFER_DOCS`,
-   get sorted longest-first, and each is placed into the *tightest* block that still holds it
-   (`_bin_pack`). The buffer is then flushed whole, so no half-full block survives into the next one.
-5. **Pad to exactly `max_seq_len`** with the tokenizer's **pad token**, and record
-   `attention_mask` = 1 on real tokens, 0 on padding.
+   *this document ended*, so counting EOS counts documents.
+3. **Concatenate and chop.** Documents are appended to a running per-source buffer, and a row is
+   emitted every `max_seq_len` tokens. A document that runs past a boundary is **cut**, and its tail
+   opens the next row as an independent sequence.
+4. **Drop the trailing partial.** Under one block per source, and dropping it is what makes every
+   row exactly `max_seq_len` with **no padding at all** — hence no `attention_mask` column either.
+   A source too small to fill one block therefore reaches no row, so the build says
+   `PRODUCED NO BLOCKS` rather than letting it vanish quietly.
 
 Packing is **per source**, so the `source` column stays exact — a block spanning sources could only
 record a majority.
 
+**Why chopping is cheap here and expensive in pretraining.** This reverses an earlier decision:
+best-fit-decreasing bin packing (`_bin_pack`, v12) split a document only when it could not fit a bin
+at all, on the grounds that chopping cut 16.6% of documents that would have fit whole. The argument
+against it is distillation-specific — **a context-truncated fragment is not a corrupted label.** The
+teacher is scored on *the same input*, so the KD target is exactly right; only the input
+distribution shifts. "Never split a document" is next-token-pretraining folklore, where the label
+itself would be wrong. What the reversal buys is the whole bin-packing apparatus, the padding, the
+pad-token question, and the stored mask column. What it costs is reported per split as
+`docs split=%` — **20.0%** on the smoke artifact at L=4096, against the 16.6% best-fit avoided.
+
 ### What a block looks like
 
-Two documents of 5 and 7 tokens in a block of 16:
+Documents of 5 and 7 tokens, then one that straddles the boundary, in blocks of 16:
 
 ```
-input_ids       BOS a1 a2 a3 EOS  BOS b1 b2 b3 b4 b5 EOS  PAD PAD PAD PAD
-attention_mask    1  1  1  1   1    1  1  1  1  1  1   1    0   0   0   0
-position_ids      0  1  2  3   4    0  1  2  3  4  5   6    0   1   2   3   <- derived at train time
-segment           0  0  0  0   0    1  1  1  1  1  1   1    2   2   2   2
+input_ids       BOS a1 a2 a3 EOS  BOS b1 b2 b3 b4 b5 EOS  BOS c1 c2 c3
+position_ids      0  1  2  3   4    0  1  2  3  4  5   6    0  1  2  3   <- derived at train time
+segment           0  0  0  0   0    1  1  1  1  1  1   1    2  2  2  2
+
+input_ids       c4 c5 c6 EOS  BOS d1 d2 ...                             <- next row: c continues
+position_ids     0  1  2   3    0  1  2 ...                                 but restarts at 0
+segment          0  0  0   0    1  1  1 ...
 ```
+
+The continuation is presented as a fresh sequence. That is the honest reading — it has no prefix
+inside the row — and it is what `doc_positions` already did for a fragment before v13.
 
 ### How EOS becomes document isolation
 
@@ -94,13 +122,11 @@ and the model masks attention to *within* a segment. Consequences:
 
 - **Documents cannot see each other**, even though they share a block. An isolated block computes
   bit-identically to running its documents separately (`test_isolated_block_equals_separate_forwards`).
-- **Padding is its own segment.** The first pad follows the last document's EOS, so it restarts —
-  and because pads are not EOS, the rest continue from it as *one* segment rather than many.
-- **Real tokens never see padding anyway**, because padding is right-side and attention is causal.
-  The segment is what keeps the pad region cheap under `attn_impl: flex`, not what makes it correct.
-- **A fragment of an over-long document restarts too.** It has no prefix inside the block, so it is
-  presented as a fresh sequence. Honest, but its opening tokens are a weaker distillation signal —
-  the teacher is predicting mid-document text with its context removed.
+- **There is no padding to reason about.** Every position in a packed row is a real token, which is
+  why the artifact stores no `attention_mask` and the collator synthesizes an all-ones one.
+- **A chopped continuation restarts too.** It has no prefix inside the row, so it is presented as a
+  fresh sequence. Honest, but its opening tokens are a weaker distillation signal — the teacher is
+  predicting mid-document text with its context removed. `docs split=%` is how many.
 
 ### What the teacher sees
 
@@ -111,8 +137,40 @@ teacher's document-isolation mask from `position_ids` **only** when `attention_m
 and the teacher silently keeps cross-document attention while the student isolates — no error, just
 a wrong target. `load_teacher` sets `config.use_cache = False` for the same reason.
 
-The loss still masks padding: it reads `batch["attention_mask"]`, which the collator kept, so only
-the *forward* drops it.
+The loss still reads `batch["attention_mask"]` — the collator's, all ones, since a packed row has no
+padding. Only the *forward* drops it.
+
+## Where tokens go, and what gets dropped
+
+Two different things are called "tokens", and they are not equal:
+
+- **`train.tokens_per_epoch` counts REAL tokens.** The draw stops at `budget × weight` per source,
+  cut exactly at the quota. Packed, the artifact then holds slightly *fewer* — the trailing partial
+  block of each source is dropped — and the per-source build line reports what actually landed.
+- **`distill.tokens_per_step` counts SLOTS.** It is `rows × max_seq_len`. Packed, every slot holds a
+  real token, so the two agree.
+
+Everything that removes data, in order of size:
+
+| what | where | how much |
+|---|---|---|
+| documents truncated at the cap | `_rows`, **unpacked only** (`truncation=not pack`) | the whole tail of any over-long document |
+| the draw stops mid-document at the quota | `_rows` | cut exactly AT the quota, so nothing overshoots |
+| trailing partial block per source | `_rows`, **packed only** | `< max_seq_len` tokens per source |
+| trailing partial batch | `plan_fixed_batches` | `n_rows mod rows_per_batch` blocks |
+| remainder batches so ranks step evenly | `shard` | `< world_size` batches |
+| padding | — | none; packed rows are all real tokens |
+
+Packing removes the first and largest of those: with `pack: true`, `truncation` is off and an
+over-long document is *split*, not cut short. It adds the third, which is bounded by one block per
+source — negligible at a real budget (0.02% at 1 Gtok / L=16384), but a **whole source** if that
+source's quota is under one block, which is why the build shouts `PRODUCED NO BLOCKS`.
+
+⚠️ **The trailing-batch drop is the same rows every epoch.** `BatchLoader.plan` is built once and
+`_build(epoch)` only reorders it, so at `epochs > 1` a fixed subset never trains. It is zero when
+`micro_tokens == max_seq_len` (one row per batch, the usual real-run shape) and was 3 of 499 blocks
+on the smoke artifact. Dropping it is deliberate: every step then carries identical tokens, so flex —
+compiled with `dynamic=False` — never sees a second shape.
 
 ## Modules
 
@@ -123,7 +181,7 @@ the *forward* drops it.
 | `adapters.py` | one `row -> Record \| None` per dataset *shape*: `pair`, `triplet`, `marco`, `titled`, `paragraphs`, `whole`, `wikitext` |
 | `read.py` | `records()` — a source's rows for one split, hash-split and qrels-holdout applied — and `source_texts()` |
 | `measure.py` | `profile()` per source, `describe()` / `realized_mix()` / `real_tokens()` on a built artifact. **Reporting only** |
-| `build.py` | `_rows` (the draw), `_bin_pack`, the cache key, `load_corpus` |
+| `build.py` | `_rows` (the draw + the chop), the cache key, the manifest, `load_corpus` |
 | `evalset.py` | `Pool` (documents, queries, judgements) from a source's held-out rows |
 
 Imports run one way: `build → read` and `measure → read`, never between `build` and `measure`.
@@ -194,19 +252,35 @@ format verified against Qwen3-Embedding's `config_sentence_transformers.json` (n
 The prefix is baked into the cached text, so changing it needs a `_CACHE_VERSION` bump. Llama's mix
 sets it nowhere — a base LM has no such protocol.
 
-**The quota counts tokens PLACED, per fragment.** Counting tokens *read* let a single 36k-token
-Hindi article blow `finewiki_hi`'s 63k quota by 57%; counting per *document* reintroduces exactly
-that bug, since a document is buffered all at once. Per fragment bounds the overshoot at one block.
+**The quota counts tokens PLACED, and cuts the last document AT it.** Counting tokens *read* let a
+single 36k-token Hindi article blow `finewiki_hi`'s 63k quota by 57%. Appending a document whole and
+stopping afterwards reintroduces that bug, since a document is buffered all at once — so `_rows`
+slices to the remaining room instead, which makes the draw exact rather than merely bounded.
 
 **Packing is a different artifact, never a reinterpreted one.** `train.pack` adds its own cache-key
 suffix, so turning it on cannot silently re-read an existing build. Under packing `describe`'s
-`truncated` counts blocks that needed **no padding**, which is why the report relabels it `full@cap`
-and adds a `pad=%` column.
+`truncated` is 100% by construction and carries no news; what the report shows instead is
+`docs split=%`, the share of documents cut at a block boundary. Not the share of ROWS opening
+mid-document: that reads ~98% at any realistic block size, because a row holds several documents
+and almost never ends on one -- alarming, and about nothing.
 
-**Cache invalidation is manual.** `build._CACHE_VERSION` must be bumped when a source, a weight or
-an adapter changes — the key covers the *request* (mix, split, size, cap, tokenizer, packing), not
-the recipe that answered it. Deliberate: a content digest would throw away an hours-long build on a
-cosmetic edit. The cost is that forgetting to bump serves stale text silently.
+**Cache invalidation is manual, and the manifest is the receipt.** `build._CACHE_VERSION` must be
+bumped when a source, a weight or an adapter changes — the key covers the *request* (mix, split,
+size, cap, tokenizer, packing), not the recipe that answered it. Deliberate: a content digest would
+throw away an hours-long build on a cosmetic edit. Forgetting to bump still serves stale text, but
+`franken_manifest.json` inside each artifact records the sources, weights and repos the key omits,
+so the staleness is now *diagnosable*. It is written inside the staged directory, so it publishes
+atomically with the rename rather than leaving a window where the artifact has no provenance.
+
+**A cold cache under `torchrun` is a hard error.** Every rank calls `load_corpus`, so a miss used to
+mean N processes streaming and tokenizing the whole corpus and racing on the rename, the losers
+deleting hours of work. Gating on rank 0 while the others wait is not the fix either — the build is
+hours and `init_process_group` times out at 60 minutes. So `_refuse_under_ddp` raises and names the
+command: `python main.py corpus --config <cfg>`. `cache_missing` checks **both** splits, because
+`Distiller.train` builds both.
+
+**The cache directory is absolute.** It is anchored on `franken.paths.ROOT`; as a relative path the
+cache identity moved with the process CWD. `evalset`'s pool cache is anchored the same way.
 
 🚨 **`Dataset.from_generator` fingerprints its `gen_kwargs`, not the generator's code.** A logic
 change to `_rows` does not invalidate HF's own cache, so it will happily republish a stale draw —

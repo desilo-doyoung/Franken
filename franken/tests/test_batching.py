@@ -92,3 +92,53 @@ def test_doubling_the_budget_doubles_the_batch(corpus_lengths):
 
     for lo, hi in zip(CORPUS_BUDGETS, CORPUS_BUDGETS[1:], strict=False):
         assert 1.9 < seqs(hi) / seqs(lo) < 2.1, (lo, hi, seqs(lo), seqs(hi))
+
+
+def test_fixed_batches_are_uniform_shuffled_and_lose_the_remainder():
+    from franken.distill.batching import plan_fixed_batches
+
+    plan = plan_fixed_batches(10, 4, seed=0)
+    assert [len(b) for b in plan] == [4, 4]  # the trailing 2 are dropped
+    flat = [i for b in plan for i in b]
+    assert len(set(flat)) == 8 and max(flat) < 10
+    # Shuffled, or a batch would be 4 consecutive rows -- and packed rows are single-source.
+    assert flat != list(range(8))
+    assert plan_fixed_batches(10, 4, seed=0) == plan  # deterministic
+
+
+def test_fixed_batches_are_empty_when_no_full_batch_fits():
+    from franken.distill.batching import plan_fixed_batches
+
+    assert plan_fixed_batches(3, 4, seed=0) == []
+
+
+def test_a_ragged_artifact_cannot_masquerade_as_packed():
+    # The cross-module invariant: build.py pads every bin to the cap, and row_plan depends on it.
+    # A short row would pass unnoticed and blow the budget once the collator padded the batch.
+    import datasets
+    import pytest
+
+    from franken.distill.batching import row_plan
+
+    ds = datasets.Dataset.from_dict({"input_ids": [[1] * 8, [1] * 5]}).with_format(
+        "torch", columns=["input_ids"]
+    )
+    with pytest.raises(ValueError, match="rows of exactly"):
+        row_plan(ds, 16, seed=0, block_size=8)
+
+    ok = datasets.Dataset.from_dict({"input_ids": [[1] * 8] * 4}).with_format(
+        "torch", columns=["input_ids"]
+    )
+    assert [len(b) for b in row_plan(ok, 16, seed=0, block_size=8)] == [2, 2]
+
+
+def test_row_plan_refuses_a_plan_with_no_batches():
+    # Otherwise optimizer_steps is 0 and the LR schedule divides by zero deep inside transformers,
+    # with nothing naming the corpus as the cause.
+    import datasets
+
+    from franken.distill.batching import row_plan
+
+    ds = datasets.Dataset.from_dict({"input_ids": [[0] * 8]})
+    with pytest.raises(ValueError, match="too few for one micro-batch"):
+        row_plan(ds, 32, seed=0, block_size=8)
