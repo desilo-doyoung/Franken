@@ -177,33 +177,18 @@ class BatchLoader:
 
 
 class RangePenalty:
-    """Pulls FFN pre-activations into the activation op's domain, via forward hooks that live
-    only for the `with` body. Falsy unless `range_penalty > 0` and the op exposes a `domain`."""
+    """Pulls one site's pre-activations into the domain its FHE consumer's polynomial can cover,
+    via forward hooks that live only for the `with` body."""
 
-    def __init__(self, backend, student, cfg: Config, log):
-        self.weight = cfg.distill.range_penalty
-        acts = backend.activation_ops(student)
-        first = acts[0] if acts else None
-        self.domain = getattr(first, "domain", None) if (self.weight > 0 and first) else None
+    def __init__(self, site: str, modules, domain: float, weight: float):
+        self.site = site
+        self.modules = modules
+        self.domain = float(domain)
+        self.weight = weight
         self._preacts, self._hooks, self._epoch = [], [], []
-        self._targets = []
-        if self.domain is None:
-            return
-        # Constraining a layer costs accuracy, so hooking all of them is usually wrong.
-        mods = backend.ffn_preact_modules(student)
-        which = cfg.distill.range_penalty_layers
-        self._targets = mods if which is None else [mods[i] for i in which]
-        if which is not None:
-            log(
-                f"range penalty on student layers {sorted(which)} "
-                f"of {len(mods)}, domain {self.domain}"
-            )
-
-    def __bool__(self) -> bool:
-        return self.domain is not None
 
     def __enter__(self):
-        self._hooks = [m.register_forward_hook(self._capture) for m in self._targets]
+        self._hooks = [m.register_forward_hook(self._capture) for m in self.modules]
         return self
 
     def __exit__(self, *exc) -> bool:
@@ -221,7 +206,8 @@ class RangePenalty:
 
     def measure(self):
         """Squared distance past +/-domain, meaned over the OUT-OF-RANGE elements only: the
-        in-range bulk would otherwise dilute the gradient on the rare outliers."""
+        in-range bulk would otherwise dilute the gradient on the rare outliers. Unweighted, so
+        the epoch line stays comparable to `act_range.py`; `RangePenalties` applies the weight."""
         terms = []
         for x in self._preacts:
             # fp32 always: bf16's coarse grid shifts this tail statistic +7.6%.
@@ -244,6 +230,78 @@ class RangePenalty:
         mean = torch.stack(self._epoch).mean().item()
         self._epoch.clear()
         return mean
+
+
+class RangePenalties:
+    """Every constrained site, driven as one: enter once, clear once a step, one loss term.
+    Falsy -- and every method a no-op -- when nothing is constrained."""
+
+    def __init__(self, penalties: list[RangePenalty]):
+        self.penalties = penalties
+
+    def __bool__(self) -> bool:
+        return bool(self.penalties)
+
+    def __enter__(self):
+        for penalty in self.penalties:
+            penalty.__enter__()
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        for penalty in self.penalties:
+            penalty.__exit__(*exc)
+        return False
+
+    def clear(self) -> None:
+        for penalty in self.penalties:
+            penalty.clear()
+
+    def loss_term(self):
+        """The weighted sum over sites, or None when everything sat inside its domain."""
+        terms = [
+            penalty.weight * measured
+            for penalty in self.penalties
+            if (measured := penalty.measure()) is not None
+        ]
+        return sum(terms) if terms else None
+
+    def epoch_summary(self) -> str:
+        """`ffn=... pooler=...` for the epoch line, empty when there is nothing to report."""
+        parts = [
+            f"{penalty.site}={mean:.1f}"
+            for penalty in self.penalties
+            if (mean := penalty.epoch_mean()) is not None
+        ]
+        return " ".join(parts)
+
+
+# TODO: Refactor
+def build_penalties(backend, student, cfg: Config, log) -> RangePenalties:
+    """One penalty per constrained site. The FFN's domain comes off the activation op; the pooler's
+    is explicit, because its wall belongs to the consumer's tanh fit and not to any op the student
+    holds. Empty when nothing is constrained."""
+    penalties = []
+    acts = backend.activation_ops(student)
+    first = acts[0] if acts else None
+    domain = getattr(first, "domain", None) if first else None
+    if cfg.distill.range_penalty > 0 and domain is not None:
+        # Constraining a layer costs accuracy, so hooking all of them is usually wrong.
+        mods = backend.ffn_preact_modules(student)
+        which = cfg.distill.range_penalty_layers
+        targets = mods if which is None else [mods[i] for i in which]
+        penalties.append(RangePenalty("ffn", targets, domain, cfg.distill.range_penalty))
+        layers = "all" if which is None else f"{sorted(which)} of {len(mods)}"
+        log(f"ffn penalty {cfg.distill.range_penalty} on student layers {layers}, domain {domain}")
+    if cfg.distill.pooler_penalty > 0 and cfg.distill.pooler_domain is not None:
+        pooler = backend.pooler_preact_modules(student)
+        if pooler:
+            penalties.append(
+                RangePenalty(
+                    "pooler", pooler, cfg.distill.pooler_domain, cfg.distill.pooler_penalty
+                )
+            )
+            log(f"pooler penalty {cfg.distill.pooler_penalty}, domain {cfg.distill.pooler_domain}")
+    return RangePenalties(penalties)
 
 
 class BestCheckpoint:
@@ -314,7 +372,7 @@ class Distiller:
         return _maybe_compile(student, self.cfg), _maybe_compile(self.teacher, self.cfg)
 
     def _run_epoch(
-        self, batches, loader, student, teacher, optimizer, scheduler, penalty, progress
+        self, batches, loader, student, teacher, optimizer, scheduler, penalties, progress
     ):
         """Returns the last batch's loss components, for the epoch line."""
         components = {}
@@ -330,17 +388,15 @@ class Distiller:
             with torch.no_grad():
                 teacher_outputs = self.backend.forward(teacher, inputs)
 
-            penalty.clear()
+            penalties.clear()
             with _autocast(self.cfg.train.precision):
                 student_outputs = self.backend.forward(student, inputs)
                 loss, components = self.task.compute_loss(
                     student_outputs, teacher_outputs, batch, self.cfg
                 )
 
-            if penalty:
-                term = penalty.measure()
-                if term is not None:
-                    loss = loss + penalty.weight * term
+            if (term := penalties.loss_term()) is not None:
+                loss = loss + term
 
             # no_sync or DDP allreduces every micro-batch and accumulation costs more than it
             # saves. `loss / accum` weights micro-batches equally, not per sequence: zero-mean
@@ -393,7 +449,7 @@ class Distiller:
         if self._cuda:
             torch.cuda.reset_peak_memory_stats(self.device)
 
-        with RangePenalty(self.backend, self.student, self.cfg, self.log) as penalty:
+        with build_penalties(self.backend, self.student, self.cfg, self.log) as penalties:
             for epoch in range(opt.epochs):
                 components = self._run_epoch(
                     batches,
@@ -402,7 +458,7 @@ class Distiller:
                     teacher,
                     optimizer,
                     scheduler,
-                    penalty,
+                    penalties,
                     progress,
                 )
                 # Rank 0 scores; replicas are identical after allreduce, so the others just wait.
@@ -410,8 +466,8 @@ class Distiller:
                     metrics = self.evaluate()
                     best.consider(metrics, self.student)
                     comp_str = " ".join(f"{k}={float(v):.3f}" for k, v in components.items())
-                    if (mean := penalty.epoch_mean()) is not None:
-                        comp_str += f" penalty={mean:.1f}"
+                    if summary := penalties.epoch_summary():
+                        comp_str += f" {summary}"
                     self.log(f"epoch {epoch}: {metrics} | {comp_str}")
                 barrier(self.dist)
                 self.student.train()

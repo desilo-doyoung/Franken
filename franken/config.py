@@ -57,6 +57,11 @@ class DistillConfig:
     # STUDENT layers the penalty applies to; None = all. Constraining a layer costs accuracy --
     # penalizing all 28 to fix one Qwen3 outlier cost 8.2 recall points. Measure with act_range.py.
     range_penalty_layers: list[int] | None = None
+    # Same mechanism for the pooler pre-activation. It needs an EXPLICIT domain because, unlike
+    # the FFN, its wall belongs to the consumer's tanh fit and not to any op the student holds:
+    # THOR's composed deg-15 fit on z = pre/40 goes vertical at |pre| = 39.91 (-> 4.1e+13).
+    pooler_penalty: float = 0.0
+    pooler_domain: float | None = None
 
 
 @dataclass
@@ -161,6 +166,12 @@ class Config:
                 f"distill.range_penalty is {self.distill.range_penalty} but activation "
                 f"{self.model.activation!r} exposes no domain, so the penalty would do nothing. "
                 f"Set activation_kwargs.domain, or set range_penalty to 0."
+            )
+
+        if self.distill.pooler_penalty > 0 and self.distill.pooler_domain is None:
+            raise ValueError(
+                f"distill.pooler_penalty is {self.distill.pooler_penalty} but pooler_domain is "
+                "unset, so the penalty would do nothing. Set distill.pooler_domain."
             )
 
         # MRPC brings its own data; a corpus task must say how much to draw.

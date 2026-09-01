@@ -1,0 +1,60 @@
+# 6 layers, exact GELU + exact softmax, UNPENALIZED. The beyond-THOR/stripe deployment target:
+# stripe's GELU is the composed-tanh fit (deg-31 o deg-27 on u = z/64), so the student trains on
+# real GELU and the polynomial appears only at inference.
+#
+# That fit is safe on (-70.48, +151.08) and diverges hard outside it (8.4e+13 by z = +152), so the
+# question the penalty answers is a range question. Measured on val+test (act_range.py pads to
+# batch-longest, so PAD slots are included -- they are what §8.4's 1861-vs-4.1 lesson is about):
+#
+#            pre min   pre max   neg headroom   pos headroom   test acc/F1
+#   nopen     -49.22    +52.43       1.43x          2.88x      0.8145/0.8645
+#   dom32     -32.02    +36.83       2.20x          4.10x      0.8151/0.8652
+#
+# Neither breaches the wall, so the penalty buys margin, not correctness -- and it is free (the
+# 0.9pt validation gap favouring nopen reverses on test). Unpenalized is deployed because it is the
+# simpler thing to explain. **If stripe shows GELU trouble, switch to depth6_exact_dom32.yaml**;
+# EXECUTION_NOTES.md §9 warns that fewer layers run wider, and 1.43x is thin.
+#   distill: uv run python main.py distill --config configs/bert/depth6_exact.yaml
+#   range:   uv run python -m franken.scripts.bert.act_range --config configs/bert/depth6_exact.yaml
+
+model:
+  num_hidden_layers: 6
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: exact
+  activation_kwargs: {} # no domain -> nothing for the penalty to read
+
+distill:
+  alpha: 0.5
+  beta: 1.0
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 0.0 # the control
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/bert/teacher
+  run_name: bert_exact6l_nopen
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 6
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

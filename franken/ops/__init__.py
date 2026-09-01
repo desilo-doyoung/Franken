@@ -33,6 +33,14 @@ class CGFSoftmax(nn.Module):
 
 
 class ExactGELU(nn.Module):
+    """``domain`` is inert to the math and only exposes the op to ``distill.range_penalty``: the
+    consumer's GELU is a polynomial even though the student's is not. THOR's composed-tanh fit
+    diverges outside ``(-70.5, +151.1)`` and the teacher already reaches ``[-61, +143]``."""
+
+    def __init__(self, domain: float | None = None, **kwargs):
+        super().__init__()
+        self.domain = domain
+
     def forward(self, x):
         return F.gelu(x)
 

@@ -42,3 +42,15 @@ def test_accessors_are_not_walking_the_module_tree_in_scripts():
     from franken.scripts.qwen3 import act_range
 
     assert "self_attn.softmax" not in inspect.getsource(act_range)
+
+
+def test_pooler_accessor_is_optional_and_defaults_to_empty():
+    # Deliberately NOT abstract, unlike ACCESSORS: only bert has a pooler, and a decoder backend
+    # must not be forced to implement an accessor for a module it does not have.
+    assert "pooler_preact_modules" not in ModelBackend.__abstractmethods__
+    cfg = Config.from_dict({"model": {"backend": "bert", "num_hidden_layers": 4}})
+    bert = build_backend("bert")
+    assert len(bert.pooler_preact_modules(bert.build_student(cfg))) == 1
+    for name in sorted(BACKENDS):
+        if name != "bert":
+            assert build_backend(name).pooler_preact_modules(None) == []

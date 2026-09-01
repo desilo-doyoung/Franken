@@ -5,7 +5,12 @@ from torch import nn
 
 from franken.config import Config
 from franken.distill.dist import DistEnv
-from franken.distill.trainer import BatchLoader, BestCheckpoint, RangePenalty, resolve_lr
+from franken.distill.trainer import (
+    BatchLoader,
+    BestCheckpoint,
+    build_penalties,
+    resolve_lr,
+)
 
 
 class Opt:
@@ -101,25 +106,29 @@ def cfg_with(range_penalty=1.0, layers=None, domain=32):
     )
 
 
+def only_penalty(backend, cfg):
+    built = build_penalties(backend, None, cfg, lambda *a: None).penalties
+    assert len(built) == 1
+    return built[0]
+
+
 def test_penalty_is_inactive_without_a_weight():
-    p = RangePenalty(FakeBackend(domain=32.0), None, cfg_with(range_penalty=0.0), print)
-    assert not p
+    assert not build_penalties(FakeBackend(domain=32.0), None, cfg_with(range_penalty=0.0), print)
 
 
 def test_penalty_is_inactive_when_the_op_has_no_domain():
-    p = RangePenalty(FakeBackend(domain=None), None, cfg_with(), print)
-    assert not p
+    assert not build_penalties(FakeBackend(domain=None), None, cfg_with(), print)
 
 
 def test_penalty_hooks_only_the_named_layers():
     backend = FakeBackend(domain=2.0)
-    p = RangePenalty(backend, None, cfg_with(layers=[0, 2]), lambda *a: None)
-    assert p and p._targets == [backend.preacts[0], backend.preacts[2]]
+    p = only_penalty(backend, cfg_with(layers=[0, 2]))
+    assert p.modules == [backend.preacts[0], backend.preacts[2]]
 
 
 def test_hooks_are_removed_when_the_block_exits():
     backend = FakeBackend(domain=2.0)
-    p = RangePenalty(backend, None, cfg_with(), lambda *a: None)
+    p = only_penalty(backend, cfg_with())
     with p:
         backend.preacts[0](torch.tensor([9.0]))
         assert p.measure() is not None
@@ -130,7 +139,7 @@ def test_hooks_are_removed_when_the_block_exits():
 
 def test_in_range_activations_produce_no_penalty():
     backend = FakeBackend(domain=2.0)
-    with RangePenalty(backend, None, cfg_with(), lambda *a: None) as p:
+    with only_penalty(backend, cfg_with()) as p:
         backend.preacts[0](torch.tensor([1.0, -1.0]))
         assert p.measure() is None
 
@@ -138,14 +147,14 @@ def test_in_range_activations_produce_no_penalty():
 def test_penalty_is_the_squared_distance_past_the_domain():
     # Meaned over the OUT-OF-RANGE elements only: the in-range bulk must not dilute it.
     backend = FakeBackend(domain=2.0)
-    with RangePenalty(backend, None, cfg_with(), lambda *a: None) as p:
+    with only_penalty(backend, cfg_with()) as p:
         backend.preacts[0](torch.tensor([3.0, 0.0, 0.0, 0.0]))
         assert p.measure().item() == pytest.approx(1.0)
 
 
 def test_eval_mode_activations_are_not_captured():
     backend = FakeBackend(domain=2.0)
-    with RangePenalty(backend, None, cfg_with(), lambda *a: None) as p:
+    with only_penalty(backend, cfg_with()) as p:
         backend.preacts[0].eval()
         backend.preacts[0](torch.tensor([9.0]))
         assert p.measure() is None
@@ -153,13 +162,50 @@ def test_eval_mode_activations_are_not_captured():
 
 def test_epoch_mean_averages_then_resets():
     backend = FakeBackend(domain=2.0)
-    with RangePenalty(backend, None, cfg_with(), lambda *a: None) as p:
+    with only_penalty(backend, cfg_with()) as p:
         for x in (3.0, 5.0):  # penalties 1.0 and 9.0
             p.clear()
             backend.preacts[0](torch.tensor([x]))
             p.measure()
         assert p.epoch_mean() == pytest.approx(5.0)
         assert p.epoch_mean() is None
+
+
+def test_pooler_penalty_uses_its_own_domain_and_weight():
+    # The pooler's wall belongs to the consumer's tanh fit, so its domain cannot be read off any
+    # op the student holds; it must not inherit the FFN's.
+    backend = FakeBackend(domain=2.0)
+    backend.pooler = [nn.Identity()]
+    backend.pooler_preact_modules = lambda model: backend.pooler
+    cfg = Config.from_dict(
+        {
+            "model": {"num_hidden_layers": 3, "activation": "quad_silu",
+                      "activation_kwargs": {"domain": 32}},
+            "distill": {"range_penalty": 0.0, "pooler_penalty": 2.0, "pooler_domain": 10.0},
+        }
+    )
+    with only_penalty(backend, cfg) as p:
+        assert (p.domain, p.weight, p.site) == (10.0, 2.0, "pooler")
+        backend.pooler[0](torch.tensor([12.0, 0.0]))  # 2 past a domain of 10 -> 4
+        assert p.measure().item() == pytest.approx(4.0)  # unweighted; the weight lands in loss_term
+
+
+def test_sites_are_summed_with_their_own_weights():
+    backend = FakeBackend(domain=2.0)
+    backend.pooler = [nn.Identity()]
+    backend.pooler_preact_modules = lambda model: backend.pooler
+    cfg = Config.from_dict(
+        {
+            "model": {"num_hidden_layers": 3, "activation": "quad_silu",
+                      "activation_kwargs": {"domain": 2}},
+            "distill": {"range_penalty": 0.5, "pooler_penalty": 2.0, "pooler_domain": 10.0},
+        }
+    )
+    with build_penalties(backend, None, cfg, lambda *a: None) as penalties:
+        backend.preacts[0](torch.tensor([5.0]))  # 3 past 2 -> 9, weight 0.5
+        backend.pooler[0](torch.tensor([12.0]))  # 2 past 10 -> 4, weight 2.0
+        assert penalties.loss_term().item() == pytest.approx(0.5 * 9 + 2.0 * 4)
+        assert penalties.epoch_summary() == "ffn=9.0 pooler=4.0"
 
 
 # --------------------------------------------------------------------- BatchLoader

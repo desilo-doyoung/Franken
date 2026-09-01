@@ -1,0 +1,62 @@
+# depth6_exact.yaml (the deployment target) plus a POOLER-ONLY range penalty. The FFN stays
+# unpenalized -- the GELU wall is a margin question there, not a breach -- but the pooler is a
+# measured breach and has to be fixed.
+#
+# THOR's pooler is a composed deg-15 o deg-15 fit of tanh(40z) on z = pre/40. It goes vertical at
+# |pre| = 39.91 (z = 1.034 -> 4.1e+13), and one out-of-domain slot blows the ciphertext scale and
+# the following bootstrap, corrupting token 0 with it. Measured on bert_exact6l_nopen @64,
+# val+test, all 768 dims of token 0:
+#
+#   > 32.00   334 values (0.020%)    78 / 2133 examples
+#   > 39.91    10 values (0.0006%)    5 / 2133 examples   <- past the wall
+#
+# The tail is why this is cheap: constraining at 32 touches 0.02% of values, so it buys the wall
+# back for almost no capacity. (For scale, the deployed quad build breaches on 3 values; exact-GELU
+# students run 3-8x worse here, so this is not inherited -- it comes with the recipe.)
+#   distill: uv run python main.py distill --config configs/bert/depth6_exact_pool32.yaml
+#   verify:  uv run python thor/measure_ranges.py --model-dir outputs/bert_exact6l_pool32/student \
+#              --max-seq-len 64 --splits validation test --consumer stripe
+
+model:
+  num_hidden_layers: 6
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: exact
+  activation_kwargs: {} # no domain -> the FFN stays unpenalized, as in depth6_exact.yaml
+
+distill:
+  alpha: 0.5
+  beta: 1.0
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 0.0 # FFN unpenalized on purpose
+  pooler_penalty: 1.0
+  pooler_domain: 32 # 1.25x inside the 39.91 wall; the penalty is soft, so leave the margin
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/bert/teacher
+  run_name: bert_exact6l_pool32
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 6
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

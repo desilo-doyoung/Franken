@@ -1,0 +1,62 @@
+# The penalized fallback for depth6_exact.yaml, which is what stripe deploys. Measured, neither
+# student breaches the GELU wall, so this one only buys margin (neg headroom 2.20x vs 1.43x) at no
+# accuracy cost (test 0.8151/0.8652 vs 0.8145/0.8645). Switch to it if stripe shows GELU trouble.
+#
+# depth6_quad_dom32.yaml with exact ops: the recipe beyond-THOR's stripe runtime wants, whose
+# GELU is the composed-tanh fit (deg-31 o deg-27 on u = z/64), not the MPCFormer quad. The student
+# trains on real GELU, so the polynomial only appears at inference -- which is exactly why the
+# range penalty is here: it bounds the pre-activation the *consumer's* fit has to cover.
+#
+# Measured on that fit (max abs GELU error, one-sided):
+#   z in [-70, 0]     0.0105        z in [0, +150]    0.0144
+#   z in [-70.5, 0]   diverges      z in [0, +151.1]  diverges  -> 8.4e+13 by +152
+# Safe interval (-70.48, +151.08). The teacher's exact-GELU pre-acts are [-61, +143], so the
+# POSITIVE wall is the tighter one (margin 8.1, 1.06x) -- verify both ends with act_range.py, and
+# note the penalty is symmetric while the wall is not. EXECUTION_NOTES.md §9: fewer layers run
+# wider, not narrower, so 6L is a genuine divergence risk unpenalized. domain 32 buys ~2.2x.
+#   distill: uv run python main.py distill --config configs/bert/depth6_exact_dom32.yaml
+#   range:   uv run python -m franken.scripts.bert.act_range --config configs/bert/depth6_exact_dom32.yaml
+
+model:
+  num_hidden_layers: 6 # layer reduction: 12 (teacher) -> 6 (student)
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: exact # stripe supplies its own polynomial softmax
+  softmax_kwargs: {}
+  activation: exact # matches stripe's he_tanh_single_for_gelu path, not the quad
+  activation_kwargs: {domain: 32} # inert to the op; exposes it to distill.range_penalty
+
+distill:
+  alpha: 0.5
+  beta: 1.0 # exact ops need no hidden-alignment crutch; quad's beta 10 is for the quadratic
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 1.0
+  range_penalty_layers: null # all 6; no single-layer outlier known at this depth
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/bert/teacher # same fine-tuned MRPC teacher as every other recipe here
+  run_name: bert_exact6l # own subtree — outputs/bert/student is the deployed 8L quad student
+  output_dir: outputs
+  max_seq_len: 128
+  seed: 42
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  # Exact ops train on the 6ep default (depth8_exact.yaml); quad's 12ep is a crutch for the quad.
+  distill:
+    lr: 5.0e-5
+    epochs: 6
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

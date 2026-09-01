@@ -115,6 +115,18 @@ def test_range_penalty_with_a_domain_is_accepted():
     assert cfg.distill.range_penalty == 1.0
 
 
+def test_exact_gelu_takes_a_domain_for_the_penalty():
+    # The student's GELU is exact; the domain bounds the pre-activation the FHE consumer's
+    # polynomial GELU has to cover downstream. Inert to the op, load-bearing for the penalty.
+    cfg = Config.from_dict(
+        {
+            "model": {"activation": "exact", "activation_kwargs": {"domain": 32}},
+            "distill": {"range_penalty": 1.0},
+        }
+    )
+    assert cfg.model.validate().domain == 32
+
+
 @pytest.mark.parametrize("layers", [[6], [-1], [0, 99]])
 def test_range_penalty_layers_out_of_range_is_rejected(layers):
     with pytest.raises(ValueError, match="range_penalty_layers"):
