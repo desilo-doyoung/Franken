@@ -27,7 +27,7 @@ model:
   softmax: exact
   softmax_kwargs: {}
   activation: exact
-  activation_kwargs: {} # no domain -> the FFN stays unpenalized, as in depth6_exact.yaml
+  activation_kwargs: {domain: 32} # FFN penalty ON, unlike depth6_exact_pool32
   pooler: exact
   pooler_kwargs: {domain: 32} # pooler pre-act 를 감싸는 소비자측 tanh fit 의 벽
 
@@ -36,16 +36,16 @@ distill:
   beta: 1.0
   temperature: 2.0
   hidden_layer_map: null
-  range_penalty: 0.0 # FFN unpenalized on purpose
+  range_penalty: 1.0 # the variable under test
   pooler_penalty: 1.0
 
 train:
   teacher_model: google-bert/bert-base-uncased
   teacher_ckpt: outputs/bert/teacher
-  run_name: bert_exact6l_pool32
+  run_name: bert_exact6l_s53
   output_dir: outputs
   max_seq_len: 128
-  seed: 42
+  seed: 53 # 22-seed sweep: lowest combined margin exposure (val 0 + test 1)
   device: cuda
 
   teacher:

@@ -98,6 +98,19 @@ class QuadGELU(nn.Module):
         return 0.125 * x * x + 0.25 * x + 0.5
 
 
+class ExactTanh(nn.Module):
+    """The pooler's nonlinearity. ``domain`` is inert -- tanh has no fit domain to leave -- and
+    exists so ``distill.pooler_penalty`` can read it off the op, as the FFN penalty does. The wall
+    it encodes is the FHE consumer's: THOR's composed fit goes vertical past |pre| ~ 40."""
+
+    def __init__(self, domain: float | None = None, **kwargs):
+        super().__init__()
+        self.domain = domain
+
+    def forward(self, x):
+        return torch.tanh(x)
+
+
 class ExactSiLU(nn.Module):
     def forward(self, x):
         return F.silu(x)
@@ -128,6 +141,7 @@ class QuadSiLU(nn.Module):
 
 
 SOFTMAX_OPS = {"exact": ExactSoftmax, "cgf": CGFSoftmax}
+POOLER_OPS = {"exact": ExactTanh}
 ACTIVATION_OPS = {
     "exact": ExactGELU,
     "cheb_gelu": ChebyshevGELU,
@@ -141,6 +155,12 @@ def build_softmax(name: str, **kwargs) -> nn.Module:
     if name not in SOFTMAX_OPS:
         raise KeyError(f"Unknown softmax op {name!r}; available: {sorted(SOFTMAX_OPS)}")
     return SOFTMAX_OPS[name](**kwargs)
+
+
+def build_pooler(name: str, **kwargs) -> nn.Module:
+    if name not in POOLER_OPS:
+        raise KeyError(f"Unknown pooler op {name!r}; available: {sorted(POOLER_OPS)}")
+    return POOLER_OPS[name](**kwargs)
 
 
 def build_activation(name: str, **kwargs) -> nn.Module:

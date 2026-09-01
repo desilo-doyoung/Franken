@@ -26,13 +26,17 @@ class ModelConfig:
     softmax_kwargs: dict[str, Any] = field(default_factory=dict)
     activation: str = "exact"
     activation_kwargs: dict[str, Any] = field(default_factory=dict)
+    # Only the pooled architectures have one; decoders leave it unused.
+    pooler: str = "exact"
+    pooler_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> Any:
         # Returns the activation op: only an instance says what `domain` resolves to. Building both
         # is also what rejects a bad op name or an unsupported kwarg.
-        from franken.ops import build_activation, build_softmax
+        from franken.ops import build_activation, build_pooler, build_softmax
 
         _build_op(build_softmax, "softmax", self.softmax, self.softmax_kwargs)
+        _build_op(build_pooler, "pooler", self.pooler, self.pooler_kwargs)
         return _build_op(build_activation, "activation", self.activation, self.activation_kwargs)
 
 
@@ -57,11 +61,8 @@ class DistillConfig:
     # STUDENT layers the penalty applies to; None = all. Constraining a layer costs accuracy --
     # penalizing all 28 to fix one Qwen3 outlier cost 8.2 recall points. Measure with act_range.py.
     range_penalty_layers: list[int] | None = None
-    # Same mechanism for the pooler pre-activation. It needs an EXPLICIT domain because, unlike
-    # the FFN, its wall belongs to the consumer's tanh fit and not to any op the student holds:
-    # THOR's composed deg-15 fit on z = pre/40 goes vertical at |pre| = 39.91 (-> 4.1e+13).
+    # Same mechanism for the pooler pre-activation; its domain is model.pooler_kwargs.domain.
     pooler_penalty: float = 0.0
-    pooler_domain: float | None = None
 
 
 @dataclass
@@ -168,10 +169,11 @@ class Config:
                 f"Set activation_kwargs.domain, or set range_penalty to 0."
             )
 
-        if self.distill.pooler_penalty > 0 and self.distill.pooler_domain is None:
+        if self.distill.pooler_penalty > 0 and self.model.pooler_kwargs.get("domain") is None:
             raise ValueError(
-                f"distill.pooler_penalty is {self.distill.pooler_penalty} but pooler_domain is "
-                "unset, so the penalty would do nothing. Set distill.pooler_domain."
+                f"distill.pooler_penalty is {self.distill.pooler_penalty} but "
+                f"model.pooler_kwargs exposes no domain, so the penalty would do nothing. "
+                f"Set model.pooler_kwargs.domain, or set pooler_penalty to 0."
             )
 
         # MRPC brings its own data; a corpus task must say how much to draw.

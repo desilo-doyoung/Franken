@@ -82,7 +82,8 @@ class FakeAct(nn.Module):
 
 
 class FakeBackend:
-    def __init__(self, n_layers=3, domain=None):
+    def __init__(self, n_layers=3, domain=None, pooler_domain=None):
+        self.pooler_domain = pooler_domain
         self.preacts = [nn.Identity() for _ in range(n_layers)]
         self.acts = [FakeAct(domain) for _ in range(n_layers)]
 
@@ -91,6 +92,9 @@ class FakeBackend:
 
     def ffn_preact_modules(self, model):
         return self.preacts
+
+    def pooler_ops(self, model):
+        return [FakeAct(self.pooler_domain)] if self.pooler_domain is not None else []
 
 
 def cfg_with(range_penalty=1.0, layers=None, domain=32):
@@ -172,16 +176,16 @@ def test_epoch_mean_averages_then_resets():
 
 
 def test_pooler_penalty_uses_its_own_domain_and_weight():
-    # The pooler's wall belongs to the consumer's tanh fit, so its domain cannot be read off any
-    # op the student holds; it must not inherit the FFN's.
-    backend = FakeBackend(domain=2.0)
+    # The pooler's domain comes off its own op (model.pooler_kwargs), not the FFN's activation.
+    backend = FakeBackend(domain=2.0, pooler_domain=10.0)
     backend.pooler = [nn.Identity()]
     backend.pooler_preact_modules = lambda model: backend.pooler
     cfg = Config.from_dict(
         {
             "model": {"num_hidden_layers": 3, "activation": "quad_silu",
-                      "activation_kwargs": {"domain": 32}},
-            "distill": {"range_penalty": 0.0, "pooler_penalty": 2.0, "pooler_domain": 10.0},
+                      "activation_kwargs": {"domain": 32},
+                      "pooler_kwargs": {"domain": 10.0}},  # 실제 backend 는 여기서 op 를 만든다
+            "distill": {"range_penalty": 0.0, "pooler_penalty": 2.0},
         }
     )
     with only_penalty(backend, cfg) as p:
@@ -191,14 +195,15 @@ def test_pooler_penalty_uses_its_own_domain_and_weight():
 
 
 def test_sites_are_summed_with_their_own_weights():
-    backend = FakeBackend(domain=2.0)
+    backend = FakeBackend(domain=2.0, pooler_domain=10.0)
     backend.pooler = [nn.Identity()]
     backend.pooler_preact_modules = lambda model: backend.pooler
     cfg = Config.from_dict(
         {
             "model": {"num_hidden_layers": 3, "activation": "quad_silu",
-                      "activation_kwargs": {"domain": 2}},
-            "distill": {"range_penalty": 0.5, "pooler_penalty": 2.0, "pooler_domain": 10.0},
+                      "activation_kwargs": {"domain": 2},
+                      "pooler_kwargs": {"domain": 10.0}},
+            "distill": {"range_penalty": 0.5, "pooler_penalty": 2.0},
         }
     )
     with build_penalties(backend, None, cfg, lambda *a: None) as penalties:

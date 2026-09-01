@@ -4,13 +4,14 @@ from torch import nn
 from franken.models.bert.config import BertModelConfig
 from franken.models.bert.embeddings import BertEmbeddings
 from franken.models.bert.encoder import BertEncoder
+from franken.ops import build_pooler
 
 
 class BertPooler(nn.Module):
     def __init__(self, config: BertModelConfig):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
-        self.activation = nn.Tanh()
+        self.activation = build_pooler(config.pooler, **config.pooler_kwargs)
 
     def forward(self, hidden_states):
         first_token_tensor = hidden_states[:, 0]  # CLS

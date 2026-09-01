@@ -28,6 +28,8 @@ model:
   softmax_kwargs: {}
   activation: exact
   activation_kwargs: {domain: 32} # FFN penalty ON, unlike depth6_exact_pool32
+  pooler: exact
+  pooler_kwargs: {domain: 32} # pooler pre-act 를 감싸는 소비자측 tanh fit 의 벽
 
 distill:
   alpha: 0.5
@@ -36,7 +38,6 @@ distill:
   hidden_layer_map: null
   range_penalty: 1.0 # the variable under test
   pooler_penalty: 1.0
-  pooler_domain: 32 # 1.25x inside the 39.91 wall; the penalty is soft, so leave the margin
 
 train:
   teacher_model: google-bert/bert-base-uncased

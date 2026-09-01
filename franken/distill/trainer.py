@@ -277,9 +277,8 @@ class RangePenalties:
 
 # TODO: Refactor
 def build_penalties(backend, student, cfg: Config, log) -> RangePenalties:
-    """One penalty per constrained site. The FFN's domain comes off the activation op; the pooler's
-    is explicit, because its wall belongs to the consumer's tanh fit and not to any op the student
-    holds. Empty when nothing is constrained."""
+    """One penalty per constrained site; each domain comes off its own op. Empty when nothing
+    is constrained."""
     penalties = []
     acts = backend.activation_ops(student)
     first = acts[0] if acts else None
@@ -292,15 +291,15 @@ def build_penalties(backend, student, cfg: Config, log) -> RangePenalties:
         penalties.append(RangePenalty("ffn", targets, domain, cfg.distill.range_penalty))
         layers = "all" if which is None else f"{sorted(which)} of {len(mods)}"
         log(f"ffn penalty {cfg.distill.range_penalty} on student layers {layers}, domain {domain}")
-    if cfg.distill.pooler_penalty > 0 and cfg.distill.pooler_domain is not None:
+    ops = backend.pooler_ops(student)
+    pooler_domain = getattr(ops[0], "domain", None) if ops else None
+    if cfg.distill.pooler_penalty > 0 and pooler_domain is not None:
         pooler = backend.pooler_preact_modules(student)
         if pooler:
             penalties.append(
-                RangePenalty(
-                    "pooler", pooler, cfg.distill.pooler_domain, cfg.distill.pooler_penalty
-                )
+                RangePenalty("pooler", pooler, pooler_domain, cfg.distill.pooler_penalty)
             )
-            log(f"pooler penalty {cfg.distill.pooler_penalty}, domain {cfg.distill.pooler_domain}")
+            log(f"pooler penalty {cfg.distill.pooler_penalty}, domain {pooler_domain}")
     return RangePenalties(penalties)
 
 

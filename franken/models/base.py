@@ -56,6 +56,10 @@ class ModelBackend(ABC):
     def ffn_preact_modules(self, model: nn.Module) -> list[nn.Module]:
         """Modules whose *output* is an FFN pre-activation: the range penalty's hook targets."""
 
+    def pooler_ops(self, model: nn.Module) -> list[nn.Module]:
+        """The pooling nonlinearity op (some expose a ``.domain``). Empty if there is none."""
+        return []
+
     def pooler_preact_modules(self, model: nn.Module) -> list[nn.Module]:
         """Modules whose *output* feeds a pooling nonlinearity the FHE consumer approximates.
         Empty unless the architecture has one; only the penalty's domain bounds it."""

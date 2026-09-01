@@ -40,6 +40,9 @@ class BertBackend(ModelBackend):
     def pooler_preact_modules(self, model: nn.Module) -> list[nn.Module]:
         return [model.bert.pooler.dense]
 
+    def pooler_ops(self, model: nn.Module) -> list[nn.Module]:
+        return [model.bert.pooler.activation]
+
     def activation_ops(self, model: nn.Module) -> list[nn.Module]:
         return [ly.intermediate.intermediate_act_fn for ly in model.bert.encoder.layer]
 

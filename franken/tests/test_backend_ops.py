@@ -54,3 +54,13 @@ def test_pooler_accessor_is_optional_and_defaults_to_empty():
     for name in sorted(BACKENDS):
         if name != "bert":
             assert build_backend(name).pooler_preact_modules(None) == []
+
+
+def test_bert_pooler_op_carries_the_configured_domain():
+    # The config -> op path the pooler penalty reads: model.pooler_kwargs.domain must land on the
+    # op the student actually holds, or build_penalties finds no domain and silently skips.
+    cfg = Config.from_dict({"model": {"backend": "bert", "num_hidden_layers": 2,
+                                      "pooler_kwargs": {"domain": 32}}})
+    backend = build_backend("bert")
+    ops = backend.pooler_ops(backend.build_student(cfg))
+    assert len(ops) == 1 and ops[0].domain == 32
