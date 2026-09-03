@@ -1,0 +1,69 @@
+# depth6_quad_dom32.yaml plus the POOLER range penalty. Only that changed; the quad recipe
+# (beta 10, 12 epochs, FFN domain 32) is the parent's verbatim.
+#
+# The parent breaches THOR's pooler wall. Measured on bert_quad6l/student @64, val+test, all
+# 768 dims of token 0: max |pre-tanh| 41.16, 3 slots past the 39.91 wall -- where the deployed
+# exact student (bert_exact6l_s53_best, same penalty at domain 32) tops out at 30.51 with none.
+# Past the wall the deg-15 o deg-15 fit of tanh(40z) goes vertical (z = 1.034 -> 4.1e+13) and one
+# slot blows the ciphertext scale and the following bootstrap, taking token 0 with it. That is a
+# divergence, not a wrong label, so 3 is not "few".
+#
+# Cheap for the same reason it is cheap on the exact recipe: median |pre-tanh| is ~0.8 and p90
+# ~2.7, so constraining at 32 is a pure tail operation.
+#
+# WATCH: the quad's 0.125 z^2 pushes LN2 variance to 1694 at L4 (exact: 123) against
+# he_layernorm3's 2500 ceiling -- 1.5x, and there is no variant above ln3. Re-read it after every
+# run; the pooler penalty does not touch it. See EXECUTION_NOTES.md §9.
+#   distill: uv run python main.py distill --config configs/bert/depth6_quad_dom32_pool32.yaml
+#   verify:  uv run python thor/measure_ranges.py --model-dir outputs/bert_quad6l_pool32/student \
+#              --max-seq-len 64 --splits validation test --consumer stripe --device 2
+
+model:
+  num_hidden_layers: 6
+  hidden_size: 768
+  num_attention_heads: 12
+  intermediate_size: 3072
+  num_labels: 2
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: quad
+  activation_kwargs: {domain: 32}
+  pooler: exact
+  pooler_kwargs: {domain: 32} # pooler pre-act 를 감싸는 소비자측 tanh fit 의 벽
+
+distill:
+  alpha: 0.5
+  beta: 10.0 # heavy hidden alignment — needed to train the aggressive quad
+  temperature: 2.0
+  hidden_layer_map: null
+  range_penalty: 1.0
+  pooler_penalty: 1.0 # new vs depth6_quad_dom32; validated at beta 1.0 on the exact family, not 10
+
+train:
+  teacher_model: google-bert/bert-base-uncased
+  teacher_ckpt: outputs/bert/teacher
+  run_name: bert_quad6l_pool32
+  output_dir: outputs
+  max_seq_len: 128
+  # 20-seed sweep (42-61): within 0.005 val F1 of the best, breach-free, then fewest examples
+  # under plaintext logit margin 0.3. Numbers @64 (the deployment length, as in stripe_builds):
+  # val 0.8333/0.8836  test 0.8017/0.8577; 47/2133 flip-exposed, 0 pooler breaches, max 32.41.
+  # The deployed exact s53 is 0.8431/0.8904 and 0.8099/0.8622 with 69 exposed -- so quad costs
+  # ~1pt accuracy and buys a third off the exposure, on top of the depth-1 FFN.
+  seed: 55
+  device: cuda
+
+  teacher:
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    lr: 5.0e-5
+    epochs: 12 # quad trains slowly; needs a longer schedule than the 6ep default
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01

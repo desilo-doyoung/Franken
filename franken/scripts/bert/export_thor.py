@@ -44,6 +44,10 @@ ARCH_KEYS = (
     "softmax_kwargs",
     "activation",
     "activation_kwargs",
+    # Inert downstream, but without them two checkpoints differing only in whether the pooler
+    # was range-penalized are indistinguishable -- and that is the difference that ships.
+    "pooler",
+    "pooler_kwargs",
 )
 
 
