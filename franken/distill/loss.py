@@ -22,10 +22,14 @@ def masked_relative_mse_loss(student_hidden, teacher_hidden, attention_mask, eps
 PER_LAYER = {"mse": masked_mse_loss, "relative": masked_relative_mse_loss}
 
 
-def layerwise_hidden_loss(student_hidden, teacher_hidden, attention_mask, per_layer, layer_map):
+def layerwise_hidden_loss(
+    student_hidden, teacher_hidden, attention_mask, per_layer, layer_map, layer_mode="stride"
+):
     """Mean per-layer hidden match under the student's layer map. `hidden_states[0]` is the
     embedding output on every backend, so block i lives at index i+1."""
-    resolved = resolve_layer_map(len(teacher_hidden) - 1, len(student_hidden) - 1, layer_map)
+    resolved = resolve_layer_map(
+        len(teacher_hidden) - 1, len(student_hidden) - 1, layer_map, layer_mode
+    )
     total = 0.0
     for s_block, t_block in enumerate(resolved):
         total = total + per_layer(

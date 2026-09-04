@@ -44,6 +44,7 @@ class EmbeddingDistillLoss(nn.Module):
             attention_mask,
             self.per_layer,
             self.cfg.hidden_layer_map,
+            self.cfg.hidden_layer_mode,
         )
         return embed + self.cfg.beta * hidden, embed, hidden
 

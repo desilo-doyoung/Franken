@@ -38,3 +38,47 @@ def test_override_length_must_match_student_depth():
 def test_impossible_depths_raise(teacher, student):
     with pytest.raises(ValueError):
         resolve_layer_map(teacher, student)
+
+
+def test_stride_is_still_the_default():
+    # Every shipped config says `hidden_layer_map: null`, so the default resolving differently
+    # would silently restate what every recorded result was trained on.
+    for teacher, student in ((12, 6), (28, 19), (16, 12), (16, 8)):
+        assert resolve_layer_map(teacher, student) == resolve_layer_map(
+            teacher, student, mode="stride"
+        )
+
+
+@pytest.mark.parametrize(("teacher", "student"), [(16, 15), (16, 12), (16, 8), (28, 19), (12, 6)])
+def test_interior_window_spares_both_ends(teacher, student):
+    m = resolve_layer_map(teacher, student, mode="interior_window")
+    assert len(m) == student
+    assert m[0] == 0 and m[-1] == teacher - 1
+    assert 1 in m  # block 1 is second-costliest by leave-one-out; stride drops it at 16->12
+
+
+@pytest.mark.parametrize(("teacher", "student"), [(16, 15), (16, 12), (16, 8), (16, 2), (16, 1)])
+def test_interior_window_drops_one_contiguous_run(teacher, student):
+    m = resolve_layer_map(teacher, student, mode="interior_window")
+    dropped = sorted(set(range(teacher)) - set(m))
+    assert len(dropped) == teacher - student
+    if dropped:
+        assert dropped == list(range(dropped[0], dropped[-1] + 1))
+
+
+@pytest.mark.parametrize("student", list(range(1, 17)))
+def test_interior_window_stays_valid_when_ends_cannot_be_spared(student):
+    # At student depth 1-2 there is no room for three protected blocks; the map must still be a
+    # strictly increasing list of the right length ending at the final teacher block.
+    m = resolve_layer_map(16, student, mode="interior_window")
+    assert len(m) == student and m[-1] == 15
+    assert all(b > a for a, b in zip(m, m[1:], strict=False))
+
+
+def test_unknown_mode_raises():
+    with pytest.raises(ValueError, match="mode"):
+        resolve_layer_map(16, 12, mode="middle_out")
+
+
+def test_override_beats_mode():
+    assert resolve_layer_map(16, 2, override=[3, 9], mode="interior_window") == [3, 9]

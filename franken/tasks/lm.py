@@ -100,6 +100,7 @@ class LogitDistillLoss(nn.Module):
             attention_mask,
             self.per_layer,
             self.cfg.hidden_layer_map,
+            self.cfg.hidden_layer_mode,
         )
         return self.cfg.alpha * kl + self.cfg.beta * hidden, kl, hidden
 

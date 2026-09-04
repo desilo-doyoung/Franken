@@ -28,6 +28,7 @@ class ModelBackend(ABC):
             teacher.config.num_hidden_layers,
             cfg.model.num_hidden_layers,
             cfg.distill.hidden_layer_map,
+            cfg.distill.hidden_layer_mode,
         )
         marker = self.layer_marker
         new_state = {}

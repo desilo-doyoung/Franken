@@ -53,7 +53,9 @@ class DistillConfig:
     alpha: float = 0.5
     beta: float = 1.0
     temperature: float = 2.0
-    hidden_layer_map: list[int] | None = None  # None -> uniform stride over teacher depth
+    hidden_layer_map: list[int] | None = None  # None -> resolved by hidden_layer_mode
+    # Rule used when hidden_layer_map is None. `stride` is the historical default.
+    hidden_layer_mode: str = "stride"
     hidden_loss: str = "mse"  # see distill.loss
     # Keeps FFN pre-activations inside a polynomial activation's domain, so the bare poly is
     # FHE-safe at inference. 0 = off.

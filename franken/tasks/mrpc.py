@@ -67,6 +67,7 @@ class ClassificationDistillLoss(nn.Module):
             attention_mask,
             masked_mse_loss,
             self.cfg.hidden_layer_map,
+            self.cfg.hidden_layer_mode,
         )
 
         total = (1 - self.cfg.alpha) * ce + self.cfg.alpha * kl + self.cfg.beta * hidden
