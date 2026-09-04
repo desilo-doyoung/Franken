@@ -1,0 +1,80 @@
+# Llama lm ladder: depth 12 (teacher 16), exact ops, 1.0e-4 lr, hidden term OFF.
+#
+# One cell of the depth x beta x lr grid. Every cell shares corpus, tokens_per_epoch, max_seq_len,
+# pack and tokenizer -- that tuple IS the cache key, so ONE artifact serves the whole grid. Changing
+# any of them to make a run cheaper costs a multi-hour rebuild and breaks comparability.
+#
+# Sized for 8x80 GiB. `tokens_per_step` is GLOBAL, so it resolves to micro 16,384 (B=1) with accum 1
+# at 8 ranks and accum 2 at 4 -- the global batch stays 131,072 either way and results do not move
+# with the device count. 16,384 is the default FRANKEN_MAX_TOKENS_PER_RANK, so nothing needs
+# exporting; do NOT raise that ceiling (micro 32,768 uncheckpointed is ~92 GiB and will not fit).
+# 7,629 optimizer steps per epoch. Read tok/s off the first 50 steps rather than extrapolating.
+#
+#     uv run python main.py corpus --config configs/llama/sweep/depth12_exact_lr1e4_nohidden.yaml   # cache hit after the first
+#     uv run python -m franken.scripts.llama.run_experiments --devices 0,1,2,3,4,5,6,7 --ddp \
+#         configs/llama/sweep/depth12_exact_lr1e4_nohidden.yaml
+#
+# hidden_layer_mode: interior_window -> keeps [0, 1, 2, 3, 4, 9, 10, 11, 12, 13, 14, 15]
+#   drops the contiguous run [5, 6, 7, 8], sparing blocks 0, 1 and 15. The `stride` default would drop
+#   [1, 5, 9, 13] -- including block 1, the second costliest. Leave-one-out on this teacher puts block 0 at 39x the cost of the
+#   cheapest block and block 1 second; qwen3 independently measured STS-B -19.3% for losing the
+#   bottom. ⚠️ That scan ranks INITIALIZATION -- see configs/llama/depth12_exact.yaml, the stride-map
+#   control that tests whether the difference survives training.
+#
+# `beta: 0.0` -- ABLATION. Identical to depth12_exact_lr1e4.yaml but for beta, same map so both arms are seeded
+# from the same teacher blocks and the only difference is the loss. 0 skips layerwise_hidden_loss
+# outright rather than scaling it by zero (~2 GiB of retained backward state at this micro-batch).
+model:
+  backend: llama
+  num_hidden_layers: 12
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+  # Cost tracks the sum of per-document S², not L². A cgf arm CANNOT use it -- approximate
+  # softmaxes need `manual`, which materializes (B,H,S,S); re-measure memory before running one.
+  attn_impl: flex
+
+distill:
+  alpha: 1.0 # `lm` has no CE, so alpha is a plain weight on the KL
+  temperature: 1.0 # the loss then reads as KL in nats
+  beta: 0.0
+  hidden_layer_map: null # resolved by hidden_layer_mode below
+  # Spares blocks 0, 1 and the last. ALSO decides seeding (`seed_student` resolves the same
+  # setting), so changing it moves the initialization, not just the loss targets.
+  hidden_layer_mode: interior_window
+  range_penalty: 0.0 # exact SiLU has no bounded domain to squash into
+
+train:
+  teacher_model: unsloth/Llama-3.2-1B # ungated mirror, sha256-identical to NousResearch's
+  teacher_ckpt: null
+  task: lm
+  corpus: llama_web
+  tokens_per_epoch: 1_000_000_000 # UNIQUE tokens, seen once at epochs: 1
+  output_dir: outputs
+  run_name: llama_depth12_exact_lr1e4_nohidden
+  max_seq_len: 16384
+  pack: true # concatenate + chop into whole blocks, document-isolated attention
+  grad_checkpoint: false # flip to true if it OOMs; costs ~16% wall clock
+  precision: bf16 # student only; a bf16 teacher drifts 0.0142 against a 0.004 band
+  compile: false # untested together with flex + checkpointing
+  seed: 42
+  device: cuda
+
+  teacher: # unused by self-distillation; present so the schema is complete
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    # ⚠️ THE SWEPT AXIS. `lr: null` is refused under `pack` (a block is an arbitrary container, so
+    # sqrt-batch has no sequence count to read), so this grid measures it instead of deriving it.
+    lr: 1.0e-4
+    epochs: 1
+    tokens_per_step: 131072 # 8 blocks/step; identical across the grid so depths stay comparable
+    batch_size: 4 # unused while tokens_per_step is set
+    warmup_ratio: 0.1
+    weight_decay: 0.01
