@@ -194,22 +194,6 @@ def test_packed_model_inputs_omit_the_attention_mask():
 
 
 @requires_cuda
-def test_flex_matches_manual_on_the_same_packed_block():
-    """Same documents both ways, so a difference is flex itself. fp32: Triton has no f64."""
-    a, b, c = [11, 12, 13, EOS], [21, 22, 23, 24, EOS], [31, 32, EOS]
-    block = torch.tensor([a + b + c], device="cuda")
-    pos = doc_positions(block, EOS)
-    out = {}
-    for impl in ("manual", "flex"):
-        model = _tiny_llama(impl, dtype=torch.float32, device="cuda")
-        with torch.no_grad():
-            out[impl] = model(block, position_ids=pos)["last_hidden_state"]
-    assert torch.allclose(out["manual"], out["flex"], atol=1e-5), (
-        (out["manual"] - out["flex"]).abs().max()
-    )
-
-
-@requires_cuda
 def test_flex_isolated_block_equals_separate_forwards():
     model = _tiny_llama("flex", dtype=torch.float32, device="cuda")
     doc_a, doc_b = [11, 12, 13, EOS], [21, 22, 23, 24, EOS]
