@@ -1,0 +1,101 @@
+# Llama lm ladder, first depth cut ABLATION: depth12_exact with the hidden term OFF (beta 0).
+#
+# IDENTICAL to depth12_exact.yaml but for `beta`. Same corpus key, so it reuses that artifact; same
+# `hidden_layer_map`, so both arms are seeded from the same teacher blocks and the ONLY difference
+# is the loss. depth16_exact* could not test this -- at full depth the map is the identity and both
+# terms start at ~0, inert rather than tested.
+#
+# What it isolates: the vocabulary KL only ever touches `hidden_states[-1]`, so at beta 0 the other
+# 11 blocks get gradient purely through their effect on the final state. beta 1.0 pins each of them
+# to a specific teacher block instead.
+#
+#     uv run python main.py corpus --config configs/llama/depth12_exact.yaml   # hours; do first
+#     uv run python -m franken.scripts.llama.run_experiments --devices 0,1,2,3 --ddp \
+#         configs/llama/depth12_exact.yaml configs/llama/depth12_exact_nohidden.yaml
+#
+# Corpus, budget, max_seq_len, pack and tokenizer are the whole cache key and are unchanged from
+# depth16_exact, so ONE artifact serves all four configs on the ladder. Do not touch them to make a
+# run cheaper -- a different tokens_per_epoch is a different key and another multi-hour build.
+#
+# ⚠️ `hidden_layer_map: null` resolves to teacher blocks [0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15]
+#    (uniform stride, `round((i+1)*16/12)-1`) -- it drops 1, 5, 9, 13. That is a DEFAULT, not a
+#    finding, and it is the baseline a map search gets measured against. It does keep both ends:
+#    block 0, and block 15 which feeds the tied LM head. The 16->6 stride keeps neither end
+#    (it starts at block 2), which is part of why 6 layers is the harder rung.
+#
+# 🚨 The map is NOT only a loss target. `ModelBackend.seed_student` resolves the SAME
+#    `distill.hidden_layer_map` to decide which teacher block initializes each student block, so it
+#    is load-bearing even at `beta: 0`. Keep it identical across the two arms or they start from
+#    different weights and the ablation measures initialization, not the loss.
+#
+# Sizing: the student is 12/16 the depth, so this sits inside depth16_exact's envelope and keeps
+# `grad_checkpoint: false`. Expect only a modest speedup -- the teacher is still 16 layers in fp32
+# and is a growing share of the step. Read tok/s off the first 50 steps.
+#
+# MEASURED at step 0 (6 batches, smoke corpus, seeded 12-layer student): kl 8.58 nats, hidden 0.95.
+# The KL matters for lr: ln(128256) = 11.76 and this teacher's entropy is ~2.1, so a UNIFORM student
+# would score ~9.7. At 8.58 the strided init is damaged but still informative -- unlike 16->6, which
+# measured 11.05, i.e. past uniform and confidently wrong. That gap is why 12 is the first rung.
+
+model:
+  backend: llama
+  num_hidden_layers: 12 # the cut; teacher is 16
+
+  softmax: exact
+  softmax_kwargs: {}
+  activation: silu
+  activation_kwargs: {}
+  # Block-sparse document isolation, and what makes 16k affordable: cost tracks the sum of
+  # per-document S², not L². A cgf arm CANNOT use it -- approximate softmaxes need `manual`, which
+  # materializes (B,H,S,S), so re-measure memory before running one.
+  attn_impl: flex
+
+distill:
+  alpha: 1.0 # `lm` has no CE, so alpha is a plain weight on the KL; the 0.5 default halves it
+  temperature: 1.0 # the loss then reads as KL in nats
+  # THE variable under test. 0 skips `layerwise_hidden_loss` outright rather than scaling it by
+  # zero, which is also worth ~2 GiB of retained backward state at this micro-batch.
+  beta: 0.0
+  hidden_layer_map: null # -> [0, 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15]; also seeds, see above
+  range_penalty: 0.0 # exact SiLU has no bounded domain to squash into
+
+train:
+  teacher_model: unsloth/Llama-3.2-1B # ungated mirror, sha256-identical to NousResearch's
+  teacher_ckpt: null
+  task: lm
+  corpus: llama_web
+  # UNIQUE tokens, seen once at epochs: 1 -- not a per-epoch slice of a larger budget.
+  tokens_per_epoch: 1_000_000_000
+  output_dir: outputs
+  run_name: llama_depth12_exact_nohidden
+  max_seq_len: 16384
+  pack: true # concatenate + chop into whole blocks, document-isolated attention
+  grad_checkpoint: false # 6 layers in bf16 fits comfortably; flip to true if it OOMs
+  # Student-only autocast. The teacher stays fp32, which `precision_gate` confirms is load-bearing:
+  # a bf16 teacher drifts 0.0142 against a 0.004 band.
+  precision: bf16
+  compile: false # untested together with flex + checkpointing
+  seed: 42
+  device: cuda
+
+  teacher: # unused by self-distillation; present so the schema is complete
+    lr: 5.0e-5
+    epochs: 3
+    batch_size: 32
+    warmup_ratio: 0.1
+    weight_decay: 0.01
+
+  distill:
+    # RAISED 3x from depth16's 1.0e-5, a do-not-drift rate for a student that STARTS as the teacher;
+    # here the init is 8.58 nats away and has to travel. ⚠️ REASONED, NOT SWEPT. `lr: null` is
+    # refused under `pack` (a block is an arbitrary container, so sqrt-batch has no sequence count),
+    # and the two honest readings disagree: 8 blocks/step gives 1e-5, ~130 documents/step gives
+    # 4e-5. qwen3's depth cut ran 3.4e-5 and its 8e-5 arm did not hurt, so 3e-5 is bracketed.
+    lr: 3.0e-5
+    epochs: 1
+    # Identical to depth16_exact so the two depths stay comparable: over 4 ranks this resolves to
+    # micro 16,384 (B=1, accum=2), the default FRANKEN_MAX_TOKENS_PER_RANK.
+    tokens_per_step: 131072
+    batch_size: 4 # unused while tokens_per_step is set
+    warmup_ratio: 0.1
+    weight_decay: 0.01
