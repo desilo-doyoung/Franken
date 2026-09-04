@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -86,7 +87,21 @@ def build_corpus(config: str, out_dir: str) -> None:
         raise SystemExit(f"corpus FAILED (exit {code}) -- not training\n{_tail(log)}")
 
 
-def one_experiment(config: str, devices: str, out_dir: str, eval_only: bool, ddp: bool) -> dict:
+def _drop_checkpoint(ckpt: str) -> None:
+    """Called only after the eval has read it. The metrics are the deliverable; the weights are
+    3-5 GiB each and a full depth x beta x lr grid is ~185 GiB. A FAILED eval keeps its checkpoint,
+    so a scoring bug never costs the training run."""
+    path = os.path.join(_ROOT, ckpt)
+    if not os.path.isdir(path):
+        return
+    freed = sum(os.path.getsize(os.path.join(path, f)) for f in os.listdir(path))
+    shutil.rmtree(path)
+    _say(f"  removed {ckpt} ({freed / 2**30:.1f} GiB)")
+
+
+def one_experiment(
+    config: str, devices: str, out_dir: str, eval_only: bool, ddp: bool, rm_ckpt: bool = False
+) -> dict:
     name = os.path.splitext(os.path.basename(config))[0]
     cfg = Config.from_yaml(config)
     nproc = len(devices.split(",")) if ddp else 1
@@ -111,7 +126,11 @@ def one_experiment(config: str, devices: str, out_dir: str, eval_only: bool, ddp
         return row | {"error": f"eval exit {code}", "tail": _tail(log)}
 
     with open(metrics_path) as f:
-        return row | json.load(f)
+        row |= json.load(f)
+    # Never under --eval-only: there we did not produce the checkpoint, the user is re-scoring it.
+    if rm_ckpt and not eval_only:
+        _drop_checkpoint(ckpt)
+    return row
 
 
 def render(results: list[dict]) -> list[str]:
@@ -171,6 +190,11 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--ddp", action="store_true", help="one config across all devices, in turn")
     p.add_argument("--eval-only", action="store_true", help="score checkpoints, no training")
     p.add_argument("--out", default="outputs/experiments", help="logs + per-run metrics JSON")
+    p.add_argument(
+        "--rm-checkpoint",
+        action="store_true",
+        help="delete each student checkpoint once its eval succeeds (~4 GiB per cell)",
+    )
     args = p.parse_args(argv)
 
     out_dir = os.path.join(_ROOT, args.out)
@@ -185,7 +209,11 @@ def main(argv: list[str] | None = None) -> None:
     results: list[dict] = []
     if args.ddp:
         for config in args.configs:
-            results.append(one_experiment(config, args.devices, out_dir, args.eval_only, True))
+            results.append(
+                one_experiment(
+                    config, args.devices, out_dir, args.eval_only, True, args.rm_checkpoint
+                )
+            )
     else:
         free: queue.Queue = queue.Queue()
         for d in args.devices.split(","):
@@ -195,7 +223,9 @@ def main(argv: list[str] | None = None) -> None:
         def work(config: str) -> None:
             device = free.get()
             try:
-                slots[config] = one_experiment(config, device, out_dir, args.eval_only, False)
+                slots[config] = one_experiment(
+                    config, device, out_dir, args.eval_only, False, args.rm_checkpoint
+                )
             finally:
                 free.put(device)
 
