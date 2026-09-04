@@ -129,8 +129,28 @@ def render(results: list[dict]) -> list[str]:
     return out
 
 
+def render_by_source(results: list[dict]) -> list[str]:
+    """One column per config, so a depth cut or an ablation is read down the source axis -- which
+    slice it cost is the question an aggregate row cannot answer."""
+    scored = [r for r in results if r.get("by_source")]
+    if not scored:
+        return []
+    names = list(dict.fromkeys(n for r in scored for n in r["by_source"]))
+    out = [
+        "",
+        "| agreement by source | " + " | ".join(r["name"] for r in scored) + " |",
+        "|" + "---|" * (len(scored) + 1),
+    ]
+    for n in names:
+        cells = " | ".join(
+            f"{r['by_source'][n]['agreement']:.4f}" if n in r["by_source"] else "—" for r in scored
+        )
+        out.append(f"| {n} | {cells} |")
+    return out
+
+
 def report(results: list[dict], out_dir: str) -> None:
-    lines = render(results)
+    lines = render(results) + render_by_source(results)
     path = os.path.join(out_dir, "results.md")
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")

@@ -22,8 +22,8 @@ model:
 distill:
   alpha: 1.0 # see DistillConfig: `lm` has no CE, so the 0.5 default just halves the KL
   temperature: 1.0 # matches the teacher's actual distribution; the loss is then KL in nats
-  # Provisional -- re-derive from the step-0 kl/hidden split on a depth-reduced student. Carried
-  # for RANGE safety, not accuracy: the KL constrains only the last layer, act_range reads inside.
+  # Provisional -- re-derive from the step-0 kl/hidden split on a depth-reduced student. NOT range
+  # safety: range_penalty targets the pre-activations directly. This supervises the interior.
   beta: 1.0
   hidden_layer_map: null
   range_penalty: 0.0 # off: exact SiLU has no bounded domain to squash into

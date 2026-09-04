@@ -2,6 +2,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from franken.config import DistillConfig
 from franken.tasks import lm
 
 H, V, B, S = 8, 17, 3, 5
@@ -97,6 +98,27 @@ def test_an_all_padding_batch_is_zero_not_nan():
     student, teacher, _, _ = _outs()
     out = lm.logit_kl(student, teacher, torch.zeros(B, S, dtype=torch.long))
     assert float(out) == 0.0
+
+
+@pytest.mark.parametrize("beta", [0.0, 1.0])
+def test_hidden_term_is_skipped_when_beta_is_zero(monkeypatch, beta):
+    # Scaling by zero would still allocate one (B, S, H) difference per layer and retain it until
+    # backward, so a beta ablation measures nothing unless the call itself is skipped.
+    calls = []
+
+    def spy(*args):
+        calls.append(args)
+        return torch.zeros(())
+
+    monkeypatch.setattr(lm, "layerwise_hidden_loss", spy)
+    student, teacher, _, _ = _outs(requires_grad=False)
+    loss = lm.LogitDistillLoss(DistillConfig(alpha=1.0, beta=beta, temperature=1.0))
+
+    total, kl, hidden = loss(student, teacher, _mask())
+    assert len(calls) == (0 if beta == 0.0 else 1)
+    # `compute_loss` detaches it either way, so the skipped branch still owes a tensor.
+    assert float(hidden) == 0.0
+    assert float(total) == pytest.approx(float(kl))
 
 
 @pytest.mark.parametrize("missing", ["student", "teacher"])

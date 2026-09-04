@@ -87,8 +87,13 @@ class LogitDistillLoss(nn.Module):
         # `logit_kl` stays a statement about the divergence itself.
         kl = logit_kl(student_out, teacher_out, attention_mask, T) * (T**2)
 
-        # The KL constrains only the last layer; under a depth cut this is what shapes the
-        # interior, and what keeps pre-activations near the teacher's scale for `act_range`.
+        # Skipped, not scaled by zero: one masked MSE per layer over (B, S, H), each difference
+        # retained until backward, so an ablation only measures anything if it never runs.
+        if not self.cfg.beta:
+            return self.cfg.alpha * kl, kl, kl.new_zeros(())
+
+        # The KL constrains only the last layer; under a depth cut this is what supervises the
+        # interior, and what anchors an aggressive op early enough for the KL to inform it.
         hidden = layerwise_hidden_loss(
             student_out["hidden_states"],
             teacher_out["hidden_states"],
@@ -125,6 +130,45 @@ def _nll_and_agreement(student_out: dict, teacher_out: dict, batch: dict):
     return s_nll, t_nll, hits, n
 
 
+_TOTALS = ("s_nll", "t_nll", "hits", "scored", "kl", "positions")
+
+
+@torch.no_grad()
+def score_totals(backend: ModelBackend, task, model, teacher, loader, device) -> dict:
+    """Unnormalized sums over one loader. Left unnormalized so a caller scoring a source at a time
+    can add the parts and get exactly what a single pass would have read."""
+    totals = dict.fromkeys(_TOTALS, 0.0)
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        inputs = task.model_inputs(batch)
+        s_out, t_out = backend.forward(model, inputs), backend.forward(teacher, inputs)
+
+        n = int(batch["attention_mask"].sum())
+        totals["kl"] += float(logit_kl(s_out, t_out, batch["attention_mask"])) * n
+        totals["positions"] += n
+
+        s_nll, t_nll, hits, scored = _nll_and_agreement(s_out, t_out, batch)
+        totals["s_nll"] += s_nll
+        totals["t_nll"] += t_nll
+        totals["hits"] += hits
+        totals["scored"] += scored
+    return totals
+
+
+def metrics(totals: dict) -> dict:
+    scored, positions = max(totals["scored"], 1), max(totals["positions"], 1)
+    return {
+        "agreement": totals["hits"] / scored,
+        "kl": totals["kl"] / positions,
+        "ppl": math.exp(totals["s_nll"] / scored),
+        "teacher_ppl": math.exp(totals["t_nll"] / scored),
+    }
+
+
+def sum_totals(parts) -> dict:
+    return {k: sum(p[k] for p in parts) for k in _TOTALS}
+
+
 class LMDistillTask(SelfDistillTask):
     def __init__(self):
         self._loss_fn: LogitDistillLoss | None = None
@@ -145,28 +189,8 @@ class LMDistillTask(SelfDistillTask):
         self, backend: ModelBackend, model, tokenizer, cfg: Config, split="validation", teacher=None
     ) -> dict:
         _ds, loader = self.eval_loader(tokenizer, cfg, split, teacher)
-        device = next(model.parameters()).device
-
         model.eval()
-        kl_total = s_nll = t_nll = hits = 0.0
-        positions = scored = 0
-        for batch in loader:
-            batch = {k: v.to(device) for k, v in batch.items()}
-            inputs = self.model_inputs(batch)
-            s_out, t_out = backend.forward(model, inputs), backend.forward(teacher, inputs)
-
-            n = int(batch["attention_mask"].sum())
-            kl_total += float(logit_kl(s_out, t_out, batch["attention_mask"])) * n
-            positions += n
-
-            s, t, h, m = _nll_and_agreement(s_out, t_out, batch)
-            s_nll, t_nll, hits, scored = s_nll + s, t_nll + t, hits + h, scored + m
-
-        return {
-            "agreement": hits / max(scored, 1),
-            "kl": kl_total / max(positions, 1),
-            "ppl": math.exp(s_nll / max(scored, 1)),
-            "teacher_ppl": math.exp(t_nll / max(scored, 1)),
-        }
+        device = next(model.parameters()).device
+        return metrics(score_totals(backend, self, model, teacher, loader, device))
 
     # train_teacher inherits the base no-op (pretrained checkpoint is the teacher).
